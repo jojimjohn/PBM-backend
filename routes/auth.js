@@ -116,9 +116,6 @@ router.post('/login', authRateLimit, validate(schemas.login), async (req, res) =
       });
     }
 
-    // Get user permissions based on role
-    const permissions = await getUserPermissions(user.role, companyId);
-
     // Convert backend role names to frontend format
     const roleMapping = {
       'super-admin': 'SUPER_ADMIN',
@@ -129,6 +126,9 @@ router.post('/login', authRateLimit, validate(schemas.login), async (req, res) =
       'accounts-staff': 'ACCOUNTS_STAFF'
     };
     const mappedRole = roleMapping[user.role] || user.role;
+
+    // Get user permissions based on mapped role
+    const permissions = await getUserPermissions(mappedRole, companyId);
 
     // Generate tokens
     const tokens = generateTokenPair(
@@ -283,14 +283,25 @@ router.post('/refresh', validate(schemas.refreshToken), async (req, res) => {
       });
     }
 
+    // Convert backend role names to frontend format (same as login endpoint)
+    const roleMapping = {
+      'super-admin': 'SUPER_ADMIN',
+      'company-admin': 'COMPANY_ADMIN',
+      'manager': 'MANAGER',
+      'sales-staff': 'SALES_STAFF',
+      'purchase-staff': 'PURCHASE_STAFF',
+      'accounts-staff': 'ACCOUNTS_STAFF'
+    };
+    const mappedRole = roleMapping[user.role] || user.role;
+
     // Get user permissions
-    const permissions = await getUserPermissions(user.role, user.companyId);
+    const permissions = await getUserPermissions(mappedRole, user.companyId);
 
     // Generate new tokens
     const tokens = generateTokenPair(
       user.id,
       user.email,
-      user.role,
+      mappedRole,
       user.companyId,
       permissions
     );
@@ -423,5 +434,33 @@ const getUserPermissions = async (role, companyId) => {
 
   return rolePermissions[role] || [];
 };
+
+// Debug endpoint to check token permissions
+router.get('/debug-token', async (req, res) => {
+  try {
+    const authHeader = req.headers['authorization'];
+    const token = authHeader && authHeader.split(' ')[1];
+    
+    if (!token) {
+      return res.status(401).json({ error: 'No token provided' });
+    }
+    
+    const { verifyToken } = require('../utils/jwt');
+    const decoded = verifyToken(token);
+    
+    res.json({
+      success: true,
+      tokenData: {
+        userId: decoded.userId,
+        email: decoded.email,
+        role: decoded.role,
+        companyId: decoded.companyId,
+        permissions: decoded.permissions || []
+      }
+    });
+  } catch (error) {
+    res.status(401).json({ error: error.message });
+  }
+});
 
 module.exports = router;
