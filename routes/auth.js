@@ -11,6 +11,51 @@ const router = express.Router();
 // Apply sanitization to all routes
 router.use(sanitize);
 
+// Debug endpoint to get server IP information (for database whitelisting)
+router.get('/server-info', async (req, res) => {
+  try {
+    const os = require('os');
+    const dns = require('dns').promises;
+    
+    // Get network interfaces
+    const interfaces = os.networkInterfaces();
+    
+    // Get public IP (try multiple services)
+    let publicIP = 'Unknown';
+    try {
+      const response = await fetch('https://api.ipify.org?format=json');
+      const data = await response.json();
+      publicIP = data.ip;
+    } catch (error) {
+      try {
+        const response = await fetch('https://httpbin.org/ip');
+        const data = await response.json();
+        publicIP = data.origin;
+      } catch (err) {
+        console.log('Could not fetch public IP');
+      }
+    }
+    
+    res.json({
+      success: true,
+      serverInfo: {
+        hostname: os.hostname(),
+        platform: os.platform(),
+        publicIP: publicIP,
+        networkInterfaces: interfaces,
+        environment: process.env.NODE_ENV || 'development',
+        headers: req.headers,
+        railwayDomain: process.env.RAILWAY_PUBLIC_DOMAIN || 'Not set'
+      }
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      error: 'Could not retrieve server info'
+    });
+  }
+});
+
 // Login endpoint
 router.post('/login', authRateLimit, validate(schemas.login), async (req, res) => {
   try {
