@@ -83,8 +83,8 @@ const initializeDatabases = async () => {
     alRamramiDb = createConnection(process.env.AL_RAMRAMI_DB);
     prideMuscatDb = createConnection(process.env.PRIDE_MUSCAT_DB);
 
-    // Run safe migrations on startup
-    await runSafeMigrations();
+    // Skip migrations for now - tables already exist
+    // await runSafeMigrations();
 
     logger.info('🗄️ Database initialization completed');
     
