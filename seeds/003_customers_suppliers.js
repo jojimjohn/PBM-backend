@@ -160,14 +160,23 @@ exports.seed = async function(knex) {
     }
   ];
 
-  // Insert data
+  // Insert data based on which database we're connected to
   
   console.log('🏢 Seeding customers and suppliers...');
   
-  await knex('customers').insert(customers);
-  await knex('suppliers').insert(suppliers);
+  // Check if customers table exists (Al Ramrami)
+  const hasCustomersTable = await knex.schema.hasTable('customers');
+  if (hasCustomersTable) {
+    await knex('customers').insert(customers);
+    console.log(`✅ Al Ramrami: ${customers.length} customers seeded`);
+  }
   
-  console.log('✅ Customers and suppliers seeded successfully');
-  console.log(`   👥 Al Ramrami: ${customers.length} customers`);
-  console.log(`   🏭 Pride Muscat: ${suppliers.length} suppliers`);
+  // Check if suppliers table exists (Pride Muscat)
+  const hasSuppliersTable = await knex.schema.hasTable('suppliers');
+  if (hasSuppliersTable) {
+    await knex('suppliers').insert(suppliers);
+    console.log(`✅ Pride Muscat: ${suppliers.length} suppliers seeded`);
+  }
+  
+  console.log('✅ Customers and suppliers seeding completed');
 };

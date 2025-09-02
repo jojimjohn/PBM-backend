@@ -11,8 +11,8 @@
     "seed": "knex seed:run",
     "setup": "node scripts/setup.js",
     "reset-db": "knex migrate:rollback --all && knex migrate:latest && knex seed:run",
-    "deploy": "node create-proper-modular-schemas.js && npm run seed",
-    "postinstall": "npm run deploy"
+    "setup-db": "node create-proper-modular-schemas.js && npm run seed",
+    "safe-migrate": "npm run migrate && npm run seed"
   },
   "keywords": [
     "petroleum",
