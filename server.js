@@ -72,10 +72,14 @@ const corsOptions = {
     
     if (process.env.NODE_ENV === 'production') {
       // Add production origins here
-      // allowedOrigins.push('https://yourdomain.com');
+      allowedOrigins.push('https://pbm-git-main-jojimjohns-projects.vercel.app');
     }
     
-    if (allowedOrigins.indexOf(origin) !== -1) {
+    // Check if origin is in allowed list or is a Vercel deployment
+    const isAllowed = allowedOrigins.indexOf(origin) !== -1 || 
+                     (origin && origin.endsWith('.vercel.app'));
+    
+    if (isAllowed) {
       callback(null, true);
     } else {
       callback(new Error('Not allowed by CORS'));
