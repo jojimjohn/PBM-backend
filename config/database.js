@@ -83,10 +83,36 @@ const initializeDatabases = async () => {
     alRamramiDb = createConnection(process.env.AL_RAMRAMI_DB);
     prideMuscatDb = createConnection(process.env.PRIDE_MUSCAT_DB);
 
+    // Run safe migrations on startup
+    await runSafeMigrations();
+
     logger.info('🗄️ Database initialization completed');
     
   } catch (error) {
     logger.error('❌ Database initialization failed', { error: error.message });
+    throw error;
+  }
+};
+
+// Safe migration runner - only applies new migrations
+const runSafeMigrations = async () => {
+  try {
+    logger.info('🔄 Running database migrations...');
+    
+    // Run migrations for Al Ramrami database
+    if (alRamramiDb) {
+      await alRamramiDb.migrate.latest();
+      logger.info('✅ Al Ramrami migrations completed');
+    }
+    
+    // Run migrations for Pride Muscat database  
+    if (prideMuscatDb) {
+      await prideMuscatDb.migrate.latest();
+      logger.info('✅ Pride Muscat migrations completed');
+    }
+    
+  } catch (error) {
+    logger.error('❌ Migration failed', { error: error.message });
     throw error;
   }
 };
