@@ -356,68 +356,68 @@ router.post('/logout', async (req, res) => {
 
 // Get user permissions based on role and company
 const getUserPermissions = async (role, companyId) => {
-  // Define permissions based on roles (as per existing RBAC system)
+  // Define permissions based on roles using underscore format (matching route requirements)
   const rolePermissions = {
     'SUPER_ADMIN': [
-      'customers:read', 'customers:write', 'customers:delete',
-      'suppliers:read', 'suppliers:write', 'suppliers:delete',
-      'inventory:read', 'inventory:write', 'inventory:update',
-      'sales:read', 'sales:write', 'sales:process',
-      'purchases:read', 'purchases:write', 'purchases:approve',
-      'contracts:read', 'contracts:write', 'contracts:manage',
-      'wastage:read', 'wastage:write', 'wastage:approve',
-      'petty-cash:read', 'petty-cash:write', 'petty-cash:manage',
-      'expense:read', 'expense:write', 'expense:approve',
-      'reports:read', 'settings:read', 'settings:write',
-      'users:read', 'users:write', 'users:delete'
+      'VIEW_CUSTOMERS', 'CREATE_CUSTOMERS', 'EDIT_CUSTOMERS', 'DELETE_CUSTOMERS',
+      'VIEW_SUPPLIERS', 'CREATE_SUPPLIERS', 'EDIT_SUPPLIERS', 'DELETE_SUPPLIERS',
+      'VIEW_INVENTORY', 'UPDATE_INVENTORY', 'MANAGE_INVENTORY',
+      'VIEW_SALES', 'CREATE_SALES', 'PROCESS_SALES',
+      'VIEW_PURCHASES', 'CREATE_PURCHASES', 'APPROVE_PURCHASES',
+      'VIEW_CONTRACTS', 'CREATE_CONTRACTS', 'EDIT_CONTRACTS', 'MANAGE_CONTRACTS',
+      'VIEW_WASTAGE', 'CREATE_WASTAGE', 'EDIT_WASTAGE', 'APPROVE_WASTAGE',
+      'VIEW_PETTY_CASH', 'MANAGE_PETTY_CASH',
+      'VIEW_EXPENSE_REPORTS', 'CREATE_EXPENSE', 'APPROVE_EXPENSE',
+      'VIEW_REPORTS', 'VIEW_SETTINGS', 'EDIT_SETTINGS',
+      'MANAGE_USERS'
     ],
     'COMPANY_ADMIN': [
-      'customers:read', 'customers:write', 'customers:delete',
-      'suppliers:read', 'suppliers:write', 'suppliers:delete',
-      'inventory:read', 'inventory:write', 'inventory:update',
-      'sales:read', 'sales:write', 'sales:process',
-      'purchases:read', 'purchases:write', 'purchases:approve',
-      'contracts:read', 'contracts:write', 'contracts:manage',
-      'wastage:read', 'wastage:write', 'wastage:approve',
-      'petty-cash:read', 'petty-cash:write', 'petty-cash:manage',
-      'expense:read', 'expense:write', 'expense:approve',
-      'reports:read', 'settings:read',
-      'users:read', 'users:write'
+      'VIEW_CUSTOMERS', 'CREATE_CUSTOMERS', 'EDIT_CUSTOMERS', 'DELETE_CUSTOMERS',
+      'VIEW_SUPPLIERS', 'CREATE_SUPPLIERS', 'EDIT_SUPPLIERS', 'DELETE_SUPPLIERS',
+      'VIEW_INVENTORY', 'UPDATE_INVENTORY', 'MANAGE_INVENTORY',
+      'VIEW_SALES', 'CREATE_SALES', 'PROCESS_SALES',
+      'VIEW_PURCHASES', 'CREATE_PURCHASES', 'APPROVE_PURCHASES',
+      'VIEW_CONTRACTS', 'CREATE_CONTRACTS', 'EDIT_CONTRACTS', 'MANAGE_CONTRACTS',
+      'VIEW_WASTAGE', 'CREATE_WASTAGE', 'EDIT_WASTAGE', 'APPROVE_WASTAGE',
+      'VIEW_PETTY_CASH', 'MANAGE_PETTY_CASH',
+      'VIEW_EXPENSE_REPORTS', 'CREATE_EXPENSE', 'APPROVE_EXPENSE',
+      'VIEW_REPORTS', 'VIEW_SETTINGS',
+      'MANAGE_USERS'
     ],
     'MANAGER': [
-      'customers:read', 'customers:write',
-      'suppliers:read', 'suppliers:write',
-      'inventory:read', 'inventory:write',
-      'sales:read', 'sales:write', 'sales:process',
-      'purchases:read', 'purchases:write',
-      'contracts:read', 'contracts:write',
-      'wastage:read', 'wastage:approve',
-      'expense:read', 'expense:approve',
-      'reports:read'
+      'VIEW_CUSTOMERS', 'CREATE_CUSTOMERS', 'EDIT_CUSTOMERS',
+      'VIEW_SUPPLIERS', 'CREATE_SUPPLIERS', 'EDIT_SUPPLIERS',
+      'VIEW_INVENTORY', 'UPDATE_INVENTORY',
+      'VIEW_SALES', 'CREATE_SALES', 'PROCESS_SALES',
+      'VIEW_PURCHASES', 'CREATE_PURCHASES',
+      'VIEW_CONTRACTS', 'CREATE_CONTRACTS', 'EDIT_CONTRACTS',
+      'VIEW_WASTAGE', 'APPROVE_WASTAGE',
+      'VIEW_EXPENSE_REPORTS', 'APPROVE_EXPENSE',
+      'VIEW_REPORTS'
     ],
-    'SALES': [
-      'customers:read', 'customers:write',
-      'inventory:read',
-      'sales:read', 'sales:write',
-      'contracts:read',
-      'wastage:read',
-      'expense:read'
+    'SALES_STAFF': [
+      'VIEW_CUSTOMERS', 'CREATE_CUSTOMERS', 'EDIT_CUSTOMERS',
+      'VIEW_INVENTORY',
+      'VIEW_SALES', 'CREATE_SALES',
+      'VIEW_CONTRACTS',
+      'VIEW_WASTAGE',
+      'VIEW_EXPENSE_REPORTS'
     ],
-    'PURCHASE': [
-      'suppliers:read', 'suppliers:write',
-      'inventory:read', 'inventory:write', 'inventory:update',
-      'purchases:read', 'purchases:write',
-      'wastage:read', 'wastage:write',
-      'expense:read', 'expense:write'
+    'PURCHASE_STAFF': [
+      'VIEW_SUPPLIERS', 'CREATE_SUPPLIERS', 'EDIT_SUPPLIERS',
+      'VIEW_INVENTORY', 'UPDATE_INVENTORY',
+      'VIEW_PURCHASES', 'CREATE_PURCHASES',
+      'VIEW_WASTAGE', 'CREATE_WASTAGE', 'EDIT_WASTAGE',
+      'VIEW_EXPENSE_REPORTS', 'CREATE_EXPENSE'
     ],
-    'ACCOUNTS': [
-      'inventory:read',
-      'sales:read',
-      'purchases:read',
-      'wastage:read',
-      'petty-cash:read', 'petty-cash:write',
-      'expense:read', 'expense:write',
-      'reports:read'
+    'ACCOUNTS_STAFF': [
+      'VIEW_INVENTORY',
+      'VIEW_SALES',
+      'VIEW_PURCHASES',
+      'VIEW_WASTAGE',
+      'VIEW_PETTY_CASH', 'MANAGE_PETTY_CASH',
+      'VIEW_EXPENSE_REPORTS', 'CREATE_EXPENSE',
+      'VIEW_REPORTS'
     ]
   };
 
