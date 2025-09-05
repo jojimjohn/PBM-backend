@@ -136,6 +136,60 @@ router.get('/', requirePermission('VIEW_SALES'), async (req, res) => {
   }
 });
 
+// GET /api/sales-orders/today-summary - Get today's sales summary
+router.get('/today-summary', requirePermission('VIEW_SALES'), async (req, res) => {
+  try {
+    const { companyId } = req.user;
+    const db = getDbConnection(companyId);
+    
+    // Get today's date range
+    const today = new Date();
+    const todayStart = new Date(today.getFullYear(), today.getMonth(), today.getDate());
+    const todayEnd = new Date(todayStart);
+    todayEnd.setDate(todayEnd.getDate() + 1);
+
+    // Get today's sales summary
+    const summary = await db('sales_orders')
+      .select(
+        db.raw('COUNT(*) as totalOrders'),
+        db.raw('COALESCE(SUM(totalAmount), 0) as totalSales'),
+        db.raw('COUNT(CASE WHEN status IN (\'draft\', \'confirmed\') THEN 1 END) as pendingOrders')
+      )
+      .where('orderDate', '>=', todayStart)
+      .where('orderDate', '<', todayEnd)
+      .first();
+
+    const result = {
+      totalSales: parseFloat(summary.totalSales || 0),
+      totalOrders: parseInt(summary.totalOrders || 0),
+      pendingOrders: parseInt(summary.pendingOrders || 0)
+    };
+
+    auditLog('SALES_SUMMARY_VIEWED', req.user.userId, {
+      companyId,
+      date: today.toISOString().split('T')[0],
+      summary: result
+    });
+
+    res.json({
+      success: true,
+      data: result,
+      message: 'Today\'s sales summary retrieved successfully'
+    });
+
+  } catch (error) {
+    logger.error('Error fetching today\'s sales summary', { 
+      error: error.message, 
+      userId: req.user.userId,
+      companyId: req.user.companyId
+    });
+    res.status(500).json({
+      success: false,
+      error: 'Failed to fetch today\'s sales summary'
+    });
+  }
+});
+
 // GET /api/sales-orders/:id - Get specific sales order with items
 router.get('/:id', 
   validateParams(Joi.object({ id: Joi.number().integer().positive().required() })),

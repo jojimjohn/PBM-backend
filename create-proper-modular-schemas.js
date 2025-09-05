@@ -8,7 +8,7 @@ const companies = {
   'al-ramrami': {
     name: 'Al Ramrami Trading',
     database: process.env.AL_RAMRAMI_DB,
-    modules: ["dashboard", "customers", "inventory", "sales", "purchase", "contracts", "wastage", "petty-cash", "reports", "settings"]
+    modules: ["dashboard", "customers", "suppliers", "inventory", "sales", "purchase", "contracts", "wastage", "petty-cash", "reports", "settings"]
   },
   'pride-muscat': {
     name: 'Pride Muscat International',
@@ -234,8 +234,8 @@ async function main() {
     });
     
     console.log('✅ Architecture now properly reflects business requirements!');
-    console.log('   - Al Ramrami: Has customers, contracts (no suppliers module)');
-    console.log('   - Pride Muscat: Has suppliers (no customers, contracts modules)');
+    console.log('   - Al Ramrami: Has customers, suppliers, contracts (oil trading business)');
+    console.log('   - Pride Muscat: Has suppliers (no customers, contracts - scrap business)');
     console.log('   - Both: Can handle sales/purchases with flexible entity references');
     
   } catch (error) {

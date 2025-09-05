@@ -88,6 +88,43 @@ router.get('/', requirePermission('VIEW_WASTAGE'), async (req, res) => {
   }
 });
 
+// GET /wastages/types - Get available wastage types
+router.get('/types', async (req, res) => {
+  try {
+    const types = [
+      { value: 'spillage', label: 'Spillage' },
+      { value: 'contamination', label: 'Contamination' },
+      { value: 'expiry', label: 'Expiry' },
+      { value: 'damage', label: 'Damage' },
+      { value: 'theft', label: 'Theft' },
+      { value: 'evaporation', label: 'Evaporation' },
+      { value: 'sorting_loss', label: 'Sorting Loss' },
+      { value: 'quality_rejection', label: 'Quality Rejection' },
+      { value: 'transport_loss', label: 'Transport Loss' },
+      { value: 'handling_damage', label: 'Handling Damage' },
+      { value: 'other', label: 'Other' }
+    ];
+
+    res.json({
+      success: true,
+      data: types,
+      message: 'Wastage types retrieved successfully'
+    });
+
+  } catch (error) {
+    winston.error('Error fetching wastage types', {
+      error: error.message,
+      companyId: req.user?.companyId,
+      userId: req.user?.id
+    });
+
+    res.status(500).json({
+      success: false,
+      error: 'Internal server error'
+    });
+  }
+});
+
 // GET /wastages/:id - Get specific wastage
 router.get('/:id', requirePermission('VIEW_WASTAGE'), async (req, res) => {
   try {

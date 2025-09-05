@@ -367,14 +367,52 @@ router.post('/logout', async (req, res) => {
 
 // Get user permissions based on role and company
 const getUserPermissions = async (role, companyId) => {
-  // Define permissions based on roles using underscore format (matching route requirements)
+  // In development mode, grant all permissions to make testing easier
+  if (process.env.NODE_ENV === 'development') {
+    console.log('🔓 DEVELOPMENT MODE: Granting all permissions to', role);
+    return [
+      // Customer permissions
+      'VIEW_CUSTOMERS', 'CREATE_CUSTOMERS', 'EDIT_CUSTOMERS', 'DELETE_CUSTOMERS',
+      // Supplier permissions
+      'VIEW_SUPPLIERS', 'CREATE_SUPPLIERS', 'EDIT_SUPPLIERS', 'DELETE_SUPPLIERS',
+      // Inventory permissions
+      'VIEW_INVENTORY', 'UPDATE_INVENTORY', 'MANAGE_INVENTORY',
+      // Sales permissions
+      'VIEW_SALES', 'CREATE_SALES', 'PROCESS_SALES', 'EDIT_SALES', 'DELETE_SALES', 'APPROVE_SALES',
+      // Purchase permissions
+      'VIEW_PURCHASE', 'VIEW_PURCHASES', 'CREATE_PURCHASE', 'CREATE_PURCHASES', 'EDIT_PURCHASE', 'EDIT_PURCHASES', 
+      'DELETE_PURCHASE', 'DELETE_PURCHASES', 'APPROVE_PURCHASE', 'APPROVE_PURCHASES',
+      // Contract permissions  
+      'VIEW_CONTRACTS', 'CREATE_CONTRACTS', 'EDIT_CONTRACTS', 'MANAGE_CONTRACTS', 'APPROVE_CONTRACTS',
+      // Wastage permissions
+      'VIEW_WASTAGE', 'CREATE_WASTAGE', 'EDIT_WASTAGE', 'DELETE_WASTAGE', 'APPROVE_WASTAGE',
+      // Petty cash permissions
+      'VIEW_PETTY_CASH', 'MANAGE_PETTY_CASH', 'CREATE_PETTY_CASH', 'EDIT_PETTY_CASH', 'RELOAD_CARD',
+      // Expense permissions
+      'VIEW_EXPENSE_REPORTS', 'CREATE_EXPENSE', 'EDIT_EXPENSE', 'DELETE_EXPENSE', 'APPROVE_EXPENSE',
+      // Material permissions
+      'VIEW_MATERIALS', 'CREATE_MATERIALS', 'EDIT_MATERIALS', 'DELETE_MATERIALS',
+      // Financial permissions
+      'VIEW_FINANCIALS', 'MANAGE_EXPENSES', 'VIEW_PROFIT_LOSS',
+      // Report permissions
+      'VIEW_REPORTS', 'EXPORT_REPORTS', 'CREATE_CUSTOM_REPORTS',
+      // Settings permissions
+      'VIEW_SETTINGS', 'EDIT_SETTINGS', 'MANAGE_SETTINGS',
+      // User permissions
+      'MANAGE_USERS', 'VIEW_USERS', 'ASSIGN_ROLES',
+      // Audit permissions
+      'VIEW_AUDIT_LOGS'
+    ];
+  }
+
+  // Production permissions based on roles using underscore format (matching route requirements)
   const rolePermissions = {
     'SUPER_ADMIN': [
       'VIEW_CUSTOMERS', 'CREATE_CUSTOMERS', 'EDIT_CUSTOMERS', 'DELETE_CUSTOMERS',
       'VIEW_SUPPLIERS', 'CREATE_SUPPLIERS', 'EDIT_SUPPLIERS', 'DELETE_SUPPLIERS',
       'VIEW_INVENTORY', 'UPDATE_INVENTORY', 'MANAGE_INVENTORY',
       'VIEW_SALES', 'CREATE_SALES', 'PROCESS_SALES',
-      'VIEW_PURCHASES', 'CREATE_PURCHASES', 'APPROVE_PURCHASES',
+      'VIEW_PURCHASE', 'VIEW_PURCHASES', 'CREATE_PURCHASE', 'CREATE_PURCHASES', 'APPROVE_PURCHASES',
       'VIEW_CONTRACTS', 'CREATE_CONTRACTS', 'EDIT_CONTRACTS', 'MANAGE_CONTRACTS',
       'VIEW_WASTAGE', 'CREATE_WASTAGE', 'EDIT_WASTAGE', 'APPROVE_WASTAGE',
       'VIEW_PETTY_CASH', 'MANAGE_PETTY_CASH',
@@ -387,7 +425,7 @@ const getUserPermissions = async (role, companyId) => {
       'VIEW_SUPPLIERS', 'CREATE_SUPPLIERS', 'EDIT_SUPPLIERS', 'DELETE_SUPPLIERS',
       'VIEW_INVENTORY', 'UPDATE_INVENTORY', 'MANAGE_INVENTORY',
       'VIEW_SALES', 'CREATE_SALES', 'PROCESS_SALES',
-      'VIEW_PURCHASES', 'CREATE_PURCHASES', 'APPROVE_PURCHASES',
+      'VIEW_PURCHASE', 'VIEW_PURCHASES', 'CREATE_PURCHASE', 'CREATE_PURCHASES', 'APPROVE_PURCHASES',
       'VIEW_CONTRACTS', 'CREATE_CONTRACTS', 'EDIT_CONTRACTS', 'MANAGE_CONTRACTS',
       'VIEW_WASTAGE', 'CREATE_WASTAGE', 'EDIT_WASTAGE', 'APPROVE_WASTAGE',
       'VIEW_PETTY_CASH', 'MANAGE_PETTY_CASH',
@@ -400,7 +438,7 @@ const getUserPermissions = async (role, companyId) => {
       'VIEW_SUPPLIERS', 'CREATE_SUPPLIERS', 'EDIT_SUPPLIERS',
       'VIEW_INVENTORY', 'UPDATE_INVENTORY',
       'VIEW_SALES', 'CREATE_SALES', 'PROCESS_SALES',
-      'VIEW_PURCHASES', 'CREATE_PURCHASES',
+      'VIEW_PURCHASE', 'VIEW_PURCHASES', 'CREATE_PURCHASE', 'CREATE_PURCHASES',
       'VIEW_CONTRACTS', 'CREATE_CONTRACTS', 'EDIT_CONTRACTS',
       'VIEW_WASTAGE', 'APPROVE_WASTAGE',
       'VIEW_EXPENSE_REPORTS', 'APPROVE_EXPENSE',
@@ -417,14 +455,14 @@ const getUserPermissions = async (role, companyId) => {
     'PURCHASE_STAFF': [
       'VIEW_SUPPLIERS', 'CREATE_SUPPLIERS', 'EDIT_SUPPLIERS',
       'VIEW_INVENTORY', 'UPDATE_INVENTORY',
-      'VIEW_PURCHASES', 'CREATE_PURCHASES',
+      'VIEW_PURCHASE', 'VIEW_PURCHASES', 'CREATE_PURCHASE', 'CREATE_PURCHASES',
       'VIEW_WASTAGE', 'CREATE_WASTAGE', 'EDIT_WASTAGE',
       'VIEW_EXPENSE_REPORTS', 'CREATE_EXPENSE'
     ],
     'ACCOUNTS_STAFF': [
       'VIEW_INVENTORY',
       'VIEW_SALES',
-      'VIEW_PURCHASES',
+      'VIEW_PURCHASE', 'VIEW_PURCHASES',
       'VIEW_WASTAGE',
       'VIEW_PETTY_CASH', 'MANAGE_PETTY_CASH',
       'VIEW_EXPENSE_REPORTS', 'CREATE_EXPENSE',

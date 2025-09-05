@@ -250,6 +250,125 @@ router.get('/alerts', requirePermission('VIEW_INVENTORY'), async (req, res) => {
   }
 });
 
+// GET /api/inventory/material/:materialId/stock - Get current stock for material
+router.get('/material/:materialId/stock',
+  validateParams(Joi.object({ materialId: Joi.number().integer().positive().required() })),
+  requirePermission('VIEW_INVENTORY'),
+  async (req, res) => {
+    try {
+      const { materialId } = req.params;
+      const { companyId } = req.user;
+      const db = getDbConnection(companyId);
+
+      // Get stock summary for the material
+      const stockSummary = await db('inventory')
+        .leftJoin('materials', 'inventory.materialId', 'materials.id')
+        .select(
+          'materials.id as materialId',
+          'materials.name as materialName',
+          'materials.code as materialCode',
+          'materials.category',
+          'materials.unit',
+          'materials.standardPrice',
+          db.raw('COALESCE(SUM(inventory.quantity), 0) as totalQuantity'),
+          db.raw('COALESCE(SUM(inventory.reservedQuantity), 0) as reservedQuantity'),
+          db.raw('COALESCE(SUM(inventory.quantity - inventory.reservedQuantity), 0) as availableQuantity'),
+          db.raw('COALESCE(AVG(inventory.averageCost), 0) as averageCost'),
+          db.raw('COALESCE(SUM(inventory.quantity * inventory.averageCost), 0) as totalValue'),
+          db.raw('MIN(inventory.minimumStockLevel) as minimumStockLevel'),
+          db.raw('MAX(inventory.maximumStockLevel) as maximumStockLevel')
+        )
+        .where('materials.id', materialId)
+        .where('materials.isActive', true)
+        .where('inventory.isActive', true)
+        .groupBy('materials.id')
+        .first();
+
+      if (!stockSummary || !stockSummary.materialId) {
+        // Material exists but no inventory entries
+        const material = await db('materials')
+          .where({ id: materialId, isActive: true })
+          .first();
+
+        if (!material) {
+          return res.status(404).json({
+            success: false,
+            error: 'Material not found'
+          });
+        }
+
+        // Return zero stock for material with no inventory
+        return res.json({
+          success: true,
+          data: {
+            materialId: material.id,
+            materialName: material.name,
+            materialCode: material.code,
+            category: material.category,
+            unit: material.unit,
+            standardPrice: parseFloat(material.standardPrice || 0),
+            totalQuantity: 0,
+            reservedQuantity: 0,
+            availableQuantity: 0,
+            averageCost: 0,
+            totalValue: 0,
+            minimumStockLevel: 0,
+            maximumStockLevel: 0,
+            stockStatus: 'out-of-stock'
+          }
+        });
+      }
+
+      // Determine stock status
+      let stockStatus = 'in-stock';
+      if (stockSummary.availableQuantity <= 0) {
+        stockStatus = 'out-of-stock';
+      } else if (stockSummary.availableQuantity <= (stockSummary.minimumStockLevel || 0)) {
+        stockStatus = 'low-stock';
+      }
+
+      const result = {
+        materialId: parseInt(stockSummary.materialId),
+        materialName: stockSummary.materialName,
+        materialCode: stockSummary.materialCode,
+        category: stockSummary.category,
+        unit: stockSummary.unit,
+        standardPrice: parseFloat(stockSummary.standardPrice || 0),
+        totalQuantity: parseFloat(stockSummary.totalQuantity || 0),
+        reservedQuantity: parseFloat(stockSummary.reservedQuantity || 0),
+        availableQuantity: parseFloat(stockSummary.availableQuantity || 0),
+        averageCost: parseFloat(stockSummary.averageCost || 0),
+        totalValue: parseFloat(stockSummary.totalValue || 0),
+        minimumStockLevel: parseFloat(stockSummary.minimumStockLevel || 0),
+        maximumStockLevel: parseFloat(stockSummary.maximumStockLevel || 0),
+        stockStatus
+      };
+
+      auditLog('MATERIAL_STOCK_VIEWED', req.user.userId, {
+        materialId,
+        materialName: stockSummary.materialName,
+        availableQuantity: result.availableQuantity
+      });
+
+      res.json({
+        success: true,
+        data: result
+      });
+
+    } catch (error) {
+      logger.error('Error fetching material stock', { 
+        error: error.message, 
+        materialId: req.params.materialId,
+        userId: req.user.userId
+      });
+      res.status(500).json({
+        success: false,
+        error: 'Failed to fetch material stock'
+      });
+    }
+  }
+);
+
 // GET /api/inventory/:id - Get specific inventory item
 router.get('/:id', 
   validateParams(Joi.object({ id: Joi.number().integer().positive().required() })),

@@ -15,15 +15,14 @@ const purchaseOrderSchema = Joi.object({
   supplierId: Joi.number().integer().positive().required(),
   orderDate: Joi.date().default(() => new Date()),
   expectedDeliveryDate: Joi.date().optional(),
-  orderStatus: Joi.string().valid('draft', 'sent', 'confirmed', 'received', 'cancelled').default('draft'),
+  status: Joi.string().valid('draft', 'pending', 'approved', 'sent', 'received', 'completed', 'cancelled').default('draft'),
   paymentStatus: Joi.string().valid('pending', 'partial', 'paid').default('pending'),
   subtotal: Joi.number().min(0).precision(3).default(0),
   taxAmount: Joi.number().min(0).precision(3).default(0),
   totalAmount: Joi.number().min(0).precision(3).default(0),
   discountAmount: Joi.number().min(0).precision(3).default(0),
   shippingCost: Joi.number().min(0).precision(3).default(0),
-  notes: Joi.string().allow('').optional(),
-  isActive: Joi.boolean().default(true)
+  notes: Joi.string().allow('').optional()
 });
 
 // Purchase order item validation schema
@@ -47,7 +46,7 @@ router.get('/', requirePermission('VIEW_PURCHASE'), async (req, res) => {
       limit = 50, 
       search = '', 
       supplierId = '',
-      orderStatus = '',
+      status = '',
       paymentStatus = '',
       fromDate = '',
       toDate = ''
@@ -63,7 +62,7 @@ router.get('/', requirePermission('VIEW_PURCHASE'), async (req, res) => {
         'suppliers.specialization',
         db.raw('(SELECT COUNT(*) FROM purchase_order_items WHERE purchase_order_items.purchaseOrderId = purchase_orders.id) as itemCount')
       )
-      .where('purchase_orders.isActive', true);
+      .whereNot('purchase_orders.status', 'cancelled');
 
     // Search filter
     if (search) {
@@ -79,9 +78,9 @@ router.get('/', requirePermission('VIEW_PURCHASE'), async (req, res) => {
       query = query.where('purchase_orders.supplierId', supplierId);
     }
 
-    // Order status filter
-    if (orderStatus) {
-      query = query.where('purchase_orders.orderStatus', orderStatus);
+    // Status filter
+    if (status) {
+      query = query.where('purchase_orders.status', status);
     }
 
     // Payment status filter
@@ -111,7 +110,7 @@ router.get('/', requirePermission('VIEW_PURCHASE'), async (req, res) => {
     auditLog('PURCHASE_ORDERS_VIEWED', req.user.userId, {
       companyId,
       count: orders.length,
-      filters: { search, supplierId, orderStatus, paymentStatus, fromDate, toDate }
+      filters: { search, supplierId, status, paymentStatus, fromDate, toDate }
     });
 
     res.json({
@@ -221,7 +220,7 @@ router.post('/',
 
       // Validate supplier exists
       const supplier = await db('suppliers')
-        .where({ id: req.body.supplierId, isActive: true })
+        .where({ id: req.body.supplierId })
         .first();
 
       if (!supplier) {
@@ -298,8 +297,8 @@ router.post('/:id/items',
 
       // Verify order exists and is editable
       const order = await db('purchase_orders')
-        .where({ id, isActive: true })
-        .whereIn('orderStatus', ['draft', 'sent'])
+        .where({ id })
+        .whereIn('status', ['draft', 'pending'])
         .first();
 
       if (!order) {
@@ -311,7 +310,7 @@ router.post('/:id/items',
 
       // Verify material exists
       const material = await db('materials')
-        .where({ id: req.body.materialId, isActive: true })
+        .where({ id: req.body.materialId })
         .first();
 
       if (!material) {
@@ -412,7 +411,7 @@ router.put('/:id/receive',
       const db = getDbConnection(companyId);
 
       const order = await db('purchase_orders')
-        .where({ id, isActive: true, orderStatus: 'confirmed' })
+        .where({ id, status: 'approved' })
         .first();
 
       if (!order) {
@@ -472,7 +471,7 @@ router.put('/:id/receive',
         await trx('purchase_orders')
           .where({ id })
           .update({
-            orderStatus: 'received',
+            status: 'received',
             notes: notes ? `${order.notes || ''}\nReceived: ${notes}` : order.notes,
             updated_at: new Date()
           });
@@ -498,6 +497,204 @@ router.put('/:id/receive',
       res.status(500).json({
         success: false,
         error: 'Failed to receive purchase order'
+      });
+    }
+  }
+);
+
+// POST /api/purchase-orders/:id/approve - Approve a purchase order
+router.post('/:id/approve',
+  validateParams(Joi.object({
+    id: Joi.number().integer().positive().required()
+  })),
+  validate(Joi.object({
+    approvalNotes: Joi.string().allow('').optional(),
+    approvedAmount: Joi.number().min(0).precision(3).optional()
+  })),
+  requirePermission('APPROVE_PURCHASE'),
+  async (req, res) => {
+    try {
+      const { id } = req.params;
+      const { approvalNotes, approvedAmount } = req.body;
+      const { companyId, userId } = req.user;
+      const db = getDbConnection(companyId);
+
+      const order = await db('purchase_orders')
+        .where({ id, status: 'draft' })
+        .first();
+
+      if (!order) {
+        return res.status(404).json({
+          success: false,
+          error: 'Purchase order not found or not ready for approval'
+        });
+      }
+
+      await db('purchase_orders')
+        .where({ id })
+        .update({
+          status: 'approved',
+          approvedBy: userId,
+          approvedAt: new Date(),
+          notes: approvalNotes ? `${order.notes || ''}\nApproval: ${approvalNotes}` : order.notes,
+          updated_at: new Date()
+        });
+
+      auditLog('PURCHASE_ORDER_APPROVED', userId, {
+        purchaseOrderId: id,
+        orderNumber: order.orderNumber,
+        originalAmount: order.totalAmount,
+        approvedAmount: approvedAmount || order.totalAmount,
+        approvalNotes
+      });
+
+      res.json({
+        success: true,
+        message: 'Purchase order approved successfully'
+      });
+
+    } catch (error) {
+      logger.error('Error approving purchase order', { 
+        error: error.message, 
+        purchaseOrderId: req.params.id,
+        userId: req.user.userId
+      });
+      res.status(500).json({
+        success: false,
+        error: 'Failed to approve purchase order'
+      });
+    }
+  }
+);
+
+// PATCH /api/purchase-orders/:id/status - Update purchase order status
+router.patch('/:id/status',
+  validateParams(Joi.object({
+    id: Joi.number().integer().positive().required()
+  })),
+  validate(Joi.object({
+    status: Joi.string().valid('draft', 'pending', 'approved', 'sent', 'received', 'completed', 'cancelled').required(),
+    notes: Joi.string().allow('').optional()
+  })),
+  requirePermission('EDIT_PURCHASE'),
+  async (req, res) => {
+    try {
+      const { id } = req.params;
+      const { status, notes } = req.body;
+      const { companyId, userId } = req.user;
+      const db = getDbConnection(companyId);
+
+      const order = await db('purchase_orders')
+        .where({ id })
+        .first();
+
+      if (!order) {
+        return res.status(404).json({
+          success: false,
+          error: 'Purchase order not found'
+        });
+      }
+
+      // Validate status transitions
+      const validTransitions = {
+        'draft': ['pending', 'approved', 'cancelled'],
+        'pending': ['approved', 'cancelled'],
+        'approved': ['sent', 'cancelled'],
+        'sent': ['received', 'cancelled'],
+        'received': ['completed'],
+        'completed': [], // Final state
+        'cancelled': [] // Final state
+      };
+
+      if (!validTransitions[order.status]?.includes(status)) {
+        return res.status(400).json({
+          success: false,
+          error: `Cannot change status from ${order.status} to ${status}`
+        });
+      }
+
+      const updateData = {
+        status: status,
+        updated_at: new Date()
+      };
+
+      if (notes) {
+        updateData.notes = order.notes ? `${order.notes}\nStatus Update: ${notes}` : notes;
+      }
+
+      // Add status-specific fields
+      if (status === 'sent') {
+        updateData.sentAt = new Date();
+        updateData.sentBy = userId;
+      } else if (status === 'cancelled') {
+        updateData.cancelledAt = new Date();
+        updateData.cancelledBy = userId;
+      }
+
+      await db('purchase_orders')
+        .where({ id })
+        .update(updateData);
+
+      auditLog('PURCHASE_ORDER_STATUS_CHANGED', userId, {
+        purchaseOrderId: id,
+        orderNumber: order.orderNumber,
+        fromStatus: order.status,
+        toStatus: status,
+        notes
+      });
+
+      res.json({
+        success: true,
+        message: `Purchase order status updated to ${status} successfully`
+      });
+
+    } catch (error) {
+      logger.error('Error updating purchase order status', { 
+        error: error.message, 
+        purchaseOrderId: req.params.id,
+        userId: req.user.userId
+      });
+      res.status(500).json({
+        success: false,
+        error: 'Failed to update purchase order status'
+      });
+    }
+  }
+);
+
+// GET /api/purchase-orders/pending - Get pending purchase orders for approval
+router.get('/pending', 
+  requirePermission('VIEW_PURCHASE'),
+  async (req, res) => {
+    try {
+      const { companyId } = req.user;
+      const db = getDbConnection(companyId);
+      
+      const pendingOrders = await db('purchase_orders')
+        .leftJoin('suppliers', 'purchase_orders.supplierId', 'suppliers.id')
+        .select(
+          'purchase_orders.*',
+          'suppliers.name as supplierName',
+          'suppliers.contactPerson as supplierContact'
+        )
+        .where('purchase_orders.status', 'draft')
+        .orderBy('purchase_orders.created_at', 'desc');
+
+      res.json({
+        success: true,
+        data: pendingOrders,
+        message: 'Pending purchase orders retrieved successfully'
+      });
+
+    } catch (error) {
+      logger.error('Error fetching pending purchase orders', { 
+        error: error.message, 
+        userId: req.user.userId,
+        companyId: req.user.companyId
+      });
+      res.status(500).json({
+        success: false,
+        error: 'Failed to fetch pending purchase orders'
       });
     }
   }
