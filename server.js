@@ -73,6 +73,7 @@ const corsOptions = {
     if (process.env.NODE_ENV === 'production') {
       // Add production origins here
       allowedOrigins.push('https://pbm-git-main-jojimjohns-projects.vercel.app');
+      allowedOrigins.push('https://pbm-one.vercel.app');
     }
     
     // Check if origin is in allowed list or is a Vercel deployment
