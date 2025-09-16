@@ -10,19 +10,67 @@ const router = express.Router();
 // Apply sanitization to all routes
 router.use(sanitize);
 
-// Supplier validation schema
+// Supplier validation schema - Based on UPDATED database schema
 const supplierSchema = Joi.object({
+  // Core fields that exist in database
+  code: Joi.string().max(50).optional(), // Now exists in database
   name: Joi.string().min(2).max(200).required().trim(),
   email: Joi.string().email().max(255).allow('').optional(),
   phone: Joi.string().max(20).allow('').optional(),
   address: Joi.string().allow('').optional(),
+  city: Joi.string().max(100).allow('').optional(), // Added city field
+  region_id: Joi.number().integer().positive().allow(null).optional(),
   vatRegistration: Joi.string().max(50).allow('').optional(),
   contactPerson: Joi.string().max(100).allow('').optional(),
-  specialization: Joi.string().max(100).allow('').optional(),
+  businessRegistration: Joi.string().max(100).allow('').optional(), // Now exists in database
+  nationalId: Joi.string().max(50).allow('').optional(), // Now exists in database
+  taxNumber: Joi.string().max(50).allow('').optional(), // Now exists in database
+  specialization: Joi.alternatives().try(
+    Joi.string().max(100).allow('').optional(),
+    Joi.array().items(Joi.alternatives().try(Joi.string(), Joi.number())).optional()
+  ),
   creditBalance: Joi.number().min(0).precision(2).default(0),
   paymentTermDays: Joi.number().integer().min(0).default(0),
+  bankName: Joi.string().max(100).allow('').optional(), // Now exists in database
+  accountNumber: Joi.string().max(50).allow('').optional(), // Now exists in database
+  iban: Joi.string().max(50).allow('').optional(), // Now exists in database
   notes: Joi.string().allow('').optional(),
-  isActive: Joi.boolean().default(true)
+  isActive: Joi.boolean().default(true),
+  
+  // Frontend nested objects (will be transformed to flat structure)
+  contact: Joi.object({
+    phone: Joi.string().max(20).allow('').optional(),
+    email: Joi.string().email().max(255).allow('').optional(),
+    vatRegistrationNumber: Joi.string().max(50).allow('').optional(),
+    address: Joi.object({
+      street: Joi.string().allow('').optional(),
+      city: Joi.string().allow('').optional(),
+      region: Joi.string().allow('').optional(),
+      country: Joi.string().allow('').optional()
+    }).optional()
+  }).optional(),
+  
+  bankDetails: Joi.object({
+    bankName: Joi.string().max(100).allow('').optional(),
+    accountNumber: Joi.string().max(50).allow('').optional(),
+    iban: Joi.string().max(50).allow('').optional()
+  }).optional(),
+  
+  // Frontend-only fields (will be ignored during transformation)
+  id: Joi.alternatives().try(Joi.number(), Joi.string()).optional(),
+  type: Joi.string().allow('').optional(),
+  street: Joi.string().allow('').optional(),
+  city: Joi.string().allow('').optional(),
+  region: Joi.string().allow('').optional(),
+  vatRegistrationNumber: Joi.string().allow('').optional(),
+  collectionAreas: Joi.array().optional(),
+  category: Joi.string().allow('').optional(), // Frontend-only field - ignore
+  status: Joi.string().allow('').optional(),
+  paymentTerms: Joi.number().integer().min(0).optional(),
+  createdAt: Joi.string().isoDate().optional(),
+  lastTransaction: Joi.string().isoDate().allow(null).optional(),
+  performance: Joi.object().optional(),
+  purchaseHistory: Joi.object().optional()
 });
 
 // GET /api/suppliers - List all suppliers
@@ -154,8 +202,23 @@ router.post('/',
   requirePermission('MANAGE_SUPPLIERS'),
   async (req, res) => {
     try {
+      console.log('Creating supplier - raw request body:', JSON.stringify(req.body, null, 2));
       const { companyId } = req.user;
       const db = getDbConnection(companyId);
+
+      // Check if supplier with same code already exists (if code provided)
+      if (req.body.code) {
+        const existingSupplierByCode = await db('suppliers')
+          .where({ code: req.body.code })
+          .first();
+
+        if (existingSupplierByCode) {
+          return res.status(400).json({
+            success: false,
+            error: 'Supplier with this code already exists'
+          });
+        }
+      }
 
       // Check if supplier with same email already exists (if email provided)
       if (req.body.email) {
@@ -171,12 +234,37 @@ router.post('/',
         }
       }
 
+      // Transform frontend data to match UPDATED database schema
       const supplierData = {
-        ...req.body,
+        code: req.body.code || null,
+        name: req.body.name,
+        email: req.body.email || req.body.contact?.email || null,
+        phone: req.body.phone || req.body.contact?.phone || null,
+        address: req.body.address || (req.body.contact?.address ? 
+          [req.body.contact.address.street, req.body.contact.address.region, req.body.contact.address.country]
+          .filter(Boolean).join(', ') : null),
+        city: req.body.city || req.body.contact?.address?.city || null,
+        region_id: req.body.region_id || null,
+        vatRegistration: req.body.vatRegistration || req.body.contact?.vatRegistrationNumber || null,
+        contactPerson: req.body.contactPerson || null,
+        businessRegistration: req.body.businessRegistration || null,
+        nationalId: req.body.nationalId || null,
+        taxNumber: req.body.taxNumber || null,
+        specialization: Array.isArray(req.body.specialization) ? 
+          req.body.specialization.map(s => s.toString()).join(',') : 
+          (req.body.specialization || null),
+        creditBalance: req.body.creditBalance || 0,
+        paymentTermDays: req.body.paymentTerms || req.body.paymentTermDays || 0,
+        bankName: req.body.bankName || req.body.bankDetails?.bankName || null,
+        accountNumber: req.body.accountNumber || req.body.bankDetails?.accountNumber || null,
+        iban: req.body.iban || req.body.bankDetails?.iban || null,
+        notes: req.body.notes || null,
+        isActive: req.body.isActive !== false,
         created_at: new Date(),
         updated_at: new Date()
       };
 
+      console.log('Transformed supplier data for DB insertion:', JSON.stringify(supplierData, null, 2));
       const [supplierId] = await db('suppliers').insert(supplierData);
       
       const newSupplier = await db('suppliers')
@@ -253,8 +341,32 @@ router.put('/:id',
         }
       }
 
+      // Transform frontend data to match UPDATED database schema
       const updateData = {
-        ...req.body,
+        code: req.body.code || null,
+        name: req.body.name,
+        email: req.body.email || req.body.contact?.email || null,
+        phone: req.body.phone || req.body.contact?.phone || null,
+        address: req.body.address || (req.body.contact?.address ? 
+          [req.body.contact.address.street, req.body.contact.address.region, req.body.contact.address.country]
+          .filter(Boolean).join(', ') : null),
+        city: req.body.city || req.body.contact?.address?.city || null,
+        region_id: req.body.region_id || null,
+        vatRegistration: req.body.vatRegistration || req.body.contact?.vatRegistrationNumber || null,
+        contactPerson: req.body.contactPerson || null,
+        businessRegistration: req.body.businessRegistration || null,
+        nationalId: req.body.nationalId || null,
+        taxNumber: req.body.taxNumber || null,
+        specialization: Array.isArray(req.body.specialization) ? 
+          req.body.specialization.map(s => s.toString()).join(',') : 
+          (req.body.specialization || null),
+        creditBalance: req.body.creditBalance || 0,
+        paymentTermDays: req.body.paymentTerms || req.body.paymentTermDays || 0,
+        bankName: req.body.bankName || req.body.bankDetails?.bankName || null,
+        accountNumber: req.body.accountNumber || req.body.bankDetails?.accountNumber || null,
+        iban: req.body.iban || req.body.bankDetails?.iban || null,
+        notes: req.body.notes || null,
+        isActive: req.body.isActive !== false,
         updated_at: new Date()
       };
 
@@ -320,33 +432,68 @@ router.delete('/:id',
         });
       }
 
-      // Check if supplier has any purchase orders (prevent deletion if has orders)
-      const orderCount = await db('purchase_orders')
-        .where({ supplierId: id })
-        .count('* as count')
-        .first();
+      // Check if supplier has any dependencies (prevent deletion if has linked data)
+      const [
+        orderCount,
+        locationCount,
+        contractCount,
+        calloutCount,
+        collectionOrderCount
+      ] = await Promise.all([
+        db('purchase_orders').where({ supplierId: id }).count('* as count').first(),
+        db('supplier_locations').where({ supplierId: id, isActive: true }).count('* as count').first(),
+        db('contracts').where({ supplierId: id }).whereIn('status', ['active', 'pending']).count('* as count').first(),
+        db('collection_callouts').where({ supplierId: id }).count('* as count').first(),
+        db('collection_orders').where({ supplierId: id }).count('* as count').first()
+      ]);
 
-      if (orderCount.count > 0) {
-        return res.status(400).json({
-          success: false,
-          error: 'Cannot delete supplier with existing purchase orders. Deactivate instead.'
+      const dependencies = [];
+      if (orderCount.count > 0) dependencies.push(`${orderCount.count} purchase order(s)`);
+      if (locationCount.count > 0) dependencies.push(`${locationCount.count} active location(s)`);
+      if (contractCount.count > 0) dependencies.push(`${contractCount.count} active/pending contract(s)`);
+      if (calloutCount.count > 0) dependencies.push(`${calloutCount.count} collection callout(s)`);
+      if (collectionOrderCount.count > 0) dependencies.push(`${collectionOrderCount.count} collection order(s)`);
+
+      if (dependencies.length > 0) {
+        // Soft delete when dependencies exist
+        await db('suppliers')
+          .where({ id })
+          .update({ 
+            isActive: false,
+            updated_at: new Date()
+          });
+
+        auditLog('SUPPLIER_DEACTIVATED', req.user.userId, {
+          supplierId: id,
+          supplierName: supplier.name,
+          reason: `Has dependencies: ${dependencies.join(', ')}`
+        });
+
+        logger.info('Supplier deactivated due to dependencies', {
+          supplierId: id,
+          supplierName: supplier.name,
+          dependencies: dependencies,
+          deactivatedBy: req.user.userId
+        });
+
+        return res.json({
+          success: true,
+          message: `Supplier deactivated due to existing dependencies: ${dependencies.join(', ')}`
         });
       }
 
-      // Soft delete by setting isActive to false
+      // Hard delete when no dependencies exist
       await db('suppliers')
         .where({ id })
-        .update({ 
-          isActive: false,
-          updated_at: new Date()
-        });
+        .del();
 
       auditLog('SUPPLIER_DELETED', req.user.userId, {
         supplierId: id,
-        supplierName: supplier.name
+        supplierName: supplier.name,
+        deletionType: 'hard_delete'
       });
 
-      logger.info('Supplier deleted (deactivated)', {
+      logger.info('Supplier permanently deleted', {
         supplierId: id,
         supplierName: supplier.name,
         deletedBy: req.user.userId
@@ -354,7 +501,7 @@ router.delete('/:id',
 
       res.json({
         success: true,
-        message: 'Supplier deactivated successfully'
+        message: 'Supplier deleted successfully'
       });
 
     } catch (error) {

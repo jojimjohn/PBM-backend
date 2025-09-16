@@ -14,13 +14,19 @@ const materialsRoutes = require('./routes/materials');
 const inventoryRoutes = require('./routes/inventory');
 const suppliersRoutes = require('./routes/suppliers');
 const contractsRoutes = require('./routes/contracts');
+const supplierContractsRoutes = require('./routes/supplierContracts');
+const contractLocationsRoutes = require('./routes/contractLocations');
+const calloutsRoutes = require('./routes/callouts');
+const collectionOrdersRoutes = require('./routes/collectionOrders');
 const salesOrdersRoutes = require('./routes/salesOrders');
 const purchaseOrdersRoutes = require('./routes/purchaseOrders');
+const expensesRoutes = require('./routes/expenses');
 const wastagesRoutes = require('./routes/wastages');
 const pettyCashCardsRoutes = require('./routes/pettyCashCards');
 const pettyCashExpensesRoutes = require('./routes/pettyCashExpenses');
 const transactionsRoutes = require('./routes/transactions');
 const backupsRoutes = require('./routes/backups');
+const supplierLocationsRoutes = require('./routes/supplierLocations');
 const { authenticateToken } = require('./middleware/auth');
 const { initializeDatabases, healthCheck } = require('./config/database');
 
@@ -47,7 +53,7 @@ app.use(helmet({
 // Rate limiting
 const limiter = rateLimit({
   windowMs: parseInt(process.env.RATE_LIMIT_WINDOW_MS) || 15 * 60 * 1000, // 15 minutes
-  max: parseInt(process.env.RATE_LIMIT_MAX_REQUESTS) || 100, // limit each IP to 100 requests per windowMs
+  max: parseInt(process.env.RATE_LIMIT_MAX_REQUESTS) || 10000, // limit each IP to 100 requests per windowMs
   message: {
     error: 'Too many requests from this IP, please try again later.',
     retryAfter: Math.ceil((parseInt(process.env.RATE_LIMIT_WINDOW_MS) || 900000) / 1000)
@@ -74,6 +80,7 @@ const corsOptions = {
       // Add production origins here
       allowedOrigins.push('https://pbm-git-main-jojimjohns-projects.vercel.app');
       allowedOrigins.push('https://pbm-one.vercel.app');
+      allowedOrigins.push('http://localhost:3000');
     }
     
     // Check if origin is in allowed list or is a Vercel deployment
@@ -88,8 +95,9 @@ const corsOptions = {
   },
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With'],
-  exposedHeaders: ['X-Total-Count']
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With','accept','origin'],
+  exposedHeaders: ['X-Total-Count'],
+  allowedOrigins: ['*']
 };
 
 app.use(cors(corsOptions));
@@ -133,13 +141,19 @@ app.use('/api/materials', materialsRoutes);
 app.use('/api/inventory', inventoryRoutes);
 app.use('/api/suppliers', suppliersRoutes);
 app.use('/api/contracts', contractsRoutes);
+app.use('/api/supplier-contracts', supplierContractsRoutes);
+app.use('/api/contract-locations', contractLocationsRoutes);
+app.use('/api/callouts', calloutsRoutes);
+app.use('/api/collection-orders', collectionOrdersRoutes);
 app.use('/api/sales-orders', salesOrdersRoutes);
 app.use('/api/purchase-orders', purchaseOrdersRoutes);
+app.use('/api/expenses', expensesRoutes);
 app.use('/api/wastages', wastagesRoutes);
 app.use('/api/petty-cash-cards', pettyCashCardsRoutes);
 app.use('/api/petty-cash-expenses', pettyCashExpensesRoutes);
 app.use('/api/transactions', transactionsRoutes);
 app.use('/api/backups', backupsRoutes);
+app.use('/api/supplier-locations', supplierLocationsRoutes);
 
 // 404 handler
 app.use('*', (req, res) => {

@@ -543,6 +543,56 @@ router.delete('/:id', requirePermission('CREATE_EXPENSE'), async (req, res) => {
   }
 });
 
+// GET /petty-cash-expenses/analytics - Get expense analytics
+router.get('/analytics', requirePermission('VIEW_EXPENSE_REPORTS'), async (req, res) => {
+  try {
+    const db = getDbConnection(req.user.companyId);
+    const { period = '30' } = req.query;
+    
+    // Calculate date range based on period
+    const now = new Date();
+    const periodDays = parseInt(period) || 30;
+    const endDate = now.toISOString().split('T')[0];
+    const startDate = new Date(now.getTime() - (periodDays * 24 * 60 * 60 * 1000)).toISOString().split('T')[0];
+    
+    // Get basic analytics
+    const analyticsQuery = `
+      SELECT 
+        COUNT(*) as totalExpenses,
+        COALESCE(SUM(amount), 0) as totalAmount,
+        COALESCE(AVG(amount), 0) as averageAmount,
+        COUNT(CASE WHEN status = 'approved' THEN 1 END) as approvedCount,
+        COUNT(CASE WHEN status = 'pending' THEN 1 END) as pendingCount,
+        COUNT(CASE WHEN status = 'rejected' THEN 1 END) as rejectedCount
+      FROM petty_cash_expenses 
+      WHERE deleted_at IS NULL 
+        AND DATE(expenseDate) >= ? 
+        AND DATE(expenseDate) <= ?
+    `;
+    
+    const [analytics] = await db.raw(analyticsQuery, [startDate, endDate]);
+    
+    res.json({
+      success: true,
+      data: analytics[0] || {
+        totalExpenses: 0,
+        totalAmount: 0,
+        averageAmount: 0,
+        approvedCount: 0,
+        pendingCount: 0,
+        rejectedCount: 0
+      }
+    });
+    
+  } catch (error) {
+    console.error('Error fetching expense analytics:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Internal server error'
+    });
+  }
+});
+
 // GET /petty-cash-expenses/analytics/summary - Get expense analytics
 router.get('/analytics/summary', requirePermission('VIEW_EXPENSE_REPORTS'), async (req, res) => {
   try {

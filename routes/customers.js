@@ -333,6 +333,19 @@ router.delete('/:id',
         });
       }
 
+      // Check if customer has any contracts (prevent deletion if has contracts)
+      const contractCount = await db('contracts')
+        .where({ customerId: id })
+        .count('* as count')
+        .first();
+
+      if (contractCount.count > 0) {
+        return res.status(400).json({
+          success: false,
+          error: 'Cannot delete customer with existing contracts. Deactivate instead.'
+        });
+      }
+
       // Soft delete by setting isActive to false
       await db('customers')
         .where({ id })

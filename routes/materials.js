@@ -15,14 +15,9 @@ const materialSchema = Joi.object({
   code: Joi.string().max(50).required().trim().uppercase(),
   name: Joi.string().min(2).max(200).required().trim(),
   description: Joi.string().allow('').optional(),
-  category: Joi.string().valid(
-    // Oil business categories
-    'engine-oil', 'transformer-oil', 'lube-oil', 'cooking-oil', 
-    'empty-drums', 'diesel', 'lubricants',
-    // Scrap business categories
-    'metal-scrap', 'aluminum', 'copper', 'steel', 'brass', 
-    'electronic-waste', 'plastic', 'rubber', 'paper'
-  ).required(),
+  category_id: Joi.number().integer().positive().required(),
+  // Keep category field for backward compatibility but make it optional
+  category: Joi.string().optional(),
   unit: Joi.string().max(20).required().default('liters'),
   standardPrice: Joi.number().min(0).precision(3).default(0),
   minimumPrice: Joi.number().min(0).precision(3).default(0),
@@ -51,7 +46,14 @@ router.get('/', requirePermission('VIEW_INVENTORY'), async (req, res) => {
 
     const offset = (page - 1) * limit;
     
-    let query = db('materials').select('*');
+    let query = db('materials')
+      .leftJoin('material_categories', 'materials.category_id', 'material_categories.id')
+      .select(
+        'materials.*',
+        'material_categories.name as categoryName',
+        'material_categories.description as categoryDescription',
+        'material_categories.business_type as categoryBusinessType'
+      );
 
     // Search filter
     if (search) {
@@ -62,9 +64,15 @@ router.get('/', requirePermission('VIEW_INVENTORY'), async (req, res) => {
       });
     }
 
-    // Category filter
+    // Category filter - support both category_id and legacy category name
     if (category) {
-      query = query.where('category', category);
+      if (!isNaN(category)) {
+        // If category is a number, filter by category_id
+        query = query.where('materials.category_id', parseInt(category));
+      } else {
+        // If category is a string, filter by category name (legacy support)
+        query = query.where('material_categories.name', category);
+      }
     }
 
     // Active status filter
@@ -118,30 +126,162 @@ router.get('/', requirePermission('VIEW_INVENTORY'), async (req, res) => {
   }
 });
 
-// GET /api/materials/categories - Get available categories
-router.get('/categories', requirePermission('VIEW_INVENTORY'), async (req, res) => {
+// GET /api/materials/regions - Get available regions for collection areas
+router.get('/regions', requirePermission('VIEW_SUPPLIERS'), async (req, res) => {
   try {
     const { companyId } = req.user;
     const db = getDbConnection(companyId);
+    
+    const { 
+      governorate = '',
+      isActive = 'true'
+    } = req.query;
+    
+    let query = db('regions').select('*');
+    
+    // Filter by governorate if specified
+    if (governorate) {
+      query = query.where('governorate', governorate);
+    }
+    
+    // Filter by active status
+    if (isActive !== '') {
+      query = query.where('isActive', isActive === 'true');
+    }
+    
+    const regions = await query.orderBy('governorate', 'asc').orderBy('name', 'asc');
 
-    const categories = await db('materials')
-      .select('category')
-      .groupBy('category')
-      .orderBy('category');
+    auditLog('REGIONS_VIEWED', req.user.userId, {
+      companyId,
+      regionsCount: regions.length,
+      governorate
+    });
 
     res.json({
       success: true,
-      data: categories.map(item => item.category)
+      data: regions,
+      message: 'Regions retrieved successfully'
     });
 
   } catch (error) {
-    logger.error('Error fetching material categories', { 
+    logger.error('Error fetching regions', { 
       error: error.message, 
-      userId: req.user.userId
+      userId: req.user.userId,
+      companyId: req.user.companyId
     });
     res.status(500).json({
       success: false,
-      error: 'Failed to fetch categories'
+      error: 'Failed to fetch regions'
+    });
+  }
+});
+
+// GET /api/materials/material-categories - Get available material categories  
+router.get('/material-categories', async (req, res) => {
+  try {
+    console.log('Material categories endpoint hit - user:', req.user?.userId, 'company:', req.user?.companyId, 'query:', req.query);
+    const { companyId } = req.user;
+    const db = getDbConnection(companyId);
+    
+    const { 
+      business_type = '',
+      isActive = 'true'
+    } = req.query;
+    
+    let query = db('material_categories').select('*');
+    
+    // Filter by business type if specified
+    if (business_type) {
+      query = query.where(function() {
+        this.where('business_type', business_type)
+            .orWhere('business_type', 'both');
+      });
+    }
+    
+    // Filter by active status
+    if (isActive !== '') {
+      query = query.where('isActive', isActive === 'true');
+    }
+    
+    const categories = await query.orderBy('sort_order', 'asc');
+
+    auditLog('MATERIAL_CATEGORIES_VIEWED', req.user.userId, {
+      companyId,
+      categoriesCount: categories.length,
+      business_type
+    });
+
+    res.json({
+      success: true,
+      data: categories,
+      message: 'Material categories retrieved successfully'
+    });
+
+  } catch (error) {
+    console.error('Material categories endpoint error:', error);
+    logger.error('Error fetching material categories', { 
+      error: error.message, 
+      userId: req.user?.userId,
+      companyId: req.user?.companyId
+    });
+    res.status(500).json({
+      success: false,
+      error: 'Failed to fetch material categories'
+    });
+  }
+});
+
+// GET /api/materials/categories - Get available material categories  
+router.get('/categories', async (req, res) => {
+  try {
+    console.log('Categories endpoint hit - user:', req.user?.userId, 'company:', req.user?.companyId, 'query:', req.query);
+    const { companyId } = req.user;
+    const db = getDbConnection(companyId);
+    
+    const { 
+      business_type = '',
+      isActive = 'true'
+    } = req.query;
+    
+    let query = db('material_categories').select('*');
+    
+    // Filter by business type if specified
+    if (business_type) {
+      query = query.where(function() {
+        this.where('business_type', business_type)
+            .orWhere('business_type', 'both');
+      });
+    }
+    
+    // Filter by active status
+    if (isActive !== '') {
+      query = query.where('isActive', isActive === 'true');
+    }
+    
+    const categories = await query.orderBy('sort_order', 'asc');
+
+    auditLog('MATERIAL_CATEGORIES_VIEWED', req.user.userId, {
+      companyId,
+      categoriesCount: categories.length,
+      business_type
+    });
+
+    res.json({
+      success: true,
+      data: categories,
+      message: 'Material categories retrieved successfully'
+    });
+
+  } catch (error) {
+    console.error('Categories endpoint error:', error);
+    logger.error('Error fetching material categories', { 
+      error: error.message, 
+      userId: req.user?.userId,
+      companyId: req.user?.companyId
+    });
+    res.status(400).json({
+      success: false,
+      error: 'Invalid parameters'
     });
   }
 });
