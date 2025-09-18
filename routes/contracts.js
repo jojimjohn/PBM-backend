@@ -11,39 +11,38 @@ const router = express.Router();
 router.use(sanitize);
 
 // Contract validation schema - Supplier-based contracts
+// Schema matches exact database columns: id, supplierId, contractNumber, title, startDate, endDate, status, totalValue, currency, terms, notes, createdBy, approvedBy, approvedAt, created_at, updated_at
 const contractSchema = Joi.object({
   contractNumber: Joi.string().max(100).required().trim(),
-  contractRef: Joi.string().max(100).allow('').optional().trim(),
   supplierId: Joi.number().integer().positive().required(),
-  supplierName: Joi.string().max(200).required().trim(),
-  contractTitle: Joi.string().max(200).required().trim(),
-  contractType: Joi.string().valid('waste_management', 'oil_supply', 'scrap_collection', 'material_supply').required(),
+  title: Joi.string().max(200).required().trim(),
   startDate: Joi.date().required(),
   endDate: Joi.date().greater(Joi.ref('startDate')).required(),
-  status: Joi.string().valid('active', 'expired', 'pending', 'cancelled').default('active'),
-  paymentTerms: Joi.string().allow('').optional(),
-  specialTerms: Joi.string().allow('').optional(),
+  status: Joi.string().valid('draft', 'active', 'expired', 'terminated', 'renewed').default('draft'),
+  terms: Joi.string().allow('').optional(),
+  notes: Joi.string().allow('').optional(),
   totalValue: Joi.number().min(0).precision(2).optional(),
   currency: Joi.string().length(3).default('OMR'),
   locations: Joi.array().items(Joi.object({
     id: Joi.string().optional(),
     locationName: Joi.string().required(),
     locationCode: Joi.string().required(),
-    address: Joi.string().required(),
-    contactPerson: Joi.string().required(),
-    contactPhone: Joi.string().required(),
     materials: Joi.array().items(Joi.object({
-      materialId: Joi.string().required(),
-      materialName: Joi.string().required(),
-      materialType: Joi.string().required(),
+      materialId: Joi.number().integer().positive().required(),
+      rateType: Joi.string().valid('fixed_rate','discount_percentage','minimum_price_guarantee','free','we_pay').required(),
+      contractRate: Joi.number().min(0).optional(),
+      discountPercentage: Joi.number().min(0).max(100).optional(),
+      minimumPrice: Joi.number().min(0).optional(),
+      paymentDirection: Joi.string().valid('we_receive','we_pay').default('we_receive'),
       unit: Joi.string().required(),
-      rate: Joi.number().min(0).required(),
-      currency: Joi.string().length(3).default('OMR'),
       minimumQuantity: Joi.number().min(0).default(0),
-      maximumQuantity: Joi.number().min(0).default(0)
+      maximumQuantity: Joi.number().min(0).optional(),
+      description: Joi.string().allow('').optional()
     })).min(1)
   })).min(1).required(),
-  createdBy: Joi.number().integer().positive().optional()
+  createdBy: Joi.number().integer().positive().optional(),
+  approvedBy: Joi.number().integer().positive().optional(),
+  approvedAt: Joi.date().optional()
 });
 
 // Contract rate validation schema
@@ -79,7 +78,7 @@ router.get('/', requirePermission('VIEW_CONTRACTS'), async (req, res) => {
       .select(
         'contracts.*',
         'suppliers.name as supplierName',
-        'suppliers.type as supplierBusinessType',
+        'suppliers.specialization as supplierBusinessType',
         'contracts.status'
       );
 
@@ -87,10 +86,9 @@ router.get('/', requirePermission('VIEW_CONTRACTS'), async (req, res) => {
     if (search) {
       query = query.where(function() {
         this.where('contracts.contractNumber', 'like', `%${search}%`)
-            .orWhere('contracts.contractRef', 'like', `%${search}%`)
             .orWhere('suppliers.name', 'like', `%${search}%`)
-            .orWhere('contracts.contractTitle', 'like', `%${search}%`)
-            .orWhere('contracts.specialTerms', 'like', `%${search}%`);
+            .orWhere('contracts.title', 'like', `%${search}%`)
+            .orWhere('contracts.terms', 'like', `%${search}%`);
       });
     }
 
@@ -179,7 +177,7 @@ router.get('/:id',
         .select(
           'contracts.*',
           'suppliers.name as supplierName',
-          'suppliers.type as supplierBusinessType',
+          'suppliers.specialization as supplierBusinessType',
           'contracts.status'
         )
         .where('contracts.id', id)
@@ -192,18 +190,31 @@ router.get('/:id',
         });
       }
 
-      // Get contract rates
-      const rates = await db('contract_rates')
-        .leftJoin('materials', 'contract_rates.materialId', 'materials.id')
+      // Get contract location rates
+      const rates = await db('contract_location_rates')
+        .leftJoin('materials', 'contract_location_rates.materialId', 'materials.id')
+        .leftJoin('supplier_locations', 'contract_location_rates.locationId', 'supplier_locations.id')
         .select(
-          'contract_rates.*',
+          'contract_location_rates.id',
+          'contract_location_rates.contractId',
+          'contract_location_rates.locationId',
+          'contract_location_rates.materialId',
+          'contract_location_rates.rateType',
+          'contract_location_rates.contractRate',
+          'contract_location_rates.discountPercentage',
+          'contract_location_rates.minimumPrice',
+          'contract_location_rates.paymentDirection',
+          'contract_location_rates.unit',
+          'contract_location_rates.minimumQuantity',
+          'contract_location_rates.maximumQuantity',
+          'contract_location_rates.description',
           'materials.name as materialName',
           'materials.code as materialCode',
           'materials.standardPrice',
-          'materials.unit'
+          'supplier_locations.locationName as locationName',
+          'supplier_locations.locationCode as locationCode'
         )
-        .where('contract_rates.contractId', id)
-        .where('contract_rates.isActive', true);
+        .where('contract_location_rates.contractId', id);
 
       auditLog('CONTRACT_VIEWED', req.user.userId, {
         contractId: id,
@@ -281,40 +292,32 @@ router.post('/',
         // Insert main contract
         const [contractId] = await trx('contracts').insert(contractData);
         
-        // Insert contract locations and their materials
+        // Insert material rates directly to contract_location_rates
         if (locations && locations.length > 0) {
           for (const location of locations) {
-            const { materials, ...locationFields } = location;
-            
-            const locationData = {
-              ...locationFields,
-              contractId: contractId,
-              supplierId: req.body.supplierId,
-              supplierName: req.body.supplierName,
-              created_at: new Date(),
-              updated_at: new Date()
-            };
-            
-            const [locationId] = await trx('contract_locations').insert(locationData);
+            const { materials } = location;
             
             // Insert material rates for this location
             if (materials && materials.length > 0) {
               const materialRates = materials.map(material => ({
                 contractId: contractId,
-                locationId: locationId,
+                locationId: parseInt(location.id), // Foreign key to supplier_locations table
                 materialId: material.materialId,
-                materialName: material.materialName,
-                materialType: material.materialType,
+                rateType: material.rateType,
+                contractRate: material.contractRate || null,
+                discountPercentage: material.discountPercentage || null,
+                minimumPrice: material.minimumPrice || null,
+                paymentDirection: material.paymentDirection || 'we_receive',
                 unit: material.unit,
-                rate: material.rate,
-                currency: material.currency || 'OMR',
                 minimumQuantity: material.minimumQuantity || 0,
-                maximumQuantity: material.maximumQuantity || 0,
+                maximumQuantity: material.maximumQuantity || null,
+                description: material.description || null,
+                isActive: 1,
                 created_at: new Date(),
                 updated_at: new Date()
               }));
               
-              await trx('contract_material_rates').insert(materialRates);
+              await trx('contract_location_rates').insert(materialRates);
             }
           }
         }
@@ -514,6 +517,123 @@ router.get('/:id/pricing/:materialId',
       res.status(500).json({
         success: false,
         error: 'Failed to fetch contract pricing'
+      });
+    }
+  }
+);
+
+// PUT /api/contracts/:id - Update existing contract
+router.put('/:id', 
+  validateParams(Joi.object({ id: Joi.number().integer().positive().required() })),
+  validate(contractSchema.fork(['contractNumber'], schema => schema.optional())),
+  requirePermission('MANAGE_CONTRACTS'),
+  async (req, res) => {
+    try {
+      const { id } = req.params;
+      const { companyId } = req.user;
+      const db = getDbConnection(companyId);
+
+      // Check if contract exists
+      const existingContract = await db('contracts')
+        .where({ id })
+        .first();
+
+      if (!existingContract) {
+        return res.status(404).json({
+          success: false,
+          error: 'Contract not found'
+        });
+      }
+
+      // Validate supplier exists
+      if (req.body.supplierId) {
+        const supplier = await db('suppliers')
+          .where({ id: req.body.supplierId, isActive: true })
+          .first();
+
+        if (!supplier) {
+          return res.status(400).json({
+            success: false,
+            error: 'Supplier not found or inactive'
+          });
+        }
+      }
+
+      const { locations = [], ...contractData } = req.body;
+
+      // Update contract basic info
+      await db('contracts')
+        .where({ id })
+        .update({
+          ...contractData,
+          updated_at: new Date()
+        });
+
+      // Update location rates if provided
+      if (locations.length > 0) {
+        // Delete existing rates
+        await db('contract_location_rates')
+          .where('contractId', id)
+          .del();
+
+        // Insert new rates
+        const locationRates = [];
+        locations.forEach(location => {
+          location.materials.forEach(material => {
+            locationRates.push({
+              contractId: id,
+              locationId: parseInt(location.id),
+              materialId: material.materialId,
+              rateType: material.rateType,
+              contractRate: material.contractRate || null,
+              discountPercentage: material.discountPercentage || null,
+              minimumPrice: material.minimumPrice || null,
+              paymentDirection: material.paymentDirection || 'we_receive',
+              unit: material.unit || 'liters',
+              minimumQuantity: material.minimumQuantity || 0,
+              maximumQuantity: material.maximumQuantity || null,
+              description: material.description || null
+            });
+          });
+        });
+
+        if (locationRates.length > 0) {
+          await db('contract_location_rates').insert(locationRates);
+        }
+      }
+
+      // Fetch updated contract
+      const updatedContract = await db('contracts')
+        .leftJoin('suppliers', 'contracts.supplierId', 'suppliers.id')
+        .select(
+          'contracts.*',
+          'suppliers.name as supplierName',
+          'suppliers.specialization as supplierBusinessType'
+        )
+        .where('contracts.id', id)
+        .first();
+
+      auditLog('CONTRACT_UPDATED', req.user.userId, {
+        contractId: id,
+        contractNumber: updatedContract.contractNumber,
+        supplierName: updatedContract.supplierName
+      });
+
+      res.json({
+        success: true,
+        data: updatedContract,
+        message: 'Contract updated successfully'
+      });
+
+    } catch (error) {
+      logger.error('Error updating contract', { 
+        error: error.message, 
+        contractId: req.params.id,
+        userId: req.user.userId
+      });
+      res.status(500).json({
+        success: false,
+        error: 'Failed to update contract'
       });
     }
   }
