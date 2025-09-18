@@ -10,9 +10,31 @@ const router = express.Router();
 // Apply sanitization to all routes
 router.use(sanitize);
 
-// Collection Order validation schema
+// Callout creation schema (saves as collection_order with status 'callout')
+const calloutSchema = Joi.object({
+  contractId: Joi.number().integer().positive().required(),
+  supplierId: Joi.number().integer().positive().required(),
+  locationId: Joi.number().integer().positive().required(),
+  requestedPickupDate: Joi.date().min('now').required(),
+  priority: Joi.string().valid('low', 'normal', 'high', 'urgent').default('normal'),
+  contactPerson: Joi.string().max(100).allow('').optional(),
+  contactPhone: Joi.string().max(20).allow('').optional(),
+  specialInstructions: Joi.string().allow('').optional(),
+  materials: Joi.array().items(Joi.object({
+    materialId: Joi.number().integer().positive().required(),
+    availableQuantity: Joi.number().min(0.001).precision(3).required(),
+    unit: Joi.string().max(20).required(),
+    materialCondition: Joi.string().valid('excellent', 'good', 'fair', 'poor', 'mixed').default('good'),
+    contractRate: Joi.number().min(0).precision(3).required(),
+    appliedRateType: Joi.string().max(50).optional(),
+    estimatedValue: Joi.number().min(0).precision(2).required(),
+    notes: Joi.string().allow('').optional()
+  })).min(1).required(),
+  totalEstimatedValue: Joi.number().min(0).precision(2).required()
+});
+
+// Collection Order validation schema (for actual collection scheduling)
 const collectionOrderSchema = Joi.object({
-  calloutId: Joi.number().integer().positive().required(),
   scheduledDate: Joi.date().min('now').required(),
   driverName: Joi.string().max(100).allow('').optional(),
   vehiclePlate: Joi.string().max(20).allow('').optional(),
@@ -49,6 +71,400 @@ const collectionExpenseSchema = Joi.object({
   expenseDate: Joi.date().required(),
   notes: Joi.string().allow('').optional()
 });
+
+// POST /api/collection-orders/callouts - Create a callout (saved as collection_order with status 'callout')
+router.post('/callouts', 
+  validate(calloutSchema),
+  requirePermission('CREATE_COLLECTIONS'),
+  async (req, res) => {
+    try {
+      const { companyId } = req.user;
+      const db = getDbConnection(companyId);
+
+      const { materials, ...calloutData } = req.body;
+
+      // Generate unique order number
+      const orderNumber = `CO-${Date.now()}`;
+
+      const result = await db.transaction(async (trx) => {
+        // Insert collection order as 'callout' status
+        const [collectionOrderId] = await trx('collection_orders').insert({
+          orderNumber,
+          calloutId: 0, // No separate callout table
+          contractId: calloutData.contractId,
+          supplierId: calloutData.supplierId,
+          locationId: calloutData.locationId,
+          scheduledDate: calloutData.requestedPickupDate,
+          status: 'scheduled', // Using scheduled status since callout not in ENUM yet
+          totalValue: calloutData.totalEstimatedValue,
+          notes: calloutData.specialInstructions || '',
+          createdBy: req.user.userId,
+          created_at: new Date(),
+          updated_at: new Date()
+        });
+
+        // Insert collection items
+        if (materials && materials.length > 0) {
+          const collectionItems = materials.map(material => ({
+            collectionOrderId: collectionOrderId,
+            materialId: material.materialId,
+            requestedQuantity: material.availableQuantity,
+            collectedQuantity: 0, // Not collected yet
+            unit: material.unit,
+            contractRate: material.contractRate,
+            appliedRateType: material.appliedRateType,
+            totalValue: material.estimatedValue,
+            materialCondition: material.materialCondition,
+            notes: material.notes || '',
+            created_at: new Date()
+          }));
+
+          await trx('collection_items').insert(collectionItems);
+        }
+
+        return collectionOrderId;
+      });
+
+      auditLog('CALLOUT_CREATED', req.user.userId, {
+        collectionOrderId: result,
+        orderNumber,
+        contractId: calloutData.contractId,
+        supplierId: calloutData.supplierId,
+        materialsCount: materials.length
+      });
+
+      logger.info('Callout created', {
+        collectionOrderId: result,
+        orderNumber,
+        createdBy: req.user.userId
+      });
+
+      res.status(201).json({
+        success: true,
+        message: 'Callout created successfully',
+        data: { id: result, orderNumber }
+      });
+
+    } catch (error) {
+      logger.error('Error creating callout', { 
+        error: error.message, 
+        userId: req.user.userId,
+        calloutData: req.body
+      });
+      res.status(500).json({
+        success: false,
+        error: 'Failed to create callout'
+      });
+    }
+  }
+);
+
+// GET /api/collection-orders/callouts - List callouts (collection orders with status 'callout')
+router.get('/callouts', requirePermission('VIEW_COLLECTIONS'), async (req, res) => {
+  try {
+    const { companyId } = req.user;
+    const db = getDbConnection(companyId);
+    
+    const { 
+      page = 1, 
+      limit = 50, 
+      priority = '',
+      search = '',
+      supplierId = '',
+      contractId = ''
+    } = req.query;
+
+    const offset = (page - 1) * limit;
+    
+    // Check if collection_orders table exists
+    const tableExists = await db.schema.hasTable('collection_orders');
+    if (!tableExists) {
+      return res.json({
+        success: true,
+        data: [],
+        pagination: { page: parseInt(page), limit: parseInt(limit), total: 0, pages: 0 }
+      });
+    }
+
+    let query = db('collection_orders')
+      .leftJoin('contracts', 'collection_orders.contractId', 'contracts.id')
+      .leftJoin('suppliers', 'collection_orders.supplierId', 'suppliers.id')
+      .leftJoin('supplier_locations', 'collection_orders.locationId', 'supplier_locations.id')
+      .select(
+        'collection_orders.*',
+        'contracts.contractNumber',
+        'contracts.title as contractTitle',
+        'suppliers.name as supplierName',
+        'supplier_locations.locationName',
+        'supplier_locations.locationCode'
+      )
+      .where('collection_orders.status', 'scheduled');
+
+    // Debug: Log the query and results
+    // Fix: Update existing records with empty status to 'scheduled'
+    const emptyStatusCount = await db('collection_orders')
+      .where('status', '')
+      .orWhereNull('status')
+      .update({ status: 'scheduled' });
+
+    // Search filter
+    if (search && search !== 'undefined' && search.trim() !== '') {
+      query = query.where(function() {
+        this.where('collection_orders.orderNumber', 'like', `%${search}%`)
+            .orWhere('contracts.contractNumber', 'like', `%${search}%`)
+            .orWhere('suppliers.name', 'like', `%${search}%`);
+      });
+    }
+
+    // Supplier filter
+    if (supplierId) {
+      query = query.where('collection_orders.supplierId', supplierId);
+    }
+
+    // Contract filter
+    if (contractId) {
+      query = query.where('collection_orders.contractId', contractId);
+    }
+
+    // Get total count for pagination
+    const totalQuery = query.clone();
+    const [{ total }] = await totalQuery.count('* as total');
+
+    // Get paginated results
+    const callouts = await query
+      .orderBy('collection_orders.created_at', 'desc')
+      .limit(limit)
+      .offset(offset);
+
+
+    auditLog('CALLOUTS_VIEWED', req.user.userId, {
+      companyId,
+      count: callouts.length,
+      filters: { search, priority, supplierId, contractId }
+    });
+
+    res.json({
+      success: true,
+      data: callouts,
+      pagination: {
+        page: parseInt(page),
+        limit: parseInt(limit),
+        total: parseInt(total),
+        pages: Math.ceil(total / limit)
+      }
+    });
+
+  } catch (error) {
+    logger.error('Error fetching callouts', { 
+      error: error.message, 
+      userId: req.user.userId,
+      companyId: req.user.companyId
+    });
+    res.status(500).json({
+      success: false,
+      error: 'Failed to fetch callouts'
+    });
+  }
+});
+
+// PUT /api/collection-orders/:id - Update collection order (callout)
+router.put('/:id',
+  validateParams(Joi.object({ id: Joi.number().integer().positive().required() })),
+  validate(calloutSchema),
+  requirePermission('EDIT_COLLECTIONS'),
+  async (req, res) => {
+    try {
+      const { id } = req.params;
+      const { companyId } = req.user;
+      const db = getDbConnection(companyId);
+
+      const { materials, ...calloutData } = req.body;
+
+      const result = await db.transaction(async (trx) => {
+        // Update collection order
+        await trx('collection_orders')
+          .where({ id, companyId })
+          .update({
+            contractId: calloutData.contractId,
+            supplierId: calloutData.supplierId,
+            locationId: calloutData.locationId,
+            scheduledDate: calloutData.requestedPickupDate,
+            totalValue: calloutData.totalEstimatedValue,
+            specialInstructions: calloutData.specialInstructions,
+            contactPerson: calloutData.contactPerson,
+            contactPhone: calloutData.contactPhone,
+            priority: calloutData.priority || 'normal',
+            updatedAt: new Date()
+          });
+
+        // Delete existing items
+        await trx('collection_items').where({ collectionOrderId: id }).del();
+
+        // Insert updated materials as collection items
+        if (materials && materials.length > 0) {
+          const items = materials.map(material => ({
+            collectionOrderId: id,
+            materialId: material.materialId,
+            estimatedQuantity: material.estimatedQuantity,
+            unit: material.unit,
+            qualityGrade: material.qualityGrade || 'A',
+            condition: material.condition || 'good',
+            notes: material.notes || '',
+            createdAt: new Date(),
+            updatedAt: new Date()
+          }));
+
+          await trx('collection_items').insert(items);
+        }
+
+        return { id };
+      });
+
+      res.json({
+        success: true,
+        message: 'Callout updated successfully',
+        data: result
+      });
+
+    } catch (error) {
+      console.error('Error updating callout:', error);
+      res.status(500).json({
+        success: false,
+        error: 'Failed to update callout'
+      });
+    }
+  }
+);
+
+// DELETE /api/collection-orders/:id - Delete collection order (callout)
+router.delete('/:id',
+  validateParams(Joi.object({ id: Joi.number().integer().positive().required() })),
+  requirePermission('DELETE_COLLECTIONS'),
+  async (req, res) => {
+    try {
+      const { id } = req.params;
+      const { companyId } = req.user;
+      const db = getDbConnection(companyId);
+
+      const result = await db.transaction(async (trx) => {
+        // Check if collection order exists
+        const collectionOrder = await trx('collection_orders')
+          .where({ id, companyId })
+          .first();
+
+        if (!collectionOrder) {
+          throw new Error('Collection order not found');
+        }
+
+        // Only allow deletion if status is 'scheduled' (callout status)
+        if (collectionOrder.status !== 'scheduled') {
+          throw new Error('Cannot delete collection order that is not in scheduled status');
+        }
+
+        // Delete collection items first
+        await trx('collection_items').where({ collectionOrderId: id }).del();
+
+        // Delete the collection order
+        await trx('collection_orders').where({ id, companyId }).del();
+
+        return { id };
+      });
+
+      res.json({
+        success: true,
+        message: 'Callout deleted successfully',
+        data: result
+      });
+
+    } catch (error) {
+      console.error('Error deleting callout:', error);
+      res.status(500).json({
+        success: false,
+        error: error.message || 'Failed to delete callout'
+      });
+    }
+  }
+);
+
+// PUT /api/collection-orders/:id/status - Update collection order status
+router.put('/:id/status', 
+  validateParams(Joi.object({ id: Joi.number().integer().positive().required() })),
+  validate(Joi.object({
+    status: Joi.string().valid('callout', 'scheduled', 'in_transit', 'collecting', 'completed', 'cancelled', 'failed').required(),
+    notes: Joi.string().allow('').optional(),
+    driverName: Joi.string().max(100).allow('').optional(),
+    vehiclePlate: Joi.string().max(20).allow('').optional(),
+    vehicleType: Joi.string().max(50).allow('').optional()
+  })),
+  requirePermission('EDIT_COLLECTIONS'),
+  async (req, res) => {
+    try {
+      const { id } = req.params;
+      const { status, notes, driverName, vehiclePlate, vehicleType } = req.body;
+      const { companyId } = req.user;
+      const db = getDbConnection(companyId);
+
+      // Check if collection order exists
+      const collectionOrder = await db('collection_orders')
+        .where({ id })
+        .first();
+
+      if (!collectionOrder) {
+        return res.status(404).json({
+          success: false,
+          error: 'Collection order not found'
+        });
+      }
+
+      const updateData = {
+        status,
+        updated_at: new Date()
+      };
+
+      // Add additional fields based on status
+      if (notes) updateData.notes = notes;
+      if (driverName) updateData.driverName = driverName;
+      if (vehiclePlate) updateData.vehiclePlate = vehiclePlate;
+      if (vehicleType) updateData.vehicleType = vehicleType;
+
+      // Set timestamps based on status
+      if (status === 'in_transit' && !collectionOrder.actualStartTime) {
+        updateData.actualStartTime = new Date();
+      }
+      if (status === 'completed' && !collectionOrder.actualEndTime) {
+        updateData.actualEndTime = new Date();
+        updateData.completedBy = req.user.userId;
+      }
+
+      await db('collection_orders')
+        .where({ id })
+        .update(updateData);
+
+      auditLog('COLLECTION_STATUS_UPDATED', req.user.userId, {
+        collectionOrderId: id,
+        orderNumber: collectionOrder.orderNumber,
+        oldStatus: collectionOrder.status,
+        newStatus: status
+      });
+
+      res.json({
+        success: true,
+        message: 'Collection order status updated successfully'
+      });
+
+    } catch (error) {
+      logger.error('Error updating collection order status', { 
+        error: error.message, 
+        collectionOrderId: req.params.id,
+        userId: req.user.userId
+      });
+      res.status(500).json({
+        success: false,
+        error: 'Failed to update collection order status'
+      });
+    }
+  }
+);
 
 // GET /api/collection-orders - List all collection orders
 router.get('/', requirePermission('VIEW_PURCHASE'), async (req, res) => {
@@ -165,7 +581,7 @@ router.get('/', requirePermission('VIEW_PURCHASE'), async (req, res) => {
 // GET /api/collection-orders/:id - Get specific collection order
 router.get('/:id', 
   validateParams(Joi.object({ id: Joi.number().integer().positive().required() })),
-  requirePermission('VIEW_PURCHASE'),
+  requirePermission('VIEW_COLLECTIONS'),
   async (req, res) => {
     try {
       const { id } = req.params;
@@ -174,29 +590,21 @@ router.get('/:id',
 
       // Get order details
       const order = await db('collection_orders')
-        .leftJoin('collection_callouts', 'collection_orders.calloutId', 'collection_callouts.id')
         .leftJoin('contracts', 'collection_orders.contractId', 'contracts.id')
         .leftJoin('suppliers', 'collection_orders.supplierId', 'suppliers.id')
-        .leftJoin('contract_locations', 'collection_orders.locationId', 'contract_locations.id')
-        .leftJoin('users as created_users', 'collection_orders.createdBy', 'created_users.id')
-        .leftJoin('users as completed_users', 'collection_orders.completedBy', 'completed_users.id')
+        .leftJoin('supplier_locations', 'collection_orders.locationId', 'supplier_locations.id')
         .select(
           'collection_orders.*',
-          'collection_callouts.calloutNumber',
-          'collection_callouts.priority as calloutPriority',
-          'collection_callouts.specialInstructions',
+          'collection_orders.orderNumber as calloutNumber',
           'contracts.contractNumber',
           'contracts.title as contractTitle',
           'suppliers.name as supplierName',
           'suppliers.contactPerson as supplierContact',
           'suppliers.phone as supplierPhone',
-          'contract_locations.locationName',
-          'contract_locations.address as locationAddress',
-          'contract_locations.contactPerson as locationContact',
-          'contract_locations.contactPhone as locationPhone',
-          'contract_locations.coordinates',
-          'created_users.name as createdByName',
-          'completed_users.name as completedByName'
+          'supplier_locations.locationName',
+          'supplier_locations.address as locationAddress',
+          'supplier_locations.contactPerson as locationContact',
+          'supplier_locations.contactPhone as locationPhone'
         )
         .where('collection_orders.id', id)
         .first();

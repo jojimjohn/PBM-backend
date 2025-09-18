@@ -93,6 +93,8 @@ const requirePermission = (requiredPermission) => {
     }
 
     const userPermissions = req.user.permissions || [];
+    
+    
     if (!userPermissions.includes(requiredPermission)) {
       auditLog('PERMISSION_DENIED', req.user.userId, {
         requiredPermission,
