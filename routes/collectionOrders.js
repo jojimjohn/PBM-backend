@@ -15,19 +15,19 @@ const calloutSchema = Joi.object({
   contractId: Joi.number().integer().positive().required(),
   supplierId: Joi.number().integer().positive().required(),
   locationId: Joi.number().integer().positive().required(),
-  requestedPickupDate: Joi.date().min('now').required(),
+  requestedPickupDate: Joi.date().required(),
   priority: Joi.string().valid('low', 'normal', 'high', 'urgent').default('normal'),
   contactPerson: Joi.string().max(100).allow('').optional(),
   contactPhone: Joi.string().max(20).allow('').optional(),
   specialInstructions: Joi.string().allow('').optional(),
   materials: Joi.array().items(Joi.object({
     materialId: Joi.number().integer().positive().required(),
-    availableQuantity: Joi.number().min(0.001).precision(3).required(),
+    estimatedQuantity: Joi.number().min(0.001).precision(3).required(),
     unit: Joi.string().max(20).required(),
-    materialCondition: Joi.string().valid('excellent', 'good', 'fair', 'poor', 'mixed').default('good'),
-    contractRate: Joi.number().min(0).precision(3).required(),
+    condition: Joi.string().valid('excellent', 'good', 'fair', 'poor', 'mixed').default('good'),
+    contractRate: Joi.number().min(0).precision(3).optional(),
     appliedRateType: Joi.string().max(50).optional(),
-    estimatedValue: Joi.number().min(0).precision(2).required(),
+    estimatedValue: Joi.number().min(0).precision(2).optional(),
     notes: Joi.string().allow('').optional()
   })).min(1).required(),
   totalEstimatedValue: Joi.number().min(0).precision(2).required()
@@ -95,12 +95,10 @@ router.post('/callouts',
           supplierId: calloutData.supplierId,
           locationId: calloutData.locationId,
           scheduledDate: calloutData.requestedPickupDate,
-          status: 'scheduled', // Using scheduled status since callout not in ENUM yet
-          totalValue: calloutData.totalEstimatedValue,
+          status: 'scheduled',
+          totalValue: calloutData.totalEstimatedValue || 0,
           notes: calloutData.specialInstructions || '',
-          createdBy: req.user.userId,
-          created_at: new Date(),
-          updated_at: new Date()
+          createdBy: req.user.userId
         });
 
         // Insert collection items
@@ -108,15 +106,15 @@ router.post('/callouts',
           const collectionItems = materials.map(material => ({
             collectionOrderId: collectionOrderId,
             materialId: material.materialId,
-            requestedQuantity: material.availableQuantity,
-            collectedQuantity: 0, // Not collected yet
-            unit: material.unit,
-            contractRate: material.contractRate,
-            appliedRateType: material.appliedRateType,
-            totalValue: material.estimatedValue,
-            materialCondition: material.materialCondition,
-            notes: material.notes || '',
-            created_at: new Date()
+            requestedQuantity: material.estimatedQuantity || material.availableQuantity || 0,
+            collectedQuantity: 0,
+            unit: material.unit || 'kg',
+            contractRate: material.contractRate || null,
+            appliedRateType: material.appliedRateType || null,
+            totalValue: material.estimatedValue || 0,
+            materialCondition: material.condition || 'good',
+            qualityGrade: material.qualityGrade || 'A',
+            notes: material.notes || ''
           }));
 
           await trx('collection_items').insert(collectionItems);
@@ -283,18 +281,14 @@ router.put('/:id',
       const result = await db.transaction(async (trx) => {
         // Update collection order
         await trx('collection_orders')
-          .where({ id, companyId })
+          .where({ id })
           .update({
             contractId: calloutData.contractId,
             supplierId: calloutData.supplierId,
             locationId: calloutData.locationId,
             scheduledDate: calloutData.requestedPickupDate,
             totalValue: calloutData.totalEstimatedValue,
-            specialInstructions: calloutData.specialInstructions,
-            contactPerson: calloutData.contactPerson,
-            contactPhone: calloutData.contactPhone,
-            priority: calloutData.priority || 'normal',
-            updatedAt: new Date()
+            notes: calloutData.specialInstructions
           });
 
         // Delete existing items
@@ -305,13 +299,13 @@ router.put('/:id',
           const items = materials.map(material => ({
             collectionOrderId: id,
             materialId: material.materialId,
-            estimatedQuantity: material.estimatedQuantity,
+            requestedQuantity: material.estimatedQuantity,
+            collectedQuantity: 0,
             unit: material.unit,
+            totalValue: material.estimatedValue || 0,
+            materialCondition: material.condition || 'good',
             qualityGrade: material.qualityGrade || 'A',
-            condition: material.condition || 'good',
-            notes: material.notes || '',
-            createdAt: new Date(),
-            updatedAt: new Date()
+            notes: material.notes || ''
           }));
 
           await trx('collection_items').insert(items);
@@ -349,7 +343,7 @@ router.delete('/:id',
       const result = await db.transaction(async (trx) => {
         // Check if collection order exists
         const collectionOrder = await trx('collection_orders')
-          .where({ id, companyId })
+          .where({ id })
           .first();
 
         if (!collectionOrder) {
@@ -365,7 +359,7 @@ router.delete('/:id',
         await trx('collection_items').where({ collectionOrderId: id }).del();
 
         // Delete the collection order
-        await trx('collection_orders').where({ id, companyId }).del();
+        await trx('collection_orders').where({ id }).del();
 
         return { id };
       });
@@ -636,8 +630,8 @@ router.get('/:id',
         .leftJoin('users as approved_users', 'collection_expenses.approvedBy', 'approved_users.id')
         .select(
           'collection_expenses.*',
-          'created_users.name as createdByName',
-          'approved_users.name as approvedByName'
+          db.raw('CONCAT(created_users.firstName, " ", created_users.lastName) as createdByName'),
+          db.raw('CONCAT(approved_users.firstName, " ", approved_users.lastName) as approvedByName')
         )
         .where('collection_expenses.collectionOrderId', id)
         .orderBy('collection_expenses.expenseDate', 'desc');
