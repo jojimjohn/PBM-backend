@@ -382,21 +382,92 @@ router.delete('/:id',
   }
 );
 
-// PUT /api/collection-orders/:id/status - Update collection order status
-router.put('/:id/status', 
+// PUT /api/collection-orders/:id/driver - Update driver assignment
+router.put('/:id/driver', 
   validateParams(Joi.object({ id: Joi.number().integer().positive().required() })),
   validate(Joi.object({
-    status: Joi.string().valid('callout', 'scheduled', 'in_transit', 'collecting', 'completed', 'cancelled', 'failed').required(),
-    notes: Joi.string().allow('').optional(),
-    driverName: Joi.string().max(100).allow('').optional(),
-    vehiclePlate: Joi.string().max(20).allow('').optional(),
-    vehicleType: Joi.string().max(50).allow('').optional()
+    driverName: Joi.string().max(100).required(),
+    driverPhone: Joi.string().max(20).allow('').optional(),
+    vehiclePlate: Joi.string().max(20).required(),
+    vehicleType: Joi.string().valid('truck', 'pickup', 'van', 'trailer').required()
   })),
   requirePermission('EDIT_COLLECTIONS'),
   async (req, res) => {
     try {
       const { id } = req.params;
-      const { status, notes, driverName, vehiclePlate, vehicleType } = req.body;
+      const { driverName, driverPhone, vehiclePlate, vehicleType } = req.body;
+      const { companyId } = req.user;
+      const db = getDbConnection(companyId);
+
+      // Check if collection order exists and is in appropriate status
+      const collectionOrder = await db('collection_orders')
+        .where({ id })
+        .whereIn('status', ['scheduled', 'in_transit', 'collecting'])
+        .first();
+
+      if (!collectionOrder) {
+        return res.status(404).json({
+          success: false,
+          error: 'Collection order not found or not eligible for driver assignment'
+        });
+      }
+
+      const updateData = {
+        driverName,
+        vehiclePlate,
+        vehicleType,
+        updated_at: new Date()
+      };
+
+      if (driverPhone) {
+        updateData.driverPhone = driverPhone;
+      }
+
+      await db('collection_orders')
+        .where({ id })
+        .update(updateData);
+
+      auditLog('COLLECTION_DRIVER_ASSIGNED', req.user.userId, {
+        collectionOrderId: id,
+        orderNumber: collectionOrder.orderNumber,
+        driverName,
+        vehiclePlate,
+        vehicleType
+      });
+
+      res.json({
+        success: true,
+        message: 'Driver assigned successfully'
+      });
+
+    } catch (error) {
+      logger.error('Error assigning driver to collection order', { 
+        error: error.message, 
+        collectionOrderId: req.params.id,
+        userId: req.user.userId
+      });
+      res.status(500).json({
+        success: false,
+        error: 'Failed to assign driver'
+      });
+    }
+  }
+);
+
+// PUT /api/collection-orders/:id/status - Update collection order status
+router.put('/:id/status', 
+  validateParams(Joi.object({ id: Joi.number().integer().positive().required() })),
+  validate(Joi.object({
+    status: Joi.string().valid('scheduled', 'in_progress', 'completed', 'cancelled').required(),
+    notes: Joi.string().allow('').optional(),
+    actualCollectionDate: Joi.date().optional(),
+    actualQuantity: Joi.number().min(0).precision(3).optional()
+  })),
+  requirePermission('EDIT_COLLECTIONS'),
+  async (req, res) => {
+    try {
+      const { id } = req.params;
+      const { status, notes, actualCollectionDate, actualQuantity } = req.body;
       const { companyId } = req.user;
       const db = getDbConnection(companyId);
 
@@ -412,24 +483,95 @@ router.put('/:id/status',
         });
       }
 
+      // Validate status transitions
+      const validTransitions = {
+        'scheduled': ['in_progress', 'cancelled'],
+        'in_progress': ['completed', 'cancelled'],
+        'completed': [], // Cannot transition from completed
+        'cancelled': [] // Cannot transition from cancelled
+      };
+
+      if (!validTransitions[collectionOrder.status]?.includes(status)) {
+        return res.status(400).json({
+          success: false,
+          error: `Invalid status transition from ${collectionOrder.status} to ${status}`
+        });
+      }
+
       const updateData = {
         status,
         updated_at: new Date()
       };
 
-      // Add additional fields based on status
-      if (notes) updateData.notes = notes;
-      if (driverName) updateData.driverName = driverName;
-      if (vehiclePlate) updateData.vehiclePlate = vehiclePlate;
-      if (vehicleType) updateData.vehicleType = vehicleType;
+      // Add optional fields
+      if (notes) {
+        updateData.notes = notes;
+      }
 
       // Set timestamps based on status
-      if (status === 'in_transit' && !collectionOrder.actualStartTime) {
+      if (status === 'in_progress' && !collectionOrder.actualStartTime) {
         updateData.actualStartTime = new Date();
       }
-      if (status === 'completed' && !collectionOrder.actualEndTime) {
-        updateData.actualEndTime = new Date();
+      
+      if (status === 'completed') {
+        updateData.actualEndTime = actualCollectionDate || new Date();
         updateData.completedBy = req.user.userId;
+        
+        if (actualQuantity !== undefined) {
+          updateData.actualQuantity = actualQuantity;
+        }
+
+        // Auto-update inventory when collection is completed
+        const items = await db('collection_items')
+          .where({ collectionOrderId: id })
+          .where('collectedQuantity', '>', 0);
+
+        if (items.length > 0) {
+          await db.transaction(async (trx) => {
+            // Update inventory for each collected item
+            for (const item of items) {
+              await trx('inventory').insert({
+                materialId: item.materialId,
+                batchNumber: item.batchNumber || `CL-${collectionOrder.orderNumber}-${Date.now()}`,
+                quantity: item.collectedQuantity,
+                reservedQuantity: 0,
+                averageCost: item.contractRate || 0,
+                lastPurchasePrice: item.contractRate || 0,
+                lastPurchaseDate: new Date(),
+                location: 'Collection Warehouse',
+                condition: item.materialCondition || 'good',
+                notes: `Collected from ${collectionOrder.orderNumber}`,
+                minimumStockLevel: 0,
+                maximumStockLevel: 0,
+                isActive: true,
+                created_at: new Date(),
+                updated_at: new Date()
+              });
+
+              // Create transaction record
+              await trx('transactions').insert({
+                transactionNumber: `COLLECTION-${Date.now()}-${item.id}`,
+                transactionType: 'collection',
+                referenceId: id,
+                referenceType: 'collection_order',
+                materialId: item.materialId,
+                quantity: item.collectedQuantity,
+                amount: item.totalValue,
+                transactionDate: new Date(),
+                description: `Collection from ${collectionOrder.orderNumber}`,
+                createdBy: req.user.userId,
+                created_at: new Date(),
+                updated_at: new Date()
+              });
+            }
+          });
+
+          auditLog('COLLECTION_INVENTORY_UPDATED', req.user.userId, {
+            collectionOrderId: id,
+            orderNumber: collectionOrder.orderNumber,
+            itemsProcessed: items.length
+          });
+        }
       }
 
       await db('collection_orders')
