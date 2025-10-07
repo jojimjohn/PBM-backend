@@ -1,5 +1,6 @@
 const express = require('express');
 const cors = require('cors');
+
 const helmet = require('helmet');
 const compression = require('compression');
 const cookieParser = require('cookie-parser');
@@ -31,7 +32,10 @@ const { authenticateToken } = require('./middleware/auth');
 const { initializeDatabases, healthCheck } = require('./config/database');
 
 const app = express();
-const PORT = process.env.PORT || 5000;
+const PORT = process.env.PORT || 3000;
+
+app.set('trust proxy', 1);
+
 
 // Security middleware
 app.use(helmet({
