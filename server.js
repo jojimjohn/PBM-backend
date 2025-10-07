@@ -76,8 +76,7 @@ const corsOptions = {
     const allowedOrigins = [
       'http://localhost:3000',
       'http://127.0.0.1:3000',
-      'http://localhost:5173',
-      'http://127.0.0.1:5173'
+      'http://173.212.223.137:3000'
     ];
     
     if (process.env.NODE_ENV === 'production') {
