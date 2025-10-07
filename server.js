@@ -76,19 +76,19 @@ const corsOptions = {
     const allowedOrigins = [
       'http://localhost:3000',
       'http://127.0.0.1:3000',
-      'http://173.212.223.137:3000'
+      'http://173.212.223.137:3000',
+      'https://pbm.alramramiapp.com'
     ];
     
     if (process.env.NODE_ENV === 'production') {
       // Add production origins here
-      allowedOrigins.push('https://pbm-git-main-jojimjohns-projects.vercel.app');
-      allowedOrigins.push('https://pbm-one.vercel.app');
       allowedOrigins.push('http://localhost:3000');
+      allowedOrigins.push('https://pbm.alramramiapp.com');
     }
     
     // Check if origin is in allowed list or is a Vercel deployment
     const isAllowed = allowedOrigins.indexOf(origin) !== -1 || 
-                     (origin && origin.endsWith('.vercel.app'));
+                     (origin);
     
     if (isAllowed) {
       callback(null, true);
