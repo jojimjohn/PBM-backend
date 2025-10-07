@@ -190,7 +190,7 @@ const startServer = async () => {
     logger.info('✅ Database connections initialized');
 
     // Start server
-    app.listen(PORT, () => {
+    app.listen(PORT, '0.0.0.0', () => {
       logger.info(`🚀 Server running on port ${PORT}`, {
         environment: process.env.NODE_ENV,
         port: PORT,
