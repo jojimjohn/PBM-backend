@@ -164,70 +164,6 @@ router.get('/categories', requirePermission('VIEW_EXPENSE_REPORTS'), async (req,
   });
 });
 
-// GET /petty-cash-expenses/:id - Get specific expense
-router.get('/:id', requirePermission('VIEW_EXPENSE_REPORTS'), async (req, res) => {
-  try {
-    const db = getDbConnection(req.user.companyId);
-    const { id } = req.params;
-    
-    let query = db('petty_cash_expenses')
-      .select(
-        'petty_cash_expenses.*',
-        'petty_cash_cards.cardNumber',
-        'petty_cash_cards.staffName',
-        'petty_cash_cards.department',
-        'petty_cash_cards.currentBalance as cardBalance',
-        'submittedUser.firstName as submittedByName',
-        'submittedUser.lastName as submittedByLastName',
-        'submittedUser.email as submittedByEmail',
-        'approvedUser.firstName as approvedByName',
-        'approvedUser.lastName as approvedByLastName'
-      )
-      .leftJoin('petty_cash_cards', 'petty_cash_expenses.cardId', 'petty_cash_cards.id')
-      .leftJoin('users as submittedUser', 'petty_cash_expenses.submittedBy', 'submittedUser.id')
-      .leftJoin('users as approvedUser', 'petty_cash_expenses.approvedBy', 'approvedUser.id')
-      .where('petty_cash_expenses.id', id);
-    
-    // Apply user-specific filters based on role
-    if (!req.user.permissions.includes('VIEW_EXPENSE_REPORTS')) {
-      query = query.where('petty_cash_expenses.submittedBy', req.user.id);
-    }
-    
-    const expense = await query.first();
-    
-    if (!expense) {
-      return res.status(404).json({
-        success: false,
-        error: 'Expense not found or access denied'
-      });
-    }
-    
-    winston.info('Petty cash expense retrieved', {
-      expenseId: id,
-      companyId: req.user.companyId,
-      userId: req.user.id
-    });
-    
-    res.json({
-      success: true,
-      data: expense
-    });
-    
-  } catch (error) {
-    winston.error('Error fetching petty cash expense', {
-      error: error.message,
-      expenseId: req.params.id,
-      companyId: req.user.companyId,
-      userId: req.user.id
-    });
-    
-    res.status(500).json({
-      success: false,
-      error: 'Internal server error'
-    });
-  }
-});
-
 // POST /petty-cash-expenses - Create new expense
 router.post('/', 
   requirePermission('CREATE_EXPENSE'),
@@ -557,16 +493,15 @@ router.get('/analytics', requirePermission('VIEW_EXPENSE_REPORTS'), async (req, 
     
     // Get basic analytics
     const analyticsQuery = `
-      SELECT 
+      SELECT
         COUNT(*) as totalExpenses,
         COALESCE(SUM(amount), 0) as totalAmount,
         COALESCE(AVG(amount), 0) as averageAmount,
         COUNT(CASE WHEN status = 'approved' THEN 1 END) as approvedCount,
         COUNT(CASE WHEN status = 'pending' THEN 1 END) as pendingCount,
         COUNT(CASE WHEN status = 'rejected' THEN 1 END) as rejectedCount
-      FROM petty_cash_expenses 
-      WHERE deleted_at IS NULL 
-        AND DATE(expenseDate) >= ? 
+      FROM petty_cash_expenses
+      WHERE DATE(expenseDate) >= ?
         AND DATE(expenseDate) <= ?
     `;
     
@@ -685,6 +620,71 @@ router.get('/analytics/summary', requirePermission('VIEW_EXPENSE_REPORTS'), asyn
       userId: req.user.id
     });
     
+    res.status(500).json({
+      success: false,
+      error: 'Internal server error'
+    });
+  }
+});
+
+// GET /petty-cash-expenses/:id - Get specific expense
+// NOTE: This route MUST be defined last, after all specific routes (like /analytics)
+router.get('/:id', requirePermission('VIEW_EXPENSE_REPORTS'), async (req, res) => {
+  try {
+    const db = getDbConnection(req.user.companyId);
+    const { id } = req.params;
+
+    let query = db('petty_cash_expenses')
+      .select(
+        'petty_cash_expenses.*',
+        'petty_cash_cards.cardNumber',
+        'petty_cash_cards.staffName',
+        'petty_cash_cards.department',
+        'petty_cash_cards.currentBalance as cardBalance',
+        'submittedUser.firstName as submittedByName',
+        'submittedUser.lastName as submittedByLastName',
+        'submittedUser.email as submittedByEmail',
+        'approvedUser.firstName as approvedByName',
+        'approvedUser.lastName as approvedByLastName'
+      )
+      .leftJoin('petty_cash_cards', 'petty_cash_expenses.cardId', 'petty_cash_cards.id')
+      .leftJoin('users as submittedUser', 'petty_cash_expenses.submittedBy', 'submittedUser.id')
+      .leftJoin('users as approvedUser', 'petty_cash_expenses.approvedBy', 'approvedUser.id')
+      .where('petty_cash_expenses.id', id);
+
+    // Apply user-specific filters based on role
+    if (!req.user.permissions.includes('VIEW_EXPENSE_REPORTS')) {
+      query = query.where('petty_cash_expenses.submittedBy', req.user.id);
+    }
+
+    const expense = await query.first();
+
+    if (!expense) {
+      return res.status(404).json({
+        success: false,
+        error: 'Expense not found or access denied'
+      });
+    }
+
+    winston.info('Petty cash expense retrieved', {
+      expenseId: id,
+      companyId: req.user.companyId,
+      userId: req.user.id
+    });
+
+    res.json({
+      success: true,
+      data: expense
+    });
+
+  } catch (error) {
+    winston.error('Error fetching petty cash expense', {
+      error: error.message,
+      expenseId: req.params.id,
+      companyId: req.user.companyId,
+      userId: req.user.id
+    });
+
     res.status(500).json({
       success: false,
       error: 'Internal server error'

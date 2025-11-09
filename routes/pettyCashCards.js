@@ -10,12 +10,12 @@ const winston = require('winston');
 const pettyCashCardSchema = Joi.object({
   assignedTo: Joi.number().integer().positive().required(),
   staffName: Joi.string().min(2).max(100).required(),
-  department: Joi.string().max(100).optional(),
+  department: Joi.string().max(100).allow('', null).optional(),
   initialBalance: Joi.number().min(0).required(),
-  monthlyLimit: Joi.number().min(0).optional(),
-  issueDate: Joi.date().iso().required(),
-  expiryDate: Joi.date().iso().optional(),
-  notes: Joi.string().max(1000).optional()
+  monthlyLimit: Joi.number().min(0).allow(null).optional(),
+  issueDate: Joi.alternatives().try(Joi.date().iso(), Joi.string().pattern(/^\d{4}-\d{2}-\d{2}$/)).required(),
+  expiryDate: Joi.alternatives().try(Joi.date().iso(), Joi.string().pattern(/^\d{4}-\d{2}-\d{2}$/)).allow('', null).optional(),
+  notes: Joi.string().max(1000).allow('', null).optional()
 });
 
 const updateCardSchema = pettyCashCardSchema.fork(
@@ -244,7 +244,7 @@ router.post('/',
         expiryDate: cardData.expiryDate || null,
         status: 'active',
         notes: cardData.notes || null,
-        createdBy: req.user.id
+        createdBy: req.user.userId
       };
       
       const [id] = await db('petty_cash_cards').insert(newCard);
