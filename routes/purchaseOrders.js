@@ -23,14 +23,15 @@ const purchaseOrderSchema = Joi.object({
   totalAmount: Joi.number().min(0).precision(3).default(0),
   shippingCost: Joi.number().min(0).precision(3).default(0),
   notes: Joi.string().allow('').allow(null).optional(),
+  branch_id: Joi.number().integer().positive().allow(null).optional(), // Branch ID for multi-branch support
   items: Joi.array().items(Joi.object({
     materialId: Joi.number().integer().positive().required(),
     // For drafts, quantity/rate/amount are optional; for other statuses they're required
     quantity: Joi.number().min(0.001).precision(3).optional().default(0),
     rate: Joi.number().min(0).precision(3).optional().default(0),
     amount: Joi.number().min(0).precision(3).optional().default(0)
-  })).optional()
-}).unknown(true).custom((value, helpers) => {
+  }).options({ stripUnknown: true })).optional()
+}).options({ stripUnknown: true }).custom((value, helpers) => {
   // If not a draft, require quantity, rate, and amount for all items
   if (value.status !== 'draft' && value.items && value.items.length > 0) {
     for (const item of value.items) {

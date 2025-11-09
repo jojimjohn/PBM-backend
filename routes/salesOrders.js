@@ -28,6 +28,7 @@ const salesOrderSchema = Joi.object({
   notes: Joi.string().allow('').optional(),
   specialInstructions: Joi.string().allow('').optional(),
   orderNumber: Joi.string().optional(), // Frontend may send this but backend generates it
+  branch_id: Joi.number().integer().positive().allow(null).optional(), // Branch ID for multi-branch support
   // Items array for creating order with items in one request
   items: Joi.array().items(Joi.object({
     materialId: Joi.number().integer().positive().required(),
@@ -35,7 +36,7 @@ const salesOrderSchema = Joi.object({
     quantity: Joi.number().min(0.001).precision(3).optional().default(0),
     rate: Joi.number().min(0).precision(3).optional().default(0),
     amount: Joi.number().min(0).precision(3).optional().default(0)
-  })).optional(),
+  }).options({ stripUnknown: true })).optional(),
   // Additional fields that frontend may send
   status: Joi.string().valid('draft', 'pending', 'confirmed', 'delivered', 'cancelled').optional(),
   customer: Joi.object().unknown(true).optional(), // Frontend sends full customer object
@@ -43,7 +44,7 @@ const salesOrderSchema = Joi.object({
   id: Joi.string().optional(), // Frontend generated ID, ignored by backend
   createdAt: Joi.date().optional(), // Frontend timestamp, ignored by backend
   createdBy: Joi.string().optional() // Frontend user, ignored by backend
-}).custom((value, helpers) => {
+}).options({ stripUnknown: true }).custom((value, helpers) => {
   // Extract customerId from customer object if not provided directly
   if (!value.customerId && value.customer && value.customer.id) {
     value.customerId = value.customer.id;

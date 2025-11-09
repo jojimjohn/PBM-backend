@@ -32,6 +32,7 @@ const usersRoutes = require('./routes/users');
 const systemSettingsRoutes = require('./routes/systemSettings');
 const customerTypesRoutes = require('./routes/customerTypes');
 const supplierTypesRoutes = require('./routes/supplierTypes');
+const branchesRoutes = require('./routes/branches');
 const { authenticateToken } = require('./middleware/auth');
 const { initializeDatabases, healthCheck } = require('./config/database');
 
@@ -165,6 +166,7 @@ app.use('/api/users', usersRoutes);
 app.use('/api/system-settings', systemSettingsRoutes);
 app.use('/api/customer-types', customerTypesRoutes);
 app.use('/api/supplier-types', supplierTypesRoutes);
+app.use('/api/branches', branchesRoutes);
 
 // 404 handler
 app.use('*', (req, res) => {
