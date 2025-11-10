@@ -125,6 +125,26 @@ router.get('/', requirePermission('VIEW_PURCHASE'), async (req, res) => {
       .limit(limit)
       .offset(offset);
 
+    // Convert DECIMAL strings to numbers for consistent JSON format
+    const formattedOrders = orders.map(order => ({
+      ...order,
+      subtotal: parseFloat(order.subtotal) || 0,
+      taxAmount: parseFloat(order.taxAmount) || 0,
+      totalAmount: parseFloat(order.totalAmount) || 0,
+      shippingCost: parseFloat(order.shippingCost) || 0
+    }));
+
+    // Log financial values from first order for debugging
+    if (formattedOrders.length > 0) {
+      logger.info('💰 Sample PO financial values from list:', {
+        orderNumber: formattedOrders[0].orderNumber,
+        subtotal: formattedOrders[0].subtotal,
+        taxAmount: formattedOrders[0].taxAmount,
+        totalAmount: formattedOrders[0].totalAmount,
+        shippingCost: formattedOrders[0].shippingCost
+      });
+    }
+
     auditLog('PURCHASE_ORDERS_VIEWED', req.user.userId, {
       companyId,
       count: orders.length,
@@ -133,7 +153,7 @@ router.get('/', requirePermission('VIEW_PURCHASE'), async (req, res) => {
 
     res.json({
       success: true,
-      data: orders,
+      data: formattedOrders,
       pagination: {
         page: parseInt(page),
         limit: parseInt(limit),
@@ -187,6 +207,7 @@ router.get('/:id',
       }
 
       // Get order items
+      logger.info(`🔍 Fetching items for PO ID: ${id}`);
       const items = await db('purchase_order_items')
         .leftJoin('materials', 'purchase_order_items.materialId', 'materials.id')
         .select(
@@ -200,18 +221,46 @@ router.get('/:id',
         .where('purchase_order_items.purchaseOrderId', id)
         .orderBy('purchase_order_items.id');
 
+      logger.info(`📦 Found ${items.length} items for PO #${id}`);
+      logger.info(`📋 Items data:`, JSON.stringify(items, null, 2));
+
       auditLog('PURCHASE_ORDER_VIEWED', req.user.userId, {
         purchaseOrderId: id,
         orderNumber: order.orderNumber,
-        supplierName: order.supplierName
+        supplierName: order.supplierName,
+        itemsCount: items.length
+      });
+
+      // Convert DECIMAL strings to numbers for consistent JSON format
+      const formattedOrder = {
+        ...order,
+        subtotal: parseFloat(order.subtotal) || 0,
+        taxAmount: parseFloat(order.taxAmount) || 0,
+        totalAmount: parseFloat(order.totalAmount) || 0,
+        shippingCost: parseFloat(order.shippingCost) || 0,
+        items: items.map(item => ({
+          ...item,
+          quantityOrdered: parseFloat(item.quantityOrdered) || 0,
+          quantityReceived: parseFloat(item.quantityReceived) || 0,
+          unitPrice: parseFloat(item.unitPrice) || 0,
+          totalPrice: parseFloat(item.totalPrice) || 0,
+          contractRate: item.contractRate ? parseFloat(item.contractRate) : null,
+          contractSavings: parseFloat(item.contractSavings) || 0
+        }))
+      };
+
+      logger.info(`✅ Sending response with ${items.length} items`);
+      logger.info('💰 PO financial values being sent:', {
+        orderNumber: formattedOrder.orderNumber,
+        subtotal: formattedOrder.subtotal,
+        taxAmount: formattedOrder.taxAmount,
+        totalAmount: formattedOrder.totalAmount,
+        shippingCost: formattedOrder.shippingCost
       });
 
       res.json({
         success: true,
-        data: {
-          ...order,
-          items
-        }
+        data: formattedOrder
       });
 
     } catch (error) {
@@ -255,6 +304,14 @@ router.post('/',
       // Generate order number if not provided
       const orderNumber = orderFields.orderNumber || `PO-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
 
+      logger.info('💰 Received financial values for PO create:', {
+        subtotal: orderFields.subtotal,
+        taxAmount: orderFields.taxAmount,
+        totalAmount: orderFields.totalAmount,
+        shippingCost: orderFields.shippingCost,
+        itemsCount: items?.length || 0
+      });
+
       // Prepare order data to match database schema
       const orderData = {
         orderNumber,
@@ -281,6 +338,13 @@ router.post('/',
         created_at: new Date(),
         updated_at: new Date()
       };
+
+      logger.info('📝 Saving orderData:', {
+        subtotal: orderData.subtotal,
+        taxAmount: orderData.taxAmount,
+        totalAmount: orderData.totalAmount,
+        shippingCost: orderData.shippingCost
+      });
 
       // Use transaction to ensure both order and items are created
       const result = await db.transaction(async (trx) => {
@@ -395,6 +459,14 @@ router.put('/:id',
         items // Extract items for separate handling
       } = req.body;
 
+      logger.info('💰 Received financial values for PO update:', {
+        subtotal,
+        taxAmount,
+        totalAmount,
+        shippingCost,
+        itemsCount: items?.length || 0
+      });
+
       // Update order with only valid database fields
       const updateData = {
         orderNumber,
@@ -402,13 +474,15 @@ router.put('/:id',
         orderDate,
         expectedDeliveryDate: expectedDeliveryDate || null,
         status,
-        subtotal,
-        taxAmount,
-        totalAmount,
-        shippingCost,
+        subtotal: parseFloat(subtotal) || 0,
+        taxAmount: parseFloat(taxAmount) || 0,
+        totalAmount: parseFloat(totalAmount) || 0,
+        shippingCost: parseFloat(shippingCost) || 0,
         notes: notes || null,
         updated_at: new Date()
       };
+
+      logger.info('📝 Saving updateData:', updateData);
 
       await db('purchase_orders')
         .where({ id })
@@ -422,10 +496,17 @@ router.put('/:id',
         // Insert new items
         const itemsData = items.map(item => ({
           purchaseOrderId: id,
-          materialId: item.materialId,
-          quantity: item.quantity || 0,
-          unitPrice: item.rate || 0,
-          totalPrice: item.amount || (item.quantity * item.rate) || 0,
+          materialId: parseInt(item.materialId),
+          quantityOrdered: parseFloat(item.quantity) || 0,
+          quantityReceived: 0,
+          unitPrice: parseFloat(item.rate) || 0,
+          contractRate: null,
+          appliedRateType: null,
+          contractSavings: 0,
+          totalPrice: parseFloat(item.amount) || (parseFloat(item.quantity) * parseFloat(item.rate)) || 0,
+          batchNumber: null,
+          expiryDate: null,
+          notes: null,
           created_at: new Date(),
           updated_at: new Date()
         }));
@@ -653,6 +734,7 @@ router.put('/:id/receive',
       Joi.object({
         itemId: Joi.number().integer().positive().required(),
         receivedQuantity: Joi.number().min(0).precision(3).required(),
+        contentQuantity: Joi.number().min(0).precision(3).optional(), // For composite materials
         batchNumber: Joi.string().max(100).allow('').optional(),
         expiryDate: Joi.date().optional(),
         condition: Joi.string().valid('new', 'used', 'refurbished', 'damaged').default('new'),
@@ -689,41 +771,142 @@ router.put('/:id/receive',
 
           if (!orderItem) continue;
 
-          // Add to inventory
-          await trx('inventory').insert({
-            materialId: orderItem.materialId,
-            batchNumber: receivedItem.batchNumber || `PO-${order.orderNumber}-${Date.now()}`,
-            quantity: receivedItem.receivedQuantity,
-            reservedQuantity: 0,
-            averageCost: orderItem.unitPrice,
-            lastPurchasePrice: orderItem.unitPrice,
-            lastPurchaseDate: new Date(),
-            expiryDate: receivedItem.expiryDate,
-            location: receivedItem.location || 'Main Warehouse',
-            condition: receivedItem.condition,
-            notes: `Received from PO ${order.orderNumber}`,
-            minimumStockLevel: 0,
-            maximumStockLevel: 0,
-            isActive: true,
-            created_at: new Date(),
-            updated_at: new Date()
-          });
+          // Check if this material is composite
+          const compositions = await trx('material_compositions')
+            .leftJoin('materials', 'material_compositions.component_material_id', 'materials.id')
+            .select(
+              'material_compositions.*',
+              'materials.name as component_material_name',
+              'materials.code as component_material_code'
+            )
+            .where('material_compositions.composite_material_id', orderItem.materialId)
+            .where('material_compositions.is_active', 1);
 
-          // Create transaction record
-          await trx('transactions').insert({
-            transactionNumber: `PURCHASE-${Date.now()}-${orderItem.id}`,
-            transactionType: 'purchase',
-            referenceId: id,
-            referenceType: 'purchase_order',
-            materialId: orderItem.materialId,
-            quantity: receivedItem.receivedQuantity,
-            amount: receivedItem.receivedQuantity * orderItem.unitPrice,
-            transactionDate: new Date(),
-            description: `Purchase received - Order ${order.orderNumber}`,
-            createdBy: req.user.userId,
-            created_at: new Date(),
-            updated_at: new Date()
-          });
+          const isComposite = compositions.length > 0;
+
+          if (isComposite) {
+            // This is a composite material - split into components
+            const breakdown = {
+              composite_material_id: orderItem.materialId,
+              composite_quantity: receivedItem.receivedQuantity,
+              content_quantity: receivedItem.contentQuantity || null,
+              split_date: new Date(),
+              components: []
+            };
+
+            for (const composition of compositions) {
+              // Calculate component quantity based on type
+              let componentQuantity;
+              if (composition.component_type === 'container') {
+                // Containers = number of composite units (drums, boxes, etc.)
+                componentQuantity = receivedItem.receivedQuantity;
+              } else if (composition.component_type === 'content') {
+                // Content = actual quantity provided (or use composite quantity as fallback)
+                componentQuantity = receivedItem.contentQuantity || receivedItem.receivedQuantity;
+              }
+
+              // Add component to inventory
+              await trx('inventory').insert({
+                materialId: composition.component_material_id,
+                batchNumber: receivedItem.batchNumber || `PO-${order.orderNumber}-${Date.now()}`,
+                quantity: componentQuantity,
+                reservedQuantity: 0,
+                averageCost: 0, // Components don't have individual cost
+                lastPurchasePrice: 0,
+                lastPurchaseDate: new Date(),
+                expiryDate: receivedItem.expiryDate,
+                location: receivedItem.location || 'Main Warehouse',
+                condition: receivedItem.condition,
+                notes: `Split from composite material (PO ${order.orderNumber})`,
+                minimumStockLevel: 0,
+                maximumStockLevel: 0,
+                isActive: true,
+                created_at: new Date(),
+                updated_at: new Date()
+              });
+
+              // Create transaction record for component
+              await trx('transactions').insert({
+                transactionNumber: `SPLIT-${Date.now()}-${orderItem.id}-${composition.id}`,
+                transactionType: 'purchase',
+                referenceId: id,
+                referenceType: 'purchase_order',
+                materialId: composition.component_material_id,
+                quantity: componentQuantity,
+                amount: 0, // No separate cost for components
+                transactionDate: new Date(),
+                description: `Component from ${composition.component_type} - PO ${order.orderNumber}`,
+                createdBy: req.user.userId,
+                created_at: new Date(),
+                updated_at: new Date()
+              });
+
+              breakdown.components.push({
+                material_id: composition.component_material_id,
+                material_name: composition.component_material_name,
+                material_code: composition.component_material_code,
+                component_type: composition.component_type,
+                capacity: composition.capacity,
+                capacity_unit: composition.capacity_unit,
+                total_quantity: componentQuantity
+              });
+            }
+
+            // Mark order item as composite and store breakdown
+            await trx('purchase_order_items')
+              .where({ id: receivedItem.itemId })
+              .update({
+                is_composite_material: 1,
+                composite_breakdown: JSON.stringify(breakdown),
+                updated_at: new Date()
+              });
+
+            logger.info('Composite material split', {
+              orderId: id,
+              orderNumber: order.orderNumber,
+              compositeMaterialId: orderItem.materialId,
+              compositeQuantity: receivedItem.receivedQuantity,
+              componentsCount: compositions.length,
+              breakdown
+            });
+
+          } else {
+            // Regular material - add to inventory as-is
+            await trx('inventory').insert({
+              materialId: orderItem.materialId,
+              batchNumber: receivedItem.batchNumber || `PO-${order.orderNumber}-${Date.now()}`,
+              quantity: receivedItem.receivedQuantity,
+              reservedQuantity: 0,
+              averageCost: orderItem.unitPrice,
+              lastPurchasePrice: orderItem.unitPrice,
+              lastPurchaseDate: new Date(),
+              expiryDate: receivedItem.expiryDate,
+              location: receivedItem.location || 'Main Warehouse',
+              condition: receivedItem.condition,
+              notes: `Received from PO ${order.orderNumber}`,
+              minimumStockLevel: 0,
+              maximumStockLevel: 0,
+              isActive: true,
+              created_at: new Date(),
+              updated_at: new Date()
+            });
+
+            // Create transaction record
+            await trx('transactions').insert({
+              transactionNumber: `PURCHASE-${Date.now()}-${orderItem.id}`,
+              transactionType: 'purchase',
+              referenceId: id,
+              referenceType: 'purchase_order',
+              materialId: orderItem.materialId,
+              quantity: receivedItem.receivedQuantity,
+              amount: receivedItem.receivedQuantity * orderItem.unitPrice,
+              transactionDate: new Date(),
+              description: `Purchase received - Order ${order.orderNumber}`,
+              createdBy: req.user.userId,
+              created_at: new Date(),
+              updated_at: new Date()
+            });
+          }
         }
 
         // Update purchase order status

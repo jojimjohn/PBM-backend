@@ -21,12 +21,22 @@ const materialSchema = Joi.object({
   unit: Joi.string().max(20).required().default('liters'),
   standardPrice: Joi.number().min(0).precision(3).default(0),
   minimumPrice: Joi.number().min(0).precision(3).default(0),
-  density: Joi.number().min(0).precision(4).optional(),
-  shelfLifeDays: Joi.number().integer().min(0).optional(),
+  density: Joi.number().min(0).precision(4).allow(null).optional(),
+  shelfLifeDays: Joi.number().integer().min(0).allow(null).optional(),
   specifications: Joi.string().allow('').optional(),
   barcode: Joi.string().max(100).allow('').optional(),
   trackBatches: Joi.boolean().default(false),
-  isActive: Joi.boolean().default(true)
+  isActive: Joi.boolean().default(true),
+  is_composite: Joi.boolean().default(false),
+  compositions: Joi.array().items(
+    Joi.object({
+      component_material_id: Joi.number().integer().positive().required(),
+      component_type: Joi.string().valid('container', 'content').required(),
+      capacity: Joi.number().min(0).precision(3).allow(null).optional(),
+      capacity_unit: Joi.string().max(20).allow('', null).optional(),
+      is_active: Joi.alternatives().try(Joi.boolean(), Joi.number().valid(0, 1)).default(true)
+    })
+  ).optional()
 });
 
 // GET /api/materials - List all materials
@@ -317,12 +327,26 @@ router.get('/:id',
         .where({ materialId: id, isActive: true })
         .first();
 
+      // Get composition components if this is a composite material
+      const compositions = await db('material_compositions')
+        .leftJoin('materials as component', 'material_compositions.component_material_id', 'component.id')
+        .select(
+          'material_compositions.*',
+          'component.name as component_material_name',
+          'component.code as component_material_code'
+        )
+        .where('material_compositions.composite_material_id', id)
+        .where('material_compositions.is_active', 1)
+        .orderBy('material_compositions.component_type', 'desc'); // content first, then container
+
       const materialWithInventory = {
         ...material,
         currentStock: inventory.totalQuantity || 0,
         reservedStock: inventory.totalReserved || 0,
         availableStock: (inventory.totalQuantity || 0) - (inventory.totalReserved || 0),
-        averageCost: inventory.avgCost || 0
+        averageCost: inventory.avgCost || 0,
+        is_composite: compositions.length > 0,
+        compositions: compositions
       };
 
       auditLog('MATERIAL_VIEWED', req.user.userId, {
@@ -350,7 +374,7 @@ router.get('/:id',
 );
 
 // POST /api/materials - Create new material
-router.post('/', 
+router.post('/',
   validate(materialSchema),
   requirePermission('MANAGE_INVENTORY'),
   async (req, res) => {
@@ -378,14 +402,33 @@ router.post('/',
         });
       }
 
+      // Extract compositions before creating material data
+      const { compositions, ...materialFields } = req.body;
+
       const materialData = {
-        ...req.body,
+        ...materialFields,
         created_at: new Date(),
         updated_at: new Date()
       };
 
       const [materialId] = await db('materials').insert(materialData);
-      
+
+      // If this is a composite material, create compositions
+      if (req.body.is_composite && compositions && compositions.length > 0) {
+        const compositionData = compositions.map(comp => ({
+          composite_material_id: materialId,
+          component_material_id: comp.component_material_id,
+          component_type: comp.component_type,
+          capacity: comp.capacity || null,
+          capacity_unit: comp.capacity_unit || null,
+          is_active: comp.is_active !== undefined ? comp.is_active : 1,
+          created_at: new Date(),
+          updated_at: new Date()
+        }));
+
+        await db('material_compositions').insert(compositionData);
+      }
+
       const newMaterial = await db('materials')
         .where({ id: materialId })
         .first();
@@ -394,14 +437,16 @@ router.post('/',
         materialId,
         materialName: newMaterial.name,
         materialCode: newMaterial.code,
-        category: newMaterial.category
+        category: newMaterial.category,
+        is_composite: newMaterial.is_composite
       });
 
       logger.info('Material created', {
         materialId,
         materialName: newMaterial.name,
         materialCode: newMaterial.code,
-        createdBy: req.user.userId
+        createdBy: req.user.userId,
+        is_composite: newMaterial.is_composite
       });
 
       res.status(201).json({
@@ -411,8 +456,8 @@ router.post('/',
       });
 
     } catch (error) {
-      logger.error('Error creating material', { 
-        error: error.message, 
+      logger.error('Error creating material', {
+        error: error.message,
         userId: req.user.userId,
         materialData: req.body
       });
@@ -470,14 +515,46 @@ router.put('/:id',
         });
       }
 
+      // Extract compositions before updating material data
+      const { compositions, ...materialFields } = req.body;
+
       const updateData = {
-        ...req.body,
+        ...materialFields,
         updated_at: new Date()
       };
 
       await db('materials')
         .where({ id })
         .update(updateData);
+
+      // Update compositions if this is a composite material
+      if (req.body.is_composite) {
+        // Delete existing compositions
+        await db('material_compositions')
+          .where({ composite_material_id: id })
+          .delete();
+
+        // Insert new compositions if provided
+        if (compositions && compositions.length > 0) {
+          const compositionData = compositions.map(comp => ({
+            composite_material_id: id,
+            component_material_id: comp.component_material_id,
+            component_type: comp.component_type,
+            capacity: comp.capacity || null,
+            capacity_unit: comp.capacity_unit || null,
+            is_active: comp.is_active !== undefined ? comp.is_active : 1,
+            created_at: new Date(),
+            updated_at: new Date()
+          }));
+
+          await db('material_compositions').insert(compositionData);
+        }
+      } else {
+        // If changing from composite to standard, delete compositions
+        await db('material_compositions')
+          .where({ composite_material_id: id })
+          .delete();
+      }
 
       const updatedMaterial = await db('materials')
         .where({ id })
@@ -503,8 +580,8 @@ router.put('/:id',
       });
 
     } catch (error) {
-      logger.error('Error updating material', { 
-        error: error.message, 
+      logger.error('Error updating material', {
+        error: error.message,
         materialId: req.params.id,
         userId: req.user.userId
       });
