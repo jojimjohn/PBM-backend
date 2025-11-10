@@ -102,7 +102,7 @@ router.get('/', requirePermission('VIEW_PURCHASE'), async (req, res) => {
         'purchase_orders.orderNumber as purchaseOrderNumber',
         'collection_orders.orderNumber as collectionOrderNumber',
         'suppliers.name as supplierName',
-        'supplier_locations.name as locationName'
+        'supplier_locations.locationName as locationName'
       );
 
     // Search filter
@@ -113,7 +113,7 @@ router.get('/', requirePermission('VIEW_PURCHASE'), async (req, res) => {
             .orWhere('purchase_orders.orderNumber', 'like', `%${search}%`)
             .orWhere('collection_orders.orderNumber', 'like', `%${search}%`)
             .orWhere('suppliers.name', 'like', `%${search}%`)
-            .orWhere('supplier_locations.name', 'like', `%${search}%`);
+            .orWhere('supplier_locations.locationName', 'like', `%${search}%`);
       });
     }
 
@@ -222,7 +222,7 @@ router.get('/:id', requirePermission('VIEW_PURCHASE'), validateParams(['id']), a
         'collection_orders.orderNumber as collectionOrderNumber',
         'collection_orders.orderDate as collectionOrderDate',
         'suppliers.name as supplierName',
-        'supplier_locations.name as locationName'
+        'supplier_locations.locationName as locationName'
       )
       .where('unified_expenses.id', id)
       .first();

@@ -3,12 +3,27 @@ const { validate, validateParams, sanitize } = require('../middleware/validation
 const { requirePermission } = require('../middleware/auth');
 const { logger, auditLog } = require('../utils/logger');
 const { getDbConnection } = require('../config/database');
+const { uploadMultiple, deleteFile, fileExists } = require('../middleware/upload');
+const path = require('path');
 const Joi = require('joi');
 
 const router = express.Router();
 
 // Apply sanitization to all routes
 router.use(sanitize);
+
+// Helper function to format payment terms for display
+const formatPaymentTermsForDisplay = (paymentTerms) => {
+  const termsMap = {
+    'immediate': 'Payment Terms: Immediate',
+    'net_30': 'Payment Terms: Net 30 Days',
+    'net_60': 'Payment Terms: Net 60 Days',
+    'net_90': 'Payment Terms: Net 90 Days',
+    'advance': 'Payment Terms: Advance Payment',
+    'cod': 'Payment Terms: Cash on Delivery'
+  };
+  return termsMap[paymentTerms] || 'Payment Terms: Net 30 Days';
+};
 
 // Purchase order validation schema
 const purchaseOrderSchema = Joi.object({
@@ -17,6 +32,7 @@ const purchaseOrderSchema = Joi.object({
   supplierName: Joi.string().allow('').optional(), // For display purposes, not stored
   orderDate: Joi.date().default(() => new Date()),
   expectedDeliveryDate: Joi.alternatives().try(Joi.date(), Joi.string().allow('').allow(null)).optional(),
+  paymentTerms: Joi.string().valid('immediate', 'net_30', 'net_60', 'net_90', 'advance', 'cod').default('net_30'),
   status: Joi.string().valid('draft', 'pending', 'approved', 'sent', 'received', 'completed', 'cancelled').default('draft'),
   subtotal: Joi.number().min(0).precision(3).default(0),
   taxAmount: Joi.number().min(0).precision(3).default(0),
@@ -231,6 +247,17 @@ router.get('/:id',
         itemsCount: items.length
       });
 
+      // Parse attachments JSON
+      let attachments = [];
+      if (order.attachments) {
+        try {
+          attachments = JSON.parse(order.attachments);
+        } catch (e) {
+          logger.warn('Failed to parse attachments JSON', { orderId: id, error: e.message });
+          attachments = [];
+        }
+      }
+
       // Convert DECIMAL strings to numbers for consistent JSON format
       const formattedOrder = {
         ...order,
@@ -238,6 +265,7 @@ router.get('/:id',
         taxAmount: parseFloat(order.taxAmount) || 0,
         totalAmount: parseFloat(order.totalAmount) || 0,
         shippingCost: parseFloat(order.shippingCost) || 0,
+        attachments: attachments,
         items: items.map(item => ({
           ...item,
           quantityOrdered: parseFloat(item.quantityOrdered) || 0,
@@ -330,7 +358,7 @@ router.post('/',
         totalAmount: parseFloat(orderFields.totalAmount) || 0,
         currency: 'OMR',
         deliveryAddress: orderFields.deliveryAddress || null,
-        terms: `Payment Terms: ${orderFields.paymentTerms || 30} days`,
+        terms: orderFields.paymentTerms ? formatPaymentTermsForDisplay(orderFields.paymentTerms) : 'Payment Terms: Net 30 Days',
         notes: orderFields.notes || null,
         createdBy: userId,
         approvedBy: null,
@@ -1245,6 +1273,232 @@ router.get('/contract-rate/:supplierId/:materialId',
       res.status(500).json({
         success: false,
         error: 'Failed to fetch purchase contract rate'
+      });
+    }
+  }
+);
+
+// POST /api/purchase-orders/:id/attachments - Upload attachments to purchase order
+router.post('/:id/attachments',
+  validateParams(Joi.object({ id: Joi.number().integer().positive().required() })),
+  requirePermission('CREATE_PURCHASE'),
+  (req, res, next) => {
+    // Set upload type for multer destination
+    req.params.type = 'purchase-orders';
+    next();
+  },
+  uploadMultiple,
+  async (req, res) => {
+    try {
+      const { id } = req.params;
+      const { companyId, userId } = req.user;
+      const db = getDbConnection(companyId);
+
+      // Check if purchase order exists
+      const order = await db('purchase_orders')
+        .where({ id })
+        .first();
+
+      if (!order) {
+        // Delete uploaded files if order doesn't exist
+        if (req.files && req.files.length > 0) {
+          req.files.forEach(file => {
+            deleteFile(`purchase-orders/${file.filename}`);
+          });
+        }
+        return res.status(404).json({
+          success: false,
+          error: 'Purchase order not found'
+        });
+      }
+
+      // Get existing attachments
+      let attachments = [];
+      if (order.attachments) {
+        try {
+          attachments = JSON.parse(order.attachments);
+        } catch (e) {
+          attachments = [];
+        }
+      }
+
+      // Add new attachments
+      if (req.files && req.files.length > 0) {
+        req.files.forEach(file => {
+          attachments.push({
+            filename: file.filename,
+            originalName: file.originalname,
+            mimetype: file.mimetype,
+            size: file.size,
+            path: `purchase-orders/${file.filename}`,
+            uploadedAt: new Date().toISOString(),
+            uploadedBy: userId
+          });
+        });
+      }
+
+      // Update purchase order with new attachments
+      await db('purchase_orders')
+        .where({ id })
+        .update({
+          attachments: JSON.stringify(attachments),
+          updated_at: new Date()
+        });
+
+      auditLog('PURCHASE_ORDER_ATTACHMENTS_UPLOADED', userId, {
+        purchaseOrderId: id,
+        orderNumber: order.orderNumber,
+        filesCount: req.files.length
+      });
+
+      res.json({
+        success: true,
+        data: attachments,
+        message: `${req.files.length} file(s) uploaded successfully`
+      });
+
+    } catch (error) {
+      logger.error('Error uploading purchase order attachments', {
+        error: error.message,
+        purchaseOrderId: req.params.id,
+        userId: req.user.userId
+      });
+      res.status(500).json({
+        success: false,
+        error: 'Failed to upload attachments'
+      });
+    }
+  }
+);
+
+// GET /api/purchase-orders/:id/attachments - Get attachments for purchase order
+router.get('/:id/attachments',
+  validateParams(Joi.object({ id: Joi.number().integer().positive().required() })),
+  requirePermission('VIEW_PURCHASE'),
+  async (req, res) => {
+    try {
+      const { id } = req.params;
+      const { companyId } = req.user;
+      const db = getDbConnection(companyId);
+
+      const order = await db('purchase_orders')
+        .select('attachments')
+        .where({ id })
+        .first();
+
+      if (!order) {
+        return res.status(404).json({
+          success: false,
+          error: 'Purchase order not found'
+        });
+      }
+
+      let attachments = [];
+      if (order.attachments) {
+        try {
+          attachments = JSON.parse(order.attachments);
+        } catch (e) {
+          attachments = [];
+        }
+      }
+
+      res.json({
+        success: true,
+        data: attachments
+      });
+
+    } catch (error) {
+      logger.error('Error fetching purchase order attachments', {
+        error: error.message,
+        purchaseOrderId: req.params.id,
+        userId: req.user.userId
+      });
+      res.status(500).json({
+        success: false,
+        error: 'Failed to fetch attachments'
+      });
+    }
+  }
+);
+
+// DELETE /api/purchase-orders/:id/attachments/:filename - Delete attachment from purchase order
+router.delete('/:id/attachments/:filename',
+  validateParams(Joi.object({
+    id: Joi.number().integer().positive().required(),
+    filename: Joi.string().required()
+  })),
+  requirePermission('CREATE_PURCHASE'),
+  async (req, res) => {
+    try {
+      const { id, filename } = req.params;
+      const { companyId, userId } = req.user;
+      const db = getDbConnection(companyId);
+
+      const order = await db('purchase_orders')
+        .where({ id })
+        .first();
+
+      if (!order) {
+        return res.status(404).json({
+          success: false,
+          error: 'Purchase order not found'
+        });
+      }
+
+      let attachments = [];
+      if (order.attachments) {
+        try {
+          attachments = JSON.parse(order.attachments);
+        } catch (e) {
+          attachments = [];
+        }
+      }
+
+      // Find and remove the attachment
+      const attachmentIndex = attachments.findIndex(att => att.filename === filename);
+
+      if (attachmentIndex === -1) {
+        return res.status(404).json({
+          success: false,
+          error: 'Attachment not found'
+        });
+      }
+
+      const removedAttachment = attachments[attachmentIndex];
+      attachments.splice(attachmentIndex, 1);
+
+      // Delete the file from disk
+      deleteFile(`purchase-orders/${filename}`);
+
+      // Update database
+      await db('purchase_orders')
+        .where({ id })
+        .update({
+          attachments: JSON.stringify(attachments),
+          updated_at: new Date()
+        });
+
+      auditLog('PURCHASE_ORDER_ATTACHMENT_DELETED', userId, {
+        purchaseOrderId: id,
+        orderNumber: order.orderNumber,
+        filename: removedAttachment.originalName
+      });
+
+      res.json({
+        success: true,
+        message: 'Attachment deleted successfully'
+      });
+
+    } catch (error) {
+      logger.error('Error deleting purchase order attachment', {
+        error: error.message,
+        purchaseOrderId: req.params.id,
+        filename: req.params.filename,
+        userId: req.user.userId
+      });
+      res.status(500).json({
+        success: false,
+        error: 'Failed to delete attachment'
       });
     }
   }

@@ -34,6 +34,8 @@ const customerTypesRoutes = require('./routes/customerTypes');
 const supplierTypesRoutes = require('./routes/supplierTypes');
 const branchesRoutes = require('./routes/branches');
 const materialCompositionsRoutes = require('./routes/materialCompositions');
+const purchaseOrderAmendmentsRoutes = require('./routes/purchaseOrderAmendments');
+const purchaseInvoicesRoutes = require('./routes/purchaseInvoices');
 const { authenticateToken } = require('./middleware/auth');
 const { initializeDatabases, healthCheck } = require('./config/database');
 
@@ -169,6 +171,8 @@ app.use('/api/customer-types', customerTypesRoutes);
 app.use('/api/supplier-types', supplierTypesRoutes);
 app.use('/api/branches', branchesRoutes);
 app.use('/api/material-compositions', materialCompositionsRoutes);
+app.use('/api/purchase-order-amendments', purchaseOrderAmendmentsRoutes);
+app.use('/api/purchase-invoices', purchaseInvoicesRoutes);
 
 // 404 handler
 app.use('*', (req, res) => {
