@@ -100,6 +100,12 @@ function convertDecimalFields(data) {
         converted[field] = parseFloat(converted[field]) || 0;
       }
     });
+
+    // Map database taxAmount to frontend vatAmount for consistency
+    if (converted.taxAmount !== undefined) {
+      converted.vatAmount = converted.taxAmount;
+    }
+
     // Convert items if present
     if (converted.items && Array.isArray(converted.items)) {
       converted.items = converted.items.map(item => convertObject(item));
@@ -390,13 +396,22 @@ router.post('/',
         updated_at: new Date()
       };
 
+      // Map vatAmount to taxAmount (database column)
+      if (vatAmount !== undefined) {
+        orderData.taxAmount = vatAmount;
+      }
+
       // Map deliveryDate to expectedDeliveryDate if provided
       if (deliveryDate) {
         orderData.expectedDeliveryDate = deliveryDate;
       }
 
-      // Remove orderStatus if it exists (not a DB column)
+      // Remove frontend-only fields that don't exist in DB
       delete orderData.orderStatus;
+      delete orderData.vatAmount;
+      delete orderData.vatRate;
+      delete orderData.netAmount;
+      delete orderData.discountPercent;
 
       const [orderId] = await db('sales_orders').insert(orderData);
 
@@ -423,8 +438,22 @@ router.post('/',
         .where('sales_orders.id', orderId)
         .first();
 
+      // Get order items with material details
+      const orderItems = await db('sales_order_items')
+        .leftJoin('materials', 'sales_order_items.materialId', 'materials.id')
+        .select(
+          'sales_order_items.*',
+          'materials.name as materialName',
+          'materials.code as materialCode',
+          'materials.unit',
+          'materials.category'
+        )
+        .where('sales_order_items.salesOrderId', orderId)
+        .orderBy('sales_order_items.id');
+
       // Convert decimal fields from strings to numbers
       const convertedOrder = convertDecimalFields(newOrder);
+      const convertedItems = convertDecimalFields(orderItems);
 
       auditLog('SALES_ORDER_CREATED', req.user.userId, {
         salesOrderId: orderId,
@@ -442,7 +471,10 @@ router.post('/',
       res.status(201).json({
         success: true,
         message: 'Sales order created successfully',
-        data: convertedOrder
+        data: {
+          ...convertedOrder,
+          salesOrderItems: convertedItems
+        }
       });
 
     } catch (error) {
@@ -507,13 +539,22 @@ router.put('/:id',
         updated_at: new Date()
       };
 
+      // Map vatAmount to taxAmount (database column)
+      if (vatAmount !== undefined) {
+        updateData.taxAmount = vatAmount;
+      }
+
       // Map deliveryDate to expectedDeliveryDate if provided
       if (deliveryDate) {
         updateData.expectedDeliveryDate = deliveryDate;
       }
 
-      // Remove orderStatus if it exists (not a DB column)
+      // Remove frontend-only fields that don't exist in DB
       delete updateData.orderStatus;
+      delete updateData.vatAmount;
+      delete updateData.vatRate;
+      delete updateData.netAmount;
+      delete updateData.discountPercent;
       // Don't allow changing order number
       delete updateData.orderNumber;
 
@@ -548,8 +589,22 @@ router.put('/:id',
         .where('sales_orders.id', id)
         .first();
 
+      // Get order items with material details
+      const orderItems = await db('sales_order_items')
+        .leftJoin('materials', 'sales_order_items.materialId', 'materials.id')
+        .select(
+          'sales_order_items.*',
+          'materials.name as materialName',
+          'materials.code as materialCode',
+          'materials.unit',
+          'materials.category'
+        )
+        .where('sales_order_items.salesOrderId', id)
+        .orderBy('sales_order_items.id');
+
       // Convert decimal fields from strings to numbers
       const convertedOrder = convertDecimalFields(updatedOrder);
+      const convertedItems = convertDecimalFields(orderItems);
 
       auditLog('SALES_ORDER_UPDATED', req.user.userId, {
         salesOrderId: id,
@@ -567,7 +622,10 @@ router.put('/:id',
       res.json({
         success: true,
         message: 'Sales order updated successfully',
-        data: convertedOrder
+        data: {
+          ...convertedOrder,
+          salesOrderItems: convertedItems
+        }
       });
 
     } catch (error) {
@@ -800,14 +858,108 @@ router.put('/:id/status',
       });
 
     } catch (error) {
-      logger.error('Error updating sales order status', { 
-        error: error.message, 
+      logger.error('Error updating sales order status', {
+        error: error.message,
         salesOrderId: req.params.id,
         userId: req.user.userId
       });
       res.status(500).json({
         success: false,
         error: 'Failed to update sales order status'
+      });
+    }
+  }
+);
+
+// POST /api/sales-orders/:id/invoice - Generate invoice from sales order
+router.post('/:id/invoice',
+  validateParams(Joi.object({ id: Joi.number().integer().positive().required() })),
+  requirePermission('CREATE_INVOICES'),
+  async (req, res) => {
+    try {
+      const { id } = req.params;
+      const { companyId, userId } = req.user;
+      const db = getDbConnection(companyId);
+
+      // Get sales order with items
+      const order = await db('sales_orders')
+        .where({ id })
+        .first();
+
+      if (!order) {
+        return res.status(404).json({
+          success: false,
+          error: 'Sales order not found'
+        });
+      }
+
+      // Only allow invoice generation for confirmed or delivered orders
+      if (order.status !== 'confirmed' && order.status !== 'delivered') {
+        return res.status(400).json({
+          success: false,
+          error: 'Invoice can only be generated for confirmed or delivered orders'
+        });
+      }
+
+      // Get order items
+      const items = await db('sales_order_items')
+        .select('sales_order_items.*', 'materials.name as materialName', 'materials.unit')
+        .leftJoin('materials', 'sales_order_items.materialId', 'materials.id')
+        .where({ salesOrderId: id });
+
+      if (items.length === 0) {
+        return res.status(400).json({
+          success: false,
+          error: 'Cannot generate invoice for order with no items'
+        });
+      }
+
+      // Generate invoice number
+      const invoiceNumber = `INV-${order.orderNumber}-${Date.now()}`;
+
+      // Create invoice record (stored in sales_orders table with invoice metadata)
+      await db('sales_orders')
+        .where({ id })
+        .update({
+          invoiceNumber,
+          invoiceGeneratedAt: new Date(),
+          invoiceGeneratedBy: userId,
+          updated_at: new Date()
+        });
+
+      auditLog('SALES_INVOICE_GENERATED', userId, {
+        salesOrderId: id,
+        orderNumber: order.orderNumber,
+        invoiceNumber,
+        totalAmount: order.totalAmount
+      });
+
+      res.json({
+        success: true,
+        message: 'Invoice generated successfully',
+        data: {
+          invoiceNumber,
+          orderNumber: order.orderNumber,
+          totalAmount: parseFloat(order.totalAmount || 0),
+          items: items.map(item => ({
+            materialName: item.materialName,
+            quantity: parseFloat(item.quantity || 0),
+            unitPrice: parseFloat(item.unitPrice || 0),
+            totalPrice: parseFloat(item.totalPrice || 0),
+            unit: item.unit
+          }))
+        }
+      });
+
+    } catch (error) {
+      logger.error('Error generating sales invoice', {
+        error: error.message,
+        salesOrderId: req.params.id,
+        userId: req.user.userId
+      });
+      res.status(500).json({
+        success: false,
+        error: 'Failed to generate invoice'
       });
     }
   }

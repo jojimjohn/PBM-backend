@@ -247,14 +247,19 @@ router.get('/:id',
         itemsCount: items.length
       });
 
-      // Parse attachments JSON
+      // Parse attachments (handle both string and object from DB)
       let attachments = [];
       if (order.attachments) {
-        try {
-          attachments = JSON.parse(order.attachments);
-        } catch (e) {
-          logger.warn('Failed to parse attachments JSON', { orderId: id, error: e.message });
-          attachments = [];
+        if (typeof order.attachments === 'string') {
+          try {
+            attachments = JSON.parse(order.attachments);
+          } catch (e) {
+            logger.warn('Failed to parse attachments JSON string', { orderId: id, error: e.message });
+            attachments = [];
+          }
+        } else if (Array.isArray(order.attachments)) {
+          // Already parsed by Knex
+          attachments = order.attachments;
         }
       }
 
