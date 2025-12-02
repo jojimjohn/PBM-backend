@@ -95,10 +95,13 @@ router.get('/', requirePermission('VIEW_PURCHASE'), async (req, res) => {
     
     let query = db('purchase_orders')
       .leftJoin('suppliers', 'purchase_orders.supplierId', 'suppliers.id')
+      .leftJoin('collection_orders', 'purchase_orders.collection_order_id', 'collection_orders.id')
       .select(
         'purchase_orders.*',
         'suppliers.name as supplierName',
         'suppliers.specialization',
+        'collection_orders.orderNumber as collectionOrderNumber',
+        'collection_orders.wcn_number',
         db.raw('(SELECT COUNT(*) FROM purchase_order_items WHERE purchase_order_items.purchaseOrderId = purchase_orders.id) as itemCount')
       )
       .whereNot('purchase_orders.status', 'cancelled');
@@ -191,6 +194,69 @@ router.get('/', requirePermission('VIEW_PURCHASE'), async (req, res) => {
   }
 });
 
+// GET /api/purchase-orders/unbilled/list - Get unbilled purchase orders for multi-PO vendor billing
+router.get('/unbilled/list', requirePermission('VIEW_PURCHASE'), async (req, res) => {
+  try {
+    const { companyId } = req.user;
+    const db = getDbConnection(companyId);
+
+    const { supplierId } = req.query;
+
+    // Query to find POs that don't have a vendor bill
+    // Company bills (bill_type='company') don't count as "billed" for multi-PO purposes
+    // Only vendor bills (bill_type='vendor') mark a PO as billed
+    let query = db('purchase_orders')
+      .leftJoin('suppliers', 'purchase_orders.supplierId', 'suppliers.id')
+      .leftJoin('purchase_invoices', function() {
+        this.on('purchase_invoices.bill_type', '=', db.raw('?', ['vendor']))
+            .andOn(db.raw('JSON_CONTAINS(purchase_invoices.covers_purchase_orders, CAST(purchase_orders.id AS JSON))'));
+      })
+      .select(
+        'purchase_orders.id',
+        'purchase_orders.orderNumber',
+        'purchase_orders.orderDate',
+        'purchase_orders.totalAmount',
+        'purchase_orders.supplierId',
+        'purchase_orders.status',
+        'purchase_orders.source_type',
+        'suppliers.name as supplierName'
+      )
+      .where('purchase_orders.status', 'received') // Only received POs can be billed
+      .whereNull('purchase_invoices.id'); // Not already covered by vendor bill
+
+    // Filter by supplier if provided
+    if (supplierId) {
+      query = query.where('purchase_orders.supplierId', supplierId);
+    }
+
+    const unbilledPOs = await query
+      .orderBy('purchase_orders.orderDate', 'desc')
+      .orderBy('purchase_orders.id', 'desc');
+
+    // Convert DECIMAL strings to numbers
+    const formattedPOs = unbilledPOs.map(po => ({
+      ...po,
+      totalAmount: parseFloat(po.totalAmount) || 0
+    }));
+
+    res.json({
+      success: true,
+      data: formattedPOs
+    });
+
+  } catch (error) {
+    logger.error('Error fetching unbilled purchase orders', {
+      error: error.message,
+      userId: req.user.userId,
+      companyId: req.user.companyId
+    });
+    res.status(500).json({
+      success: false,
+      error: 'Failed to fetch unbilled purchase orders'
+    });
+  }
+});
+
 // GET /api/purchase-orders/:id - Get specific purchase order with items
 router.get('/:id', 
   validateParams(Joi.object({ id: Joi.number().integer().positive().required() })),
@@ -201,16 +267,22 @@ router.get('/:id',
       const { companyId } = req.user;
       const db = getDbConnection(companyId);
 
-      // Get order details
+      // Get order details with source tracking
       const order = await db('purchase_orders')
         .leftJoin('suppliers', 'purchase_orders.supplierId', 'suppliers.id')
+        .leftJoin('collection_orders', 'purchase_orders.collection_order_id', 'collection_orders.id')
         .select(
           'purchase_orders.*',
           'suppliers.name as supplierName',
           'suppliers.specialization',
           'suppliers.phone as supplierPhone',
           'suppliers.address as supplierAddress',
-          'suppliers.contactPerson'
+          'suppliers.contactPerson',
+          'collection_orders.orderNumber as collectionOrderNumber',
+          'collection_orders.wcn_number',
+          'collection_orders.wcn_date',
+          'collection_orders.actualStartTime as collectionStartTime',
+          'collection_orders.actualEndTime as collectionEndTime'
         )
         .where('purchase_orders.id', id)
         .first();
@@ -263,6 +335,18 @@ router.get('/:id',
         }
       }
 
+      // Structure WCN details if PO is from WCN auto-generation
+      let wcn_details = null;
+      if (order.source_type === 'wcn_auto' && order.collection_order_id) {
+        wcn_details = {
+          wcn_number: order.wcn_number,
+          wcn_date: order.wcn_date,
+          collection_order_number: order.collectionOrderNumber,
+          collection_start_time: order.collectionStartTime,
+          collection_end_time: order.collectionEndTime
+        };
+      }
+
       // Convert DECIMAL strings to numbers for consistent JSON format
       const formattedOrder = {
         ...order,
@@ -271,6 +355,7 @@ router.get('/:id',
         totalAmount: parseFloat(order.totalAmount) || 0,
         shippingCost: parseFloat(order.shippingCost) || 0,
         attachments: attachments,
+        wcn_details: wcn_details,
         items: items.map(item => ({
           ...item,
           quantityOrdered: parseFloat(item.quantityOrdered) || 0,
@@ -795,6 +880,32 @@ router.put('/:id/receive',
         });
       }
 
+      // Check if this is a WCN auto-generated PO
+      if (order.source_type === 'wcn_auto') {
+        // WCN-generated POs already have inventory updated during WCN finalization
+        // Just update status to received
+        await db('purchase_orders')
+          .where({ id })
+          .update({
+            status: 'received',
+            notes: notes ? `${order.notes || ''}\nReceived (WCN auto): ${notes}` : order.notes,
+            updated_at: new Date()
+          });
+
+        auditLog('PURCHASE_ORDER_RECEIVED_WCN_AUTO', req.user.userId, {
+          purchaseOrderId: id,
+          orderNumber: order.orderNumber,
+          message: 'WCN auto-generated PO - inventory already updated during WCN finalization'
+        });
+
+        return res.json({
+          success: true,
+          message: 'Purchase order marked as received (inventory already updated via WCN finalization)',
+          wcn_auto: true
+        });
+      }
+
+      // Manual PO - process inventory updates
       await db.transaction(async (trx) => {
         for (const receivedItem of receivedItems) {
           // Get the order item details
@@ -1504,6 +1615,215 @@ router.delete('/:id/attachments/:filename',
       res.status(500).json({
         success: false,
         error: 'Failed to delete attachment'
+      });
+    }
+  }
+);
+
+// POST /api/purchase-orders/:id/link-wcn - Manually link PO to WCN and update inventory
+router.post('/:id/link-wcn',
+  validateParams(Joi.object({ id: Joi.number().integer().positive().required() })),
+  validate(Joi.object({
+    collectionOrderId: Joi.number().integer().positive().required(),
+    notes: Joi.string().allow('').optional()
+  })),
+  requirePermission('EDIT_PURCHASE'),
+  async (req, res) => {
+    try {
+      const { id } = req.params;
+      const { collectionOrderId, notes } = req.body;
+      const { companyId, userId } = req.user;
+      const db = getDbConnection(companyId);
+
+      await db.transaction(async (trx) => {
+        // 1. Verify PO exists and is manual
+        const po = await trx('purchase_orders')
+          .where({ id })
+          .first();
+
+        if (!po) {
+          throw new Error('Purchase order not found');
+        }
+
+        if (po.source_type === 'wcn_auto') {
+          throw new Error('Cannot manually link WCN to auto-generated PO. This PO was already created from WCN finalization.');
+        }
+
+        if (po.collection_order_id) {
+          throw new Error('This PO is already linked to a collection order');
+        }
+
+        // 2. Verify collection order exists and is finalized
+        const collection = await trx('collection_orders')
+          .where({ id: collectionOrderId })
+          .first();
+
+        if (!collection) {
+          throw new Error('Collection order not found');
+        }
+
+        if (!collection.is_finalized || !collection.wcn_number) {
+          throw new Error('Collection order must be finalized with WCN before linking to PO');
+        }
+
+        if (collection.purchase_order_id && collection.purchase_order_id !== id) {
+          throw new Error('This WCN is already linked to another purchase order');
+        }
+
+        // 3. Verify supplier matches
+        if (po.supplierId !== collection.supplierId) {
+          throw new Error('PO supplier must match collection order supplier');
+        }
+
+        // 4. Get collection items
+        const collectionItems = await trx('collection_items')
+          .where({ collectionOrderId })
+          .select('*');
+
+        if (collectionItems.length === 0) {
+          throw new Error('Collection order has no items');
+        }
+
+        // 5. Update inventory from collection items (if not already done)
+        for (const item of collectionItems) {
+          // Check if material is composite
+          const material = await trx('materials')
+            .where({ id: item.materialId })
+            .first();
+
+          if (material && material.is_composite) {
+            // Get composite breakdown
+            const compositions = await trx('material_compositions')
+              .where('composite_material_id', item.materialId)
+              .where('is_active', 1);
+
+            for (const comp of compositions) {
+              // Calculate component quantity
+              let componentQuantity;
+              if (comp.component_type === 'container') {
+                componentQuantity = item.collectedQuantity;
+              } else if (comp.component_type === 'content') {
+                componentQuantity = item.collectedQuantity;
+              }
+
+              // Add component to inventory
+              await trx('inventory').insert({
+                materialId: comp.component_material_id,
+                batchNumber: `${collection.wcn_number}-${comp.component_material_id}`,
+                quantity: componentQuantity,
+                reservedQuantity: 0,
+                averageCost: 0,
+                lastPurchasePrice: 0,
+                lastPurchaseDate: new Date(),
+                location: 'Main Warehouse',
+                condition: 'new',
+                notes: `Split from composite material (Manual PO ${po.orderNumber} linked to WCN ${collection.wcn_number})`,
+                minimumStockLevel: 0,
+                maximumStockLevel: 0,
+                isActive: true,
+                created_at: new Date(),
+                updated_at: new Date()
+              });
+
+              // Create transaction record
+              await trx('transactions').insert({
+                transactionNumber: `WCN-LINK-${Date.now()}-${item.id}-${comp.id}`,
+                transactionType: 'purchase',
+                referenceId: id,
+                referenceType: 'purchase_order',
+                materialId: comp.component_material_id,
+                quantity: componentQuantity,
+                amount: 0,
+                transactionDate: new Date(),
+                description: `Component from WCN ${collection.wcn_number} linked to Manual PO ${po.orderNumber}`,
+                createdBy: userId,
+                created_at: new Date(),
+                updated_at: new Date()
+              });
+            }
+          } else {
+            // Regular material - add to inventory
+            await trx('inventory').insert({
+              materialId: item.materialId,
+              batchNumber: `${collection.wcn_number}-${item.materialId}`,
+              quantity: item.collectedQuantity,
+              reservedQuantity: 0,
+              averageCost: 0,
+              lastPurchasePrice: 0,
+              lastPurchaseDate: new Date(),
+              location: 'Main Warehouse',
+              condition: 'new',
+              notes: `From Manual PO ${po.orderNumber} linked to WCN ${collection.wcn_number}`,
+              minimumStockLevel: 0,
+              maximumStockLevel: 0,
+              isActive: true,
+              created_at: new Date(),
+              updated_at: new Date()
+            });
+
+            // Create transaction record
+            await trx('transactions').insert({
+              transactionNumber: `WCN-LINK-${Date.now()}-${item.id}`,
+              transactionType: 'purchase',
+              referenceId: id,
+              referenceType: 'purchase_order',
+              materialId: item.materialId,
+              quantity: item.collectedQuantity,
+              amount: item.collectedQuantity * parseFloat(item.agreedRate || 0),
+              transactionDate: new Date(),
+              description: `From WCN ${collection.wcn_number} linked to Manual PO ${po.orderNumber}`,
+              createdBy: userId,
+              created_at: new Date(),
+              updated_at: new Date()
+            });
+          }
+        }
+
+        // 6. Link PO to collection order
+        await trx('purchase_orders')
+          .where({ id })
+          .update({
+            collection_order_id: collectionOrderId,
+            status: 'received',
+            notes: notes
+              ? `${po.notes || ''}\n[Linked to WCN ${collection.wcn_number}] ${notes}`
+              : `${po.notes || ''}\n[Linked to WCN ${collection.wcn_number}]`,
+            updated_at: new Date()
+          });
+
+        // 7. Update collection order to link back to PO
+        await trx('collection_orders')
+          .where({ id: collectionOrderId })
+          .update({
+            purchase_order_id: id,
+            updated_at: new Date()
+          });
+
+        auditLog('PURCHASE_ORDER_WCN_LINKED', userId, {
+          purchaseOrderId: id,
+          orderNumber: po.orderNumber,
+          collectionOrderId,
+          wcnNumber: collection.wcn_number,
+          itemsCount: collectionItems.length,
+          linkType: 'manual'
+        });
+      });
+
+      res.json({
+        success: true,
+        message: 'PO successfully linked to WCN and inventory updated'
+      });
+
+    } catch (error) {
+      logger.error('Error linking PO to WCN', {
+        error: error.message,
+        purchaseOrderId: req.params.id,
+        collectionOrderId: req.body.collectionOrderId,
+        userId: req.user.userId
+      });
+      res.status(500).json({
+        success: false,
+        error: error.message || 'Failed to link PO to WCN'
       });
     }
   }

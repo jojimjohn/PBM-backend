@@ -10,6 +10,19 @@ const router = express.Router();
 // Apply sanitization to all routes
 router.use(sanitize);
 
+// Helper function to format payment terms for display (matches purchaseOrders.js)
+const formatPaymentTermsForDisplay = (paymentTerms) => {
+  const termsMap = {
+    'immediate': 'Payment Terms: Immediate',
+    'net_30': 'Payment Terms: Net 30 Days',
+    'net_60': 'Payment Terms: Net 60 Days',
+    'net_90': 'Payment Terms: Net 90 Days',
+    'advance': 'Payment Terms: Advance Payment',
+    'cod': 'Payment Terms: Cash on Delivery'
+  };
+  return termsMap[paymentTerms] || 'Payment Terms: Net 30 Days';
+};
+
 // Amendment creation validation schema
 const amendmentSchema = Joi.object({
   originalOrderId: Joi.number().integer().positive().required(),
@@ -19,17 +32,17 @@ const amendmentSchema = Joi.object({
   orderDate: Joi.alternatives().try(Joi.date(), Joi.string().allow('').allow(null)).optional(),
   vendorId: Joi.number().integer().positive().allow(null).allow('').optional(),
   branchId: Joi.number().integer().positive().allow(null).allow('').optional(),
-  paymentTerms: Joi.string().valid('immediate', 'net_30', 'net_60', 'net_90', 'advance', 'cod').optional(),
+  paymentTerms: Joi.string().valid('immediate', 'net_30', 'net_60', 'net_90', 'advance', 'cod').allow(null).allow('').optional(),
   expectedDeliveryDate: Joi.alternatives().try(Joi.date(), Joi.string().allow('').allow(null)).optional(),
-  shippingCost: Joi.number().min(0).precision(3).optional(),
+  shippingCost: Joi.number().min(0).precision(3).allow(null).optional(),
   notes: Joi.string().allow('').allow(null).optional(),
   items: Joi.array().items(Joi.object({
-    id: Joi.number().integer().positive().optional(), // Existing item ID (for updates)
+    id: Joi.number().integer().positive().allow(null).optional(), // Existing item ID (for updates)
     materialId: Joi.number().integer().positive().required(),
     quantity: Joi.number().min(0.001).precision(3).required(),
     rate: Joi.number().min(0).precision(3).required(),
     amount: Joi.number().min(0).precision(3).required()
-  })).optional()
+  })).allow(null).optional()
 }).options({ stripUnknown: true });
 
 // Amendment approval schema
@@ -215,6 +228,12 @@ router.post('/',
           throw new Error('Cannot amend a cancelled purchase order');
         }
 
+        // Block amendments on auto-generated POs from WCN finalization
+        // These POs must stay in sync with their source WCN - use WCN rectification instead
+        if (originalOrder.source_type === 'wcn_auto') {
+          throw new Error('Cannot amend auto-generated purchase orders from WCN. Use WCN rectification to modify quantities, which will automatically update this PO.');
+        }
+
         // Check for pending amendment
         const pendingAmendment = await trx('purchase_order_amendments')
           .where({ original_order_id: originalOrderId, status: 'pending' })
@@ -378,7 +397,10 @@ router.put('/:id/approve',
             orderDate: proposedChanges.orderDate,
             supplierId: proposedChanges.supplierId, // Database uses supplierId
             branch_id: proposedChanges.branch_id, // Database uses branch_id
-            paymentTerms: proposedChanges.paymentTerms,
+            // FIX: Database has 'terms' column, not 'paymentTerms'
+            terms: proposedChanges.paymentTerms
+              ? formatPaymentTermsForDisplay(proposedChanges.paymentTerms)
+              : originalOrder.terms,
             expectedDeliveryDate: proposedChanges.expectedDeliveryDate,
             shippingCost: proposedChanges.shippingCost,
             subtotal: proposedChanges.subtotal,

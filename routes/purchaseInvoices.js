@@ -14,7 +14,17 @@ router.use(sanitize);
 // Purchase invoice validation schema
 const purchaseInvoiceSchema = Joi.object({
   invoiceNumber: Joi.string().trim().required(),
-  purchaseOrderId: Joi.number().integer().positive().required(),
+  billType: Joi.string().valid('company', 'vendor').default('company'),
+  purchaseOrderId: Joi.number().integer().positive().when('billType', {
+    is: 'company',
+    then: Joi.number().integer().positive().required(),
+    otherwise: Joi.optional().allow(null)
+  }),
+  coversPurchaseOrders: Joi.array().items(Joi.number().integer().positive()).min(1).when('billType', {
+    is: 'vendor',
+    then: Joi.array().items(Joi.number().integer().positive()).min(1).required(),
+    otherwise: Joi.forbidden()
+  }),
   supplierId: Joi.number().integer().positive().required(),
   branchId: Joi.number().integer().positive().allow(null).optional(),
   invoiceDate: Joi.date().required(),
@@ -106,12 +116,15 @@ router.get('/', requirePermission('VIEW_PURCHASE'), async (req, res) => {
       .limit(limit)
       .offset(offset);
 
-    // Convert DECIMAL strings to numbers
+    // Convert DECIMAL strings to numbers and parse JSON fields
     const formattedInvoices = invoices.map(invoice => ({
       ...invoice,
       invoice_amount: parseFloat(invoice.invoice_amount) || 0,
       paid_amount: parseFloat(invoice.paid_amount) || 0,
-      balance_due: parseFloat(invoice.balance_due) || 0
+      balance_due: parseFloat(invoice.balance_due) || 0,
+      covers_purchase_orders: invoice.covers_purchase_orders
+        ? JSON.parse(invoice.covers_purchase_orders)
+        : null
     }));
 
     res.json({
@@ -174,13 +187,16 @@ router.get('/:id',
         });
       }
 
-      // Convert DECIMAL strings to numbers
+      // Convert DECIMAL strings to numbers and parse JSON fields
       const formattedInvoice = {
         ...invoice,
         invoice_amount: parseFloat(invoice.invoice_amount) || 0,
         paid_amount: parseFloat(invoice.paid_amount) || 0,
         balance_due: parseFloat(invoice.balance_due) || 0,
-        orderTotalAmount: parseFloat(invoice.orderTotalAmount) || 0
+        orderTotalAmount: parseFloat(invoice.orderTotalAmount) || 0,
+        covers_purchase_orders: invoice.covers_purchase_orders
+          ? JSON.parse(invoice.covers_purchase_orders)
+          : null
       };
 
       res.json({
@@ -202,7 +218,7 @@ router.get('/:id',
   }
 );
 
-// POST /api/purchase-invoices - Create new invoice from PO
+// POST /api/purchase-invoices - Create new invoice (company or vendor bill)
 router.post('/',
   validate(purchaseInvoiceSchema),
   requirePermission('CREATE_PURCHASE'),
@@ -211,18 +227,7 @@ router.post('/',
       const { companyId, userId } = req.user;
       const db = getDbConnection(companyId);
       const invoiceData = req.body;
-
-      // Verify purchase order exists
-      const purchaseOrder = await db('purchase_orders')
-        .where({ id: invoiceData.purchaseOrderId })
-        .first();
-
-      if (!purchaseOrder) {
-        return res.status(404).json({
-          success: false,
-          error: 'Purchase order not found'
-        });
-      }
+      const billType = invoiceData.billType || 'company';
 
       // Check if invoice number already exists
       const existingInvoice = await db('purchase_invoices')
@@ -236,6 +241,74 @@ router.post('/',
         });
       }
 
+      let purchaseOrder = null;
+      let branchId = invoiceData.branchId;
+      let purchaseOrders = [];
+
+      if (billType === 'company') {
+        // Company bill: Single PO
+        purchaseOrder = await db('purchase_orders')
+          .where({ id: invoiceData.purchaseOrderId })
+          .first();
+
+        if (!purchaseOrder) {
+          return res.status(404).json({
+            success: false,
+            error: 'Purchase order not found'
+          });
+        }
+
+        // Verify supplier matches
+        if (purchaseOrder.supplierId !== invoiceData.supplierId) {
+          return res.status(400).json({
+            success: false,
+            error: 'Purchase order supplier does not match invoice supplier'
+          });
+        }
+
+        branchId = branchId || purchaseOrder.branch_id;
+
+      } else if (billType === 'vendor') {
+        // Vendor bill: Multi-PO
+        if (!invoiceData.coversPurchaseOrders || invoiceData.coversPurchaseOrders.length === 0) {
+          return res.status(400).json({
+            success: false,
+            error: 'Vendor bill must cover at least one purchase order'
+          });
+        }
+
+        // Fetch all purchase orders
+        purchaseOrders = await db('purchase_orders')
+          .whereIn('id', invoiceData.coversPurchaseOrders)
+          .select('*');
+
+        if (purchaseOrders.length !== invoiceData.coversPurchaseOrders.length) {
+          return res.status(404).json({
+            success: false,
+            error: 'One or more purchase orders not found'
+          });
+        }
+
+        // Verify all POs belong to same supplier
+        const uniqueSuppliers = [...new Set(purchaseOrders.map(po => po.supplierId))];
+        if (uniqueSuppliers.length > 1) {
+          return res.status(400).json({
+            success: false,
+            error: 'All purchase orders must belong to the same supplier'
+          });
+        }
+
+        if (uniqueSuppliers[0] !== invoiceData.supplierId) {
+          return res.status(400).json({
+            success: false,
+            error: 'Purchase orders supplier does not match invoice supplier'
+          });
+        }
+
+        // Use first PO's branch if not specified
+        branchId = branchId || purchaseOrders[0].branch_id;
+      }
+
       // Calculate due date if not provided
       let dueDate = invoiceData.dueDate;
       if (!dueDate && invoiceData.paymentTermsDays > 0) {
@@ -247,9 +320,13 @@ router.post('/',
       // Create invoice
       const [invoiceId] = await db('purchase_invoices').insert({
         invoice_number: invoiceData.invoiceNumber,
-        purchase_order_id: invoiceData.purchaseOrderId,
+        bill_type: billType,
+        purchase_order_id: billType === 'company' ? invoiceData.purchaseOrderId : null,
+        covers_purchase_orders: billType === 'vendor'
+          ? JSON.stringify(invoiceData.coversPurchaseOrders)
+          : null,
         supplier_id: invoiceData.supplierId,
-        branch_id: invoiceData.branchId || purchaseOrder.branch_id,
+        branch_id: branchId,
         invoice_date: invoiceData.invoiceDate,
         due_date: dueDate,
         payment_status: 'unpaid',
@@ -262,18 +339,27 @@ router.post('/',
         updated_at: new Date()
       });
 
-      auditLog('PURCHASE_INVOICE_CREATED', userId, {
+      const auditData = {
         invoiceId,
         invoiceNumber: invoiceData.invoiceNumber,
-        purchaseOrderId: invoiceData.purchaseOrderId,
-        orderNumber: purchaseOrder.orderNumber,
+        billType,
         amount: invoiceData.invoiceAmount
-      });
+      };
+
+      if (billType === 'company') {
+        auditData.purchaseOrderId = invoiceData.purchaseOrderId;
+        auditData.orderNumber = purchaseOrder.orderNumber;
+      } else {
+        auditData.coversPurchaseOrders = invoiceData.coversPurchaseOrders;
+        auditData.purchaseOrderCount = purchaseOrders.length;
+      }
+
+      auditLog('PURCHASE_INVOICE_CREATED', userId, auditData);
 
       res.json({
         success: true,
         data: { id: invoiceId },
-        message: 'Purchase invoice created successfully'
+        message: `${billType === 'company' ? 'Company' : 'Vendor'} invoice created successfully`
       });
 
     } catch (error) {

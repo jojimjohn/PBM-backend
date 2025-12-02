@@ -164,9 +164,10 @@ router.get('/callouts', requirePermission('VIEW_COLLECTIONS'), async (req, res) 
     const { companyId } = req.user;
     const db = getDbConnection(companyId);
     
-    const { 
-      page = 1, 
-      limit = 50, 
+    const {
+      page = 1,
+      limit = 50,
+      status = '',
       priority = '',
       search = '',
       supplierId = '',
@@ -174,7 +175,7 @@ router.get('/callouts', requirePermission('VIEW_COLLECTIONS'), async (req, res) 
     } = req.query;
 
     const offset = (page - 1) * limit;
-    
+
     // Check if collection_orders table exists
     const tableExists = await db.schema.hasTable('collection_orders');
     if (!tableExists) {
@@ -196,8 +197,17 @@ router.get('/callouts', requirePermission('VIEW_COLLECTIONS'), async (req, res) 
         'suppliers.name as supplierName',
         'supplier_locations.locationName',
         'supplier_locations.locationCode'
-      )
-      .where('collection_orders.status', 'scheduled');
+      );
+
+    // Status filter - if not provided, show all statuses
+    if (status && status !== 'all') {
+      query = query.where('collection_orders.status', status);
+    }
+
+    // Priority filter
+    if (priority && priority !== 'all') {
+      query = query.where('collection_orders.priority', priority);
+    }
 
     // Debug: Log the query and results
     // Fix: Update existing records with empty status to 'scheduled'
@@ -458,7 +468,7 @@ router.put('/:id/driver',
 router.put('/:id/status', 
   validateParams(Joi.object({ id: Joi.number().integer().positive().required() })),
   validate(Joi.object({
-    status: Joi.string().valid('scheduled', 'in_progress', 'completed', 'cancelled').required(),
+    status: Joi.string().valid('scheduled', 'in_transit', 'collecting', 'completed', 'cancelled', 'failed').required(),
     notes: Joi.string().allow('').optional(),
     actualCollectionDate: Joi.date().optional(),
     actualQuantity: Joi.number().min(0).precision(3).optional()
@@ -483,18 +493,18 @@ router.put('/:id/status',
         });
       }
 
-      // Validate status transitions
-      const validTransitions = {
-        'scheduled': ['in_progress', 'cancelled'],
-        'in_progress': ['completed', 'cancelled'],
-        'completed': [], // Cannot transition from completed
-        'cancelled': [] // Cannot transition from cancelled
-      };
+      // Fix empty status values before validation
+      if (!collectionOrder.status || collectionOrder.status === '') {
+        collectionOrder.status = 'scheduled';
+        await db('collection_orders').where({ id }).update({ status: 'scheduled' });
+      }
 
-      if (!validTransitions[collectionOrder.status]?.includes(status)) {
+      // Allow all status transitions (matching database ENUM)
+      const validStatuses = ['scheduled', 'in_transit', 'collecting', 'completed', 'cancelled', 'failed'];
+      if (!validStatuses.includes(status)) {
         return res.status(400).json({
           success: false,
-          error: `Invalid status transition from ${collectionOrder.status} to ${status}`
+          error: `Invalid status: ${status}`
         });
       }
 
@@ -509,69 +519,25 @@ router.put('/:id/status',
       }
 
       // Set timestamps based on status
-      if (status === 'in_progress' && !collectionOrder.actualStartTime) {
+      if (status === 'in_transit' && !collectionOrder.actualStartTime) {
         updateData.actualStartTime = new Date();
       }
       
       if (status === 'completed') {
         updateData.actualEndTime = actualCollectionDate || new Date();
         updateData.completedBy = req.user.userId;
-        
+
         if (actualQuantity !== undefined) {
           updateData.actualQuantity = actualQuantity;
         }
 
-        // Auto-update inventory when collection is completed
-        const items = await db('collection_items')
-          .where({ collectionOrderId: id })
-          .where('collectedQuantity', '>', 0);
-
-        if (items.length > 0) {
-          await db.transaction(async (trx) => {
-            // Update inventory for each collected item
-            for (const item of items) {
-              await trx('inventory').insert({
-                materialId: item.materialId,
-                batchNumber: item.batchNumber || `CL-${collectionOrder.orderNumber}-${Date.now()}`,
-                quantity: item.collectedQuantity,
-                reservedQuantity: 0,
-                averageCost: item.contractRate || 0,
-                lastPurchasePrice: item.contractRate || 0,
-                lastPurchaseDate: new Date(),
-                location: 'Collection Warehouse',
-                condition: item.materialCondition || 'good',
-                notes: `Collected from ${collectionOrder.orderNumber}`,
-                minimumStockLevel: 0,
-                maximumStockLevel: 0,
-                isActive: true,
-                created_at: new Date(),
-                updated_at: new Date()
-              });
-
-              // Create transaction record
-              await trx('transactions').insert({
-                transactionNumber: `COLLECTION-${Date.now()}-${item.id}`,
-                transactionType: 'collection',
-                referenceId: id,
-                referenceType: 'collection_order',
-                materialId: item.materialId,
-                quantity: item.collectedQuantity,
-                amount: item.totalValue,
-                transactionDate: new Date(),
-                description: `Collection from ${collectionOrder.orderNumber}`,
-                createdBy: req.user.userId,
-                created_at: new Date(),
-                updated_at: new Date()
-              });
-            }
-          });
-
-          auditLog('COLLECTION_INVENTORY_UPDATED', req.user.userId, {
-            collectionOrderId: id,
-            orderNumber: collectionOrder.orderNumber,
-            itemsProcessed: items.length
-          });
-        }
+        // NOTE: Inventory is NOT updated here anymore.
+        // Inventory updates happen ONLY during WCN finalization (POST /:id/finalize-wcn)
+        // which properly handles:
+        // 1. Composite material auto-splitting into components
+        // 2. Proper WCN batch number tracking
+        // 3. Auto-PO generation for billing
+        // This prevents duplicate inventory entries.
       }
 
       await db('collection_orders')
@@ -591,14 +557,79 @@ router.put('/:id/status',
       });
 
     } catch (error) {
-      logger.error('Error updating collection order status', { 
-        error: error.message, 
+      logger.error('Error updating collection order status', {
+        error: error.message,
         collectionOrderId: req.params.id,
         userId: req.user.userId
       });
       res.status(500).json({
         success: false,
         error: 'Failed to update collection order status'
+      });
+    }
+  }
+);
+
+// PUT /api/collection-orders/:id/driver - Update driver details
+router.put('/:id/driver',
+  validateParams(Joi.object({ id: Joi.number().integer().positive().required() })),
+  validate(Joi.object({
+    driverName: Joi.string().required(),
+    driverPhone: Joi.string().allow('').optional(), // Not in DB but accepted for future
+    vehiclePlate: Joi.string().required(),
+    vehicleType: Joi.string().valid('truck', 'pickup', 'van', 'trailer').required()
+  })),
+  requirePermission('EDIT_COLLECTIONS'),
+  async (req, res) => {
+    try {
+      const { id } = req.params;
+      const { driverName, vehiclePlate, vehicleType } = req.body;
+      const { companyId } = req.user;
+      const db = getDbConnection(companyId);
+
+      // Check if collection order exists
+      const collectionOrder = await db('collection_orders')
+        .where({ id })
+        .first();
+
+      if (!collectionOrder) {
+        return res.status(404).json({
+          success: false,
+          error: 'Collection order not found'
+        });
+      }
+
+      // Update driver details (driverPhone not in DB schema)
+      await db('collection_orders')
+        .where({ id })
+        .update({
+          driverName,
+          vehiclePlate,
+          vehicleType,
+          updated_at: new Date()
+        });
+
+      auditLog('DRIVER_ASSIGNED', req.user.userId, {
+        collectionOrderId: id,
+        orderNumber: collectionOrder.orderNumber,
+        driverName,
+        vehiclePlate
+      });
+
+      res.json({
+        success: true,
+        message: 'Driver assigned successfully'
+      });
+
+    } catch (error) {
+      logger.error('Error assigning driver', {
+        error: error.message,
+        collectionOrderId: req.params.id,
+        userId: req.user.userId
+      });
+      res.status(500).json({
+        success: false,
+        error: 'Failed to assign driver'
       });
     }
   }
@@ -1284,6 +1315,808 @@ router.post('/:id/complete',
       res.status(500).json({
         success: false,
         error: 'Failed to complete collection order'
+      });
+    }
+  }
+);
+
+// ============================================================================
+// SPRINT 4.5: WCN (Waste Consignment Note) Finalization & Auto-PO Generation
+// ============================================================================
+
+// POST /api/collection-orders/:id/finalize-wcn - Finalize WCN and auto-generate PO
+router.post('/:id/finalize-wcn',
+  validateParams(Joi.object({ id: Joi.number().integer().positive().required() })),
+  validate(Joi.object({
+    wcnDate: Joi.date().optional(),
+    notes: Joi.string().allow('').optional(),
+    // Support for verified quantities from WCN modal
+    items: Joi.array().items(Joi.object({
+      id: Joi.number().integer().positive().allow(null).optional(), // Allow null for new items
+      materialId: Joi.number().integer().positive().required(),
+      verifiedQuantity: Joi.number().min(0).required(),
+      originalQuantity: Joi.number().min(0).optional(),
+      unit: Joi.string().allow('', null).optional(),
+      agreedRate: Joi.number().min(0).allow(null).optional(),
+      // NEW: Support for adding materials during WCN finalization
+      isNewItem: Joi.boolean().optional(),
+      materialName: Joi.string().allow('', null).optional()
+    })).optional()
+  })),
+  requirePermission('EDIT_PURCHASE'),
+  async (req, res) => {
+    try {
+      const { id } = req.params;
+      const { wcnDate, notes, items: verifiedItems } = req.body;
+      const { companyId, userId } = req.user;
+      const db = getDbConnection(companyId);
+
+      // Get collection order
+      const order = await db('collection_orders')
+        .where({ id })
+        .where('status', 'completed')  // Must be completed before WCN finalization
+        .where('is_finalized', 0)       // Can't finalize twice
+        .first();
+
+      if (!order) {
+        return res.status(404).json({
+          success: false,
+          error: 'Collection order not found, not completed, or already finalized'
+        });
+      }
+
+      // Get collection items
+      let items = await db('collection_items')
+        .where({ collectionOrderId: id });
+
+      // If verified items were provided, update the quantities
+      if (verifiedItems && verifiedItems.length > 0) {
+        logger.info('Processing verified quantities for WCN finalization', {
+          collectionOrderId: id,
+          verifiedItemsCount: verifiedItems.length,
+          newItemsCount: verifiedItems.filter(vi => vi.isNewItem).length
+        });
+
+        // Create a map of verified quantities by materialId
+        const verifiedMap = new Map();
+        verifiedItems.forEach(vi => {
+          verifiedMap.set(vi.materialId, {
+            verifiedQuantity: vi.verifiedQuantity,
+            agreedRate: vi.agreedRate,
+            isNewItem: vi.isNewItem
+          });
+        });
+
+        // Update existing items with verified quantities
+        items = items.map(item => {
+          const verified = verifiedMap.get(item.materialId);
+          if (verified && !verified.isNewItem) {
+            return {
+              ...item,
+              collectedQuantity: verified.verifiedQuantity,
+              contractRate: verified.agreedRate || item.contractRate,
+              totalValue: verified.verifiedQuantity * (verified.agreedRate || item.contractRate || 0)
+            };
+          }
+          return item;
+        });
+
+        // Add new items to the items array (they'll be persisted in the transaction)
+        const newItems = verifiedItems.filter(vi => vi.isNewItem);
+        for (const newItem of newItems) {
+          const rate = newItem.agreedRate || 0;
+          items.push({
+            materialId: newItem.materialId,
+            collectedQuantity: newItem.verifiedQuantity,
+            contractRate: rate,
+            totalValue: newItem.verifiedQuantity * rate,
+            condition: 'new',
+            isNewItem: true  // Flag for tracking
+          });
+        }
+      }
+
+      // Filter to only items with quantity > 0
+      items = items.filter(item => item.collectedQuantity > 0);
+
+      if (items.length === 0) {
+        return res.status(400).json({
+          success: false,
+          error: 'Cannot finalize WCN with no collected items (all quantities are zero)'
+        });
+      }
+
+      // Get contract details for rates
+      const contract = order.contractId
+        ? await db('contracts').where({ id: order.contractId }).first()
+        : null;
+
+      let wcnNumber, purchaseOrderId, poNumber;
+      const year = new Date().getFullYear();
+
+      await db.transaction(async (trx) => {
+        // 1. Generate WCN number
+        const count = await trx('collection_orders')
+          .where('wcn_number', 'like', `WCN-${year}-%`)
+          .count('* as total')
+          .first();
+
+        wcnNumber = `WCN-${year}-${String((count.total || 0) + 1).padStart(4, '0')}`;
+
+        // 1b. Update collection_items with verified quantities (if different from original)
+        // Also set original_collected_quantity for tracking rectification baseline
+        // NEW: Handle newly added materials during WCN finalization
+        if (verifiedItems && verifiedItems.length > 0) {
+          // Separate existing items from new items
+          const existingItems = verifiedItems.filter(item => !item.isNewItem);
+          const newItems = verifiedItems.filter(item => item.isNewItem);
+
+          // Process existing items - update quantities
+          for (const verifiedItem of existingItems) {
+            const rate = verifiedItem.agreedRate || 0;
+            const totalValue = verifiedItem.verifiedQuantity * rate;
+
+            await trx('collection_items')
+              .where({ collectionOrderId: id, materialId: verifiedItem.materialId })
+              .update({
+                collectedQuantity: verifiedItem.verifiedQuantity,
+                original_collected_quantity: verifiedItem.verifiedQuantity, // Save original WCN qty
+                totalValue: totalValue
+              });
+
+            // Log quantity verification for audit trail
+            logger.info('WCN quantity verified', {
+              collectionOrderId: id,
+              materialId: verifiedItem.materialId,
+              originalQuantity: verifiedItem.originalQuantity,
+              verifiedQuantity: verifiedItem.verifiedQuantity,
+              rate: rate
+            });
+          }
+
+          // Process NEW items - create collection_items records (retrospectively update collection order)
+          for (const newItem of newItems) {
+            const rate = newItem.agreedRate || 0;
+            const totalValue = newItem.verifiedQuantity * rate;
+
+            // Create new collection_item record
+            // Note: collection_items table doesn't have 'condition' column (that's on inventory table)
+            const [newItemId] = await trx('collection_items').insert({
+              collectionOrderId: id,
+              materialId: newItem.materialId,
+              estimatedQuantity: newItem.verifiedQuantity, // Set estimated = collected for new items
+              collectedQuantity: newItem.verifiedQuantity,
+              original_collected_quantity: newItem.verifiedQuantity,
+              contractRate: rate,
+              totalValue: totalValue,
+              notes: `Added during WCN finalization (${wcnNumber})`,
+              created_at: new Date(),
+              updated_at: new Date()
+            });
+
+            logger.info('New material added during WCN finalization', {
+              collectionOrderId: id,
+              newItemId,
+              materialId: newItem.materialId,
+              materialName: newItem.materialName,
+              quantity: newItem.verifiedQuantity,
+              rate: rate,
+              wcnNumber
+            });
+          }
+
+          // Update callout to include new materials if there are any
+          if (newItems.length > 0 && order.calloutId) {
+            // Add new materials to the callout as well for complete audit trail
+            for (const newItem of newItems) {
+              // Check if material already exists in callout_materials
+              const existingCalloutMaterial = await trx('callout_materials')
+                .where({ calloutId: order.calloutId, materialId: newItem.materialId })
+                .first();
+
+              if (!existingCalloutMaterial) {
+                await trx('callout_materials').insert({
+                  calloutId: order.calloutId,
+                  materialId: newItem.materialId,
+                  estimatedQuantity: newItem.verifiedQuantity,
+                  rate: newItem.agreedRate || 0,
+                  notes: `Retrospectively added from WCN finalization (${wcnNumber})`,
+                  created_at: new Date(),
+                  updated_at: new Date()
+                });
+
+                logger.info('Callout updated with new material from WCN', {
+                  calloutId: order.calloutId,
+                  materialId: newItem.materialId,
+                  wcnNumber
+                });
+              }
+            }
+          }
+        } else {
+          // No verified items provided - set original_collected_quantity from current collectedQuantity
+          await trx('collection_items')
+            .where({ collectionOrderId: id })
+            .whereNull('original_collected_quantity')
+            .update({
+              original_collected_quantity: trx.raw('collectedQuantity')
+            });
+        }
+
+        // 2. Update inventory for each collected item
+        for (const item of items) {
+          // Check if material is composite
+          const material = await trx('materials').where({ id: item.materialId }).first();
+
+          if (material && material.is_composite) {
+            // Get composite breakdown
+            const compositions = await trx('material_compositions')
+              .where('composite_material_id', item.materialId)
+              .where('is_active', 1);
+
+            // Create inventory for each component
+            for (const comp of compositions) {
+              let componentQuantity;
+              if (comp.component_type === 'container') {
+                componentQuantity = item.collectedQuantity; // Same as composite quantity
+              } else if (comp.component_type === 'content') {
+                componentQuantity = item.collectedQuantity; // Actual content quantity
+              }
+
+              // Check if batch already exists for component
+              const existingCompBatch = await trx('inventory')
+                .where({ materialId: comp.component_material_id, batchNumber: `${wcnNumber}-${comp.component_material_id}` })
+                .first();
+
+              if (existingCompBatch) {
+                await trx('inventory')
+                  .where({ id: existingCompBatch.id })
+                  .update({
+                    quantity: trx.raw('quantity + ?', [componentQuantity]),
+                    lastPurchaseDate: new Date(),
+                    updated_at: new Date()
+                  });
+              } else {
+                await trx('inventory').insert({
+                  materialId: comp.component_material_id,
+                  batchNumber: `${wcnNumber}-${comp.component_material_id}`,
+                  quantity: componentQuantity,
+                  reservedQuantity: 0,
+                  averageCost: 0,  // Will be calculated from PO
+                  lastPurchasePrice: 0,
+                  lastPurchaseDate: new Date(),
+                  location: 'Collection Warehouse',
+                  condition: item.condition || 'new',
+                  notes: `Split from composite (${wcnNumber})`,
+                  minimumStockLevel: 0,
+                  maximumStockLevel: 0,
+                  isActive: 1,  // Use 1 instead of true for MySQL
+                  created_at: new Date(),
+                  updated_at: new Date()
+                });
+              }
+
+              // Create transaction for component
+              await trx('transactions').insert({
+                transactionNumber: `${wcnNumber}-COMP-${comp.component_material_id}`,
+                transactionType: 'collection',
+                referenceId: id,
+                referenceType: 'collection_order',
+                materialId: comp.component_material_id,
+                quantity: componentQuantity,
+                amount: 0,
+                transactionDate: new Date(),
+                description: `Component from ${wcnNumber}`,
+                createdBy: userId,
+                created_at: new Date(),
+                updated_at: new Date()
+              });
+            }
+          } else {
+            // Regular material - add to inventory directly
+            // Check if batch already exists (due to unique constraint on materialId + batchNumber)
+            const existingBatch = await trx('inventory')
+              .where({ materialId: item.materialId, batchNumber: `${wcnNumber}-${item.materialId}` })
+              .first();
+
+            if (existingBatch) {
+              // Update existing batch quantity instead of inserting
+              await trx('inventory')
+                .where({ id: existingBatch.id })
+                .update({
+                  quantity: trx.raw('quantity + ?', [item.collectedQuantity]),
+                  lastPurchasePrice: item.contractRate || existingBatch.lastPurchasePrice,
+                  lastPurchaseDate: new Date(),
+                  updated_at: new Date()
+                });
+
+              logger.info('Updated existing inventory batch', {
+                batchNumber: `${wcnNumber}-${item.materialId}`,
+                addedQuantity: item.collectedQuantity,
+                materialId: item.materialId
+              });
+            } else {
+              // Insert new inventory record
+              await trx('inventory').insert({
+                materialId: item.materialId,
+                batchNumber: `${wcnNumber}-${item.materialId}`,
+                quantity: item.collectedQuantity,
+                reservedQuantity: 0,
+                averageCost: item.contractRate || 0,
+                lastPurchasePrice: item.contractRate || 0,
+                lastPurchaseDate: new Date(),
+                location: 'Collection Warehouse',
+                condition: item.condition || 'new',
+                notes: `Collected via ${wcnNumber}`,
+                minimumStockLevel: 0,
+                maximumStockLevel: 0,
+                isActive: 1,  // Use 1 instead of true for MySQL
+                created_at: new Date(),
+                updated_at: new Date()
+              });
+
+              logger.info('Created new inventory batch', {
+                batchNumber: `${wcnNumber}-${item.materialId}`,
+                quantity: item.collectedQuantity,
+                materialId: item.materialId
+              });
+            }
+
+            // Create transaction record
+            await trx('transactions').insert({
+              transactionNumber: `${wcnNumber}-${item.materialId}`,
+              transactionType: 'collection',
+              referenceId: id,
+              referenceType: 'collection_order',
+              materialId: item.materialId,
+              quantity: item.collectedQuantity,
+              amount: item.totalValue || 0,
+              transactionDate: new Date(),
+              description: `Collection via ${wcnNumber}`,
+              createdBy: userId,
+              created_at: new Date(),
+              updated_at: new Date()
+            });
+          }
+        }
+
+        // 3. AUTO-GENERATE PURCHASE ORDER from WCN
+        poNumber = `PO-${year}-${String(Date.now()).slice(-6)}`;
+
+        // Calculate PO totals
+        const subtotal = items.reduce((sum, item) => sum + (item.totalValue || 0), 0);
+        const taxAmount = subtotal * 0.05;  // 5% tax
+        const totalAmount = subtotal + taxAmount;
+
+        const poData = {
+          orderNumber: poNumber,
+          supplierId: order.supplierId,
+          supplierName: order.supplierName || '',
+          orderDate: new Date(),
+          expectedDeliveryDate: new Date(),  // Already delivered via collection
+          actualDeliveryDate: new Date(),
+          status: 'received',  // Already received via collection
+          subtotal: subtotal,
+          taxAmount: taxAmount,
+          shippingCost: order.totalExpenses || 0,  // Collection expenses as shipping
+          totalAmount: totalAmount + (order.totalExpenses || 0),
+          currency: 'OMR',
+          terms: 'Payment Terms: As per contract',
+          notes: `Auto-generated from ${wcnNumber}. Collection completed ${new Date().toLocaleDateString()}.`,
+          source_type: 'wcn_auto',  // NEW: Mark as WCN-generated
+          collection_order_id: id,   // NEW: Link to collection order
+          createdBy: userId,
+          created_at: new Date(),
+          updated_at: new Date()
+        };
+
+        [purchaseOrderId] = await trx('purchase_orders').insert(poData);
+
+        // 4. Create PO items from collection items
+        const poItems = items.map(item => ({
+          purchaseOrderId: purchaseOrderId,
+          materialId: item.materialId,
+          quantityOrdered: item.collectedQuantity,
+          quantityReceived: item.collectedQuantity,  // Already received
+          unitPrice: item.contractRate || 0,
+          totalPrice: item.totalValue || 0,
+          contractRate: item.contractRate || null,
+          batchNumber: `${wcnNumber}-${item.materialId}`,
+          notes: `From WCN collection`,
+          created_at: new Date(),
+          updated_at: new Date()
+        }));
+
+        await trx('purchase_order_items').insert(poItems);
+
+        // 5. Update collection order with WCN details
+        // Note: is_finalized=1 + purchase_order_id indicates successful finalization
+        await trx('collection_orders')
+          .where({ id })
+          .update({
+            wcn_number: wcnNumber,
+            wcn_date: wcnDate || new Date(),
+            is_finalized: 1,
+            finalized_at: new Date(),
+            finalized_by: userId,
+            purchase_order_id: purchaseOrderId,
+            notes: notes ? `${order.notes || ''}\nWCN Finalized: ${notes}` : order.notes
+          });
+
+        logger.info('WCN finalization transaction completed', {
+          wcnNumber,
+          collectionOrderId: id,
+          purchaseOrderId,
+          inventoryItemsCreated: items.length,
+          poItemsCreated: items.length
+        });
+      });
+
+      // Count new items added during finalization
+      const newItemsAdded = items.filter(item => item.isNewItem).length;
+
+      auditLog('WCN_FINALIZED_AND_PO_CREATED', userId, {
+        collectionOrderId: id,
+        wcnNumber,
+        purchaseOrderId,
+        itemsCount: items.length,
+        newItemsAdded,
+        totalValue: order.totalValue,
+        autoGeneratedPO: true,
+        inventoryUpdated: true
+      });
+
+      logger.info('WCN finalized and PO auto-generated', {
+        wcnNumber,
+        collectionOrderId: id,
+        purchaseOrderId,
+        itemsCount: items.length,
+        newItemsAdded
+      });
+
+      // Build appropriate message
+      let message = 'WCN finalized successfully. Purchase order auto-generated and inventory updated.';
+      if (newItemsAdded > 0) {
+        message += ` ${newItemsAdded} new material(s) were added to the collection order.`;
+      }
+
+      res.json({
+        success: true,
+        message,
+        data: {
+          wcnNumber,
+          purchaseOrderId,
+          purchaseOrderNumber: poNumber,
+          itemsProcessed: items.length,
+          newItemsAdded,
+          inventoryUpdated: true,
+          poCreated: true
+        }
+      });
+
+    } catch (error) {
+      logger.error('Error finalizing WCN', {
+        error: error.message,
+        stack: error.stack,
+        collectionOrderId: req.params.id
+      });
+      res.status(500).json({
+        success: false,
+        error: 'Failed to finalize WCN: ' + error.message
+      });
+    }
+  }
+);
+
+// POST /api/collection-orders/:id/rectify-wcn - Rectify WCN quantities after finalization
+router.post('/:id/rectify-wcn',
+  validateParams(Joi.object({ id: Joi.number().integer().positive().required() })),
+  validate(Joi.object({
+    itemAdjustments: Joi.array().items(
+      Joi.object({
+        itemId: Joi.number().integer().positive().required(),
+        newQuantity: Joi.number().min(0).precision(3).required(),
+        reason: Joi.string().trim().min(10).max(500).required()
+      })
+    ).min(1).required(),
+    notes: Joi.string().allow('').optional()
+  })),
+  requirePermission('EDIT_PURCHASE'),
+  async (req, res) => {
+    try {
+      const { id } = req.params;
+      const { itemAdjustments, notes } = req.body;
+      const { companyId, userId } = req.user;
+      const db = getDbConnection(companyId);
+
+      // Get finalized collection order
+      const order = await db('collection_orders')
+        .where({ id })
+        .where('is_finalized', 1)
+        .first();
+
+      if (!order) {
+        return res.status(404).json({
+          success: false,
+          error: 'Collection order not found or not finalized. Only finalized WCNs can be rectified.'
+        });
+      }
+
+      const impacts = [];
+
+      await db.transaction(async (trx) => {
+        for (const adjustment of itemAdjustments) {
+          // Get current item with material info
+          const item = await trx('collection_items')
+            .leftJoin('materials', 'collection_items.materialId', 'materials.id')
+            .select('collection_items.*', 'materials.name as materialName')
+            .where({ 'collection_items.id': adjustment.itemId, 'collection_items.collectionOrderId': id })
+            .first();
+
+          if (!item) {
+            logger.warn('Rectification: Item not found', { itemId: adjustment.itemId, collectionOrderId: id });
+            continue;
+          }
+
+          const quantityDiff = adjustment.newQuantity - item.collectedQuantity;
+
+          logger.info('Processing rectification adjustment', {
+            itemId: adjustment.itemId,
+            materialId: item.materialId,
+            materialName: item.materialName,
+            oldQuantity: item.collectedQuantity,
+            newQuantity: adjustment.newQuantity,
+            quantityDiff,
+            wcnNumber: order.wcn_number
+          });
+
+          // Get current inventory for this material - use exact batch number
+          const expectedBatchNumber = `${order.wcn_number}-${item.materialId}`;
+          let inventory = await trx('inventory')
+            .where({ materialId: item.materialId, batchNumber: expectedBatchNumber })
+            .first();
+
+          // Fallback: try LIKE search if exact match not found
+          if (!inventory) {
+            inventory = await trx('inventory')
+              .where({ materialId: item.materialId })
+              .where('batchNumber', 'like', `${order.wcn_number}%`)
+              .first();
+          }
+
+          if (inventory) {
+            const currentStock = parseFloat(inventory.quantity) || 0;
+            const newStock = currentStock + quantityDiff;
+
+            logger.info('Updating inventory for rectification', {
+              inventoryId: inventory.id,
+              batchNumber: inventory.batchNumber,
+              currentStock,
+              quantityDiff,
+              newStock
+            });
+
+            impacts.push({
+              materialId: item.materialId,
+              materialName: item.materialName,
+              currentStock,
+              adjustment: quantityDiff,
+              newStock,
+              reason: adjustment.reason
+            });
+
+            // Update inventory
+            await trx('inventory')
+              .where({ id: inventory.id })
+              .update({
+                quantity: newStock,
+                updated_at: new Date()
+              });
+
+            // Create adjustment transaction
+            await trx('transactions').insert({
+              transactionNumber: `WCN-RECTIFY-${Date.now()}-${item.id}`,
+              transactionType: 'adjustment',
+              referenceId: id,
+              referenceType: 'wcn_rectification',
+              materialId: item.materialId,
+              quantity: quantityDiff,
+              amount: 0,
+              transactionDate: new Date(),
+              description: `WCN ${order.wcn_number} rectification: ${adjustment.reason}`,
+              createdBy: userId,
+              created_at: new Date(),
+              updated_at: new Date()
+            });
+          } else {
+            // Inventory not found - create it if quantity > 0
+            logger.warn('Inventory batch not found for rectification, creating new', {
+              materialId: item.materialId,
+              expectedBatchNumber,
+              newQuantity: adjustment.newQuantity
+            });
+
+            if (adjustment.newQuantity > 0) {
+              await trx('inventory').insert({
+                materialId: item.materialId,
+                batchNumber: expectedBatchNumber,
+                quantity: adjustment.newQuantity,
+                reservedQuantity: 0,
+                averageCost: item.contractRate || 0,
+                lastPurchasePrice: item.contractRate || 0,
+                lastPurchaseDate: new Date(),
+                location: 'Collection Warehouse',
+                condition: 'new',
+                notes: `Created via WCN rectification (${order.wcn_number})`,
+                minimumStockLevel: 0,
+                maximumStockLevel: 0,
+                isActive: 1,
+                created_at: new Date(),
+                updated_at: new Date()
+              });
+
+              impacts.push({
+                materialId: item.materialId,
+                materialName: item.materialName,
+                currentStock: 0,
+                adjustment: adjustment.newQuantity,
+                newStock: adjustment.newQuantity,
+                reason: adjustment.reason
+              });
+            }
+          }
+
+          // Update collection item
+          await trx('collection_items')
+            .where({ id: adjustment.itemId })
+            .update({
+              collectedQuantity: adjustment.newQuantity,
+              notes: `${item.notes || ''}\nRectified: ${adjustment.reason}`
+            });
+        }
+
+        // Update collection order rectification tracking
+        // Build detailed rectification log for history display
+        const adjustmentDetails = impacts.map(impact =>
+          `  • ${impact.materialName || 'Material'}: ${impact.currentStock} → ${impact.newStock} (${impact.adjustment > 0 ? '+' : ''}${impact.adjustment}) - "${impact.reason}"`
+        ).join('\n');
+
+        const rectificationEntry = `[${new Date().toISOString()}] Rectification #${(order.rectification_count || 0) + 1}${notes ? ` - ${notes}` : ''}\n${adjustmentDetails}`;
+
+        await trx('collection_orders')
+          .where({ id })
+          .update({
+            rectification_count: (order.rectification_count || 0) + 1,
+            rectification_notes: order.rectification_notes
+              ? `${order.rectification_notes}\n\n${rectificationEntry}`
+              : rectificationEntry,
+            updated_at: new Date()
+          });
+
+        // === AUTO-SYNC LINKED PURCHASE ORDER ===
+        // When WCN is rectified, the linked auto-generated PO must also be updated
+        // to maintain data integrity between the source document (WCN) and generated document (PO)
+        if (order.purchase_order_id) {
+          logger.info('Syncing rectification to linked auto-PO', {
+            collectionOrderId: id,
+            purchaseOrderId: order.purchase_order_id,
+            wcnNumber: order.wcn_number
+          });
+
+          // Get purchase order items to update
+          const poItems = await trx('purchase_order_items')
+            .where({ purchaseOrderId: order.purchase_order_id });
+
+          // For each adjustment, update the corresponding PO item
+          for (const adjustment of itemAdjustments) {
+            // Get the collection item to find material ID
+            const collectionItem = await trx('collection_items')
+              .where({ id: adjustment.itemId })
+              .first();
+
+            if (!collectionItem) continue;
+
+            // Find matching PO item by material ID
+            const poItem = poItems.find(p => p.materialId === collectionItem.materialId);
+            if (poItem) {
+              await trx('purchase_order_items')
+                .where({ id: poItem.id })
+                .update({
+                  quantityOrdered: adjustment.newQuantity,
+                  quantityReceived: adjustment.newQuantity, // Auto-POs are already "received"
+                  totalPrice: adjustment.newQuantity * parseFloat(poItem.unitPrice),
+                  updated_at: new Date()
+                });
+
+              logger.info('Updated PO item from WCN rectification', {
+                poItemId: poItem.id,
+                materialId: collectionItem.materialId,
+                newQuantity: adjustment.newQuantity
+              });
+            }
+          }
+
+          // Recalculate PO totals
+          const updatedPoItems = await trx('purchase_order_items')
+            .where({ purchaseOrderId: order.purchase_order_id });
+
+          const newSubtotal = updatedPoItems.reduce((sum, item) =>
+            sum + parseFloat(item.totalPrice || 0), 0
+          );
+
+          // Get VAT rate from system settings
+          const vatSetting = await trx('system_settings')
+            .where({ setting_key: 'vat_rate_percentage' })
+            .first();
+          const taxPercent = vatSetting ? parseFloat(vatSetting.setting_value) : 5;
+
+          const newTaxAmount = (newSubtotal * taxPercent) / 100;
+
+          // Get current shipping cost
+          const currentPO = await trx('purchase_orders')
+            .where({ id: order.purchase_order_id })
+            .first();
+          const shippingCost = parseFloat(currentPO?.shippingCost || 0);
+
+          const newTotalAmount = newSubtotal + newTaxAmount + shippingCost;
+
+          await trx('purchase_orders')
+            .where({ id: order.purchase_order_id })
+            .update({
+              subtotal: newSubtotal,
+              taxAmount: newTaxAmount,
+              totalAmount: newTotalAmount,
+              notes: trx.raw(`CONCAT(IFNULL(notes, ''), '\n[WCN Rectification applied: ${new Date().toISOString()}]')`),
+              updated_at: new Date()
+            });
+
+          auditLog('PURCHASE_ORDER_AUTO_UPDATED_FROM_WCN_RECTIFICATION', userId, {
+            purchaseOrderId: order.purchase_order_id,
+            collectionOrderId: id,
+            wcnNumber: order.wcn_number,
+            newSubtotal,
+            newTaxAmount,
+            newTotalAmount,
+            adjustmentsCount: itemAdjustments.length
+          });
+
+          logger.info('Auto-PO synced successfully from WCN rectification', {
+            purchaseOrderId: order.purchase_order_id,
+            newSubtotal,
+            newTotalAmount
+          });
+        }
+      });
+
+      auditLog('WCN_RECTIFIED', userId, {
+        collectionOrderId: id,
+        wcnNumber: order.wcn_number,
+        adjustmentsCount: itemAdjustments.length,
+        impacts
+      });
+
+      res.json({
+        success: true,
+        message: order.purchase_order_id
+          ? 'WCN rectified successfully. Inventory and linked Purchase Order have been updated.'
+          : 'WCN rectified successfully. Inventory has been adjusted.',
+        data: {
+          wcnNumber: order.wcn_number,
+          rectificationCount: (order.rectification_count || 0) + 1,
+          inventoryImpacts: impacts,
+          purchaseOrderUpdated: !!order.purchase_order_id,
+          purchaseOrderId: order.purchase_order_id || null
+        }
+      });
+
+    } catch (error) {
+      logger.error('Error rectifying WCN', {
+        error: error.message,
+        collectionOrderId: req.params.id
+      });
+      res.status(500).json({
+        success: false,
+        error: 'Failed to rectify WCN: ' + error.message
       });
     }
   }
