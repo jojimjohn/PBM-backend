@@ -244,6 +244,116 @@ router.get('/:id',
   }
 );
 
+// GET /api/contracts/:contractId/locations/:locationId/materials - Get materials for contract location
+// This endpoint is used by MaterialSelector component for dynamic material selection
+router.get('/:contractId/locations/:locationId/materials',
+  validateParams(Joi.object({
+    contractId: Joi.number().integer().positive().required(),
+    locationId: Joi.number().integer().positive().required()
+  })),
+  requirePermission('VIEW_CONTRACTS'),
+  async (req, res) => {
+    try {
+      const { contractId, locationId } = req.params;
+      const { companyId } = req.user;
+      const db = getDbConnection(companyId);
+
+      // Debug: Log the request parameters
+      logger.info('Loading contract materials', { contractId, locationId, companyId });
+
+      // Verify contract exists and is active
+      const contract = await db('contracts')
+        .where({ id: contractId })
+        .first();
+
+      if (!contract) {
+        return res.status(404).json({
+          success: false,
+          error: 'Contract not found'
+        });
+      }
+
+      // Verify location exists
+      const location = await db('supplier_locations')
+        .where({ id: locationId })
+        .first();
+
+      if (!location) {
+        return res.status(404).json({
+          success: false,
+          error: 'Supplier location not found'
+        });
+      }
+
+      // Debug: Check what's in contract_location_rates for this contract
+      const allRatesForContract = await db('contract_location_rates')
+        .where('contractId', contractId)
+        .select('*');
+      logger.info('All rates for contract', {
+        contractId,
+        totalRates: allRatesForContract.length,
+        rates: allRatesForContract.map(r => ({ id: r.id, locationId: r.locationId, materialId: r.materialId }))
+      });
+
+      // Get materials for this contract and location
+      const materials = await db('contract_location_rates')
+        .leftJoin('materials', 'contract_location_rates.materialId', 'materials.id')
+        .select(
+          'contract_location_rates.materialId',
+          'materials.name as materialName',
+          'materials.code as materialCode',
+          'contract_location_rates.unit',
+          'contract_location_rates.minimumQuantity',
+          'contract_location_rates.maximumQuantity',
+          'contract_location_rates.rateType',
+          'contract_location_rates.contractRate',
+          'contract_location_rates.discountPercentage',
+          'contract_location_rates.minimumPrice',
+          'contract_location_rates.paymentDirection',
+          'contract_location_rates.description',
+          'materials.standardPrice',
+          'materials.isActive as materialIsActive'
+        )
+        .where({
+          'contract_location_rates.contractId': contractId,
+          'contract_location_rates.locationId': locationId
+        })
+        .where('materials.isActive', 1);
+
+      // Debug: Log what we found
+      logger.info('Materials found', {
+        contractId,
+        locationId,
+        materialsCount: materials.length,
+        materials: materials.map(m => ({ id: m.materialId, name: m.materialName, isActive: m.materialIsActive }))
+      });
+
+      auditLog('CONTRACT_MATERIALS_VIEWED', req.user.userId, {
+        contractId,
+        locationId,
+        materialsCount: materials.length
+      });
+
+      res.json({
+        success: true,
+        data: materials
+      });
+
+    } catch (error) {
+      logger.error('Error fetching contract materials', {
+        error: error.message,
+        contractId: req.params.contractId,
+        locationId: req.params.locationId,
+        userId: req.user.userId
+      });
+      res.status(500).json({
+        success: false,
+        error: 'Failed to fetch contract materials'
+      });
+    }
+  }
+);
+
 // POST /api/contracts - Create new contract
 router.post('/', 
   validate(contractSchema),

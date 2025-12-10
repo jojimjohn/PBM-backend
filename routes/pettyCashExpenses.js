@@ -13,10 +13,10 @@ const expenseSchema = Joi.object({
   description: Joi.string().min(2).max(2000).required(),
   amount: Joi.number().positive().required(),
   expenseDate: Joi.date().iso().required(),
-  vendor: Joi.string().max(200).optional(),
-  receiptNumber: Joi.string().max(100).optional(),
-  receiptPhoto: Joi.string().max(500).optional(),
-  notes: Joi.string().max(1000).optional()
+  vendor: Joi.string().max(200).allow(null, '').optional(),
+  receiptNumber: Joi.string().max(100).allow(null, '').optional(),
+  receiptPhoto: Joi.string().max(500).allow(null, '').optional(),
+  notes: Joi.string().max(1000).allow(null, '').optional()
 });
 
 const updateExpenseSchema = expenseSchema.fork(
@@ -36,12 +36,25 @@ function generateExpenseNumber(companyId) {
   return `${prefix}-${timestamp}`;
 }
 
-// Predefined expense categories
+// Predefined expense categories with display names and limits
 const expenseCategories = [
-  'fuel', 'transport', 'meals', 'office_supplies', 'utilities',
-  'maintenance', 'communication', 'travel', 'entertainment', 
-  'miscellaneous', 'equipment', 'services', 'emergency'
+  { id: 'fuel', name: 'Fuel & Petrol', maxAmount: 500, category: 'operational' },
+  { id: 'transport', name: 'Transport & Taxi', maxAmount: 200, category: 'operational' },
+  { id: 'meals', name: 'Meals & Refreshments', maxAmount: 100, category: 'daily' },
+  { id: 'office_supplies', name: 'Office Supplies', maxAmount: 300, category: 'operational' },
+  { id: 'utilities', name: 'Utilities & Bills', maxAmount: 500, category: 'operational' },
+  { id: 'maintenance', name: 'Maintenance & Repairs', maxAmount: 1000, category: 'operational' },
+  { id: 'communication', name: 'Communication & Phone', maxAmount: 150, category: 'daily' },
+  { id: 'travel', name: 'Travel Expenses', maxAmount: 500, category: 'operational' },
+  { id: 'entertainment', name: 'Entertainment & Hospitality', maxAmount: 300, category: 'daily' },
+  { id: 'miscellaneous', name: 'Miscellaneous', maxAmount: 200, category: 'other' },
+  { id: 'equipment', name: 'Equipment & Tools', maxAmount: 500, category: 'operational' },
+  { id: 'services', name: 'Professional Services', maxAmount: 1000, category: 'operational' },
+  { id: 'emergency', name: 'Emergency Expenses', maxAmount: 2000, category: 'other' }
 ];
+
+// Helper to get category IDs for validation
+const expenseCategoryIds = expenseCategories.map(cat => cat.id);
 
 // GET /petty-cash-expenses - List all expenses with filtering
 router.get('/', requirePermission('VIEW_EXPENSE_REPORTS'), async (req, res) => {
@@ -80,7 +93,7 @@ router.get('/', requirePermission('VIEW_EXPENSE_REPORTS'), async (req, res) => {
     // Apply user-specific filters based on role
     if (!req.user.permissions.includes('VIEW_EXPENSE_REPORTS')) {
       // Non-admin users can only see their own expenses
-      query = query.where('petty_cash_expenses.submittedBy', req.user.id);
+      query = query.where('petty_cash_expenses.submittedBy', req.user.userId);
     }
     
     // Apply filters
@@ -126,7 +139,7 @@ router.get('/', requirePermission('VIEW_EXPENSE_REPORTS'), async (req, res) => {
     
     winston.info('Petty cash expenses retrieved', {
       companyId: req.user.companyId,
-      userId: req.user.id,
+      userId: req.user.userId,
       count: expenses.length,
       totalCount: count
     });
@@ -146,7 +159,7 @@ router.get('/', requirePermission('VIEW_EXPENSE_REPORTS'), async (req, res) => {
     winston.error('Error fetching petty cash expenses', {
       error: error.message,
       companyId: req.user.companyId,
-      userId: req.user.id
+      userId: req.user.userId
     });
     
     res.status(500).json({
@@ -162,70 +175,6 @@ router.get('/categories', requirePermission('VIEW_EXPENSE_REPORTS'), async (req,
     success: true,
     data: expenseCategories
   });
-});
-
-// GET /petty-cash-expenses/:id - Get specific expense
-router.get('/:id', requirePermission('VIEW_EXPENSE_REPORTS'), async (req, res) => {
-  try {
-    const db = getDbConnection(req.user.companyId);
-    const { id } = req.params;
-    
-    let query = db('petty_cash_expenses')
-      .select(
-        'petty_cash_expenses.*',
-        'petty_cash_cards.cardNumber',
-        'petty_cash_cards.staffName',
-        'petty_cash_cards.department',
-        'petty_cash_cards.currentBalance as cardBalance',
-        'submittedUser.firstName as submittedByName',
-        'submittedUser.lastName as submittedByLastName',
-        'submittedUser.email as submittedByEmail',
-        'approvedUser.firstName as approvedByName',
-        'approvedUser.lastName as approvedByLastName'
-      )
-      .leftJoin('petty_cash_cards', 'petty_cash_expenses.cardId', 'petty_cash_cards.id')
-      .leftJoin('users as submittedUser', 'petty_cash_expenses.submittedBy', 'submittedUser.id')
-      .leftJoin('users as approvedUser', 'petty_cash_expenses.approvedBy', 'approvedUser.id')
-      .where('petty_cash_expenses.id', id);
-    
-    // Apply user-specific filters based on role
-    if (!req.user.permissions.includes('VIEW_EXPENSE_REPORTS')) {
-      query = query.where('petty_cash_expenses.submittedBy', req.user.id);
-    }
-    
-    const expense = await query.first();
-    
-    if (!expense) {
-      return res.status(404).json({
-        success: false,
-        error: 'Expense not found or access denied'
-      });
-    }
-    
-    winston.info('Petty cash expense retrieved', {
-      expenseId: id,
-      companyId: req.user.companyId,
-      userId: req.user.id
-    });
-    
-    res.json({
-      success: true,
-      data: expense
-    });
-    
-  } catch (error) {
-    winston.error('Error fetching petty cash expense', {
-      error: error.message,
-      expenseId: req.params.id,
-      companyId: req.user.companyId,
-      userId: req.user.id
-    });
-    
-    res.status(500).json({
-      success: false,
-      error: 'Internal server error'
-    });
-  }
 });
 
 // POST /petty-cash-expenses - Create new expense
@@ -257,7 +206,11 @@ router.post('/',
       }
       
       // Check if user has permission to use this card
-      if (card.assignedTo !== req.user.id && !req.user.permissions.includes('MANAGE_EXPENSES')) {
+      // User can create expense if: assigned to card, OR has MANAGE_EXPENSES, OR has MANAGE_PETTY_CASH
+      const canManageExpenses = req.user.permissions.includes('MANAGE_EXPENSES') ||
+                                 req.user.permissions.includes('MANAGE_PETTY_CASH');
+      // Note: auth middleware uses 'userId', not 'id'
+      if (card.assignedTo !== req.user.userId && !canManageExpenses) {
         return res.status(403).json({
           success: false,
           error: 'You are not authorized to use this card'
@@ -265,7 +218,7 @@ router.post('/',
       }
       
       // Validate expense category
-      if (!expenseCategories.includes(expenseData.category)) {
+      if (!expenseCategoryIds.includes(expenseData.category)) {
         return res.status(400).json({
           success: false,
           error: 'Invalid expense category'
@@ -273,7 +226,10 @@ router.post('/',
       }
       
       // Check if sufficient balance (for approved expenses)
-      if (expenseData.amount > card.currentBalance) {
+      // IMPORTANT: MySQL returns DECIMAL as strings, so we must parseFloat for comparison
+      const cardBalance = parseFloat(card.currentBalance) || 0;
+      const requestedAmount = parseFloat(expenseData.amount) || 0;
+      if (requestedAmount > cardBalance) {
         return res.status(400).json({
           success: false,
           error: 'Insufficient card balance for this expense'
@@ -288,13 +244,16 @@ router.post('/',
           .where('status', 'approved')
           .where(db.raw('DATE_FORMAT(expenseDate, "%Y-%m")'), currentMonth)
           .sum('amount as total');
-        
-        const totalMonthlySpent = (monthlySpent.total || 0) + expenseData.amount;
-        
-        if (totalMonthlySpent > card.monthlyLimit) {
+
+        // IMPORTANT: MySQL returns DECIMAL as strings, parseFloat all values
+        const monthlyTotal = parseFloat(monthlySpent.total) || 0;
+        const monthlyLimit = parseFloat(card.monthlyLimit) || 0;
+        const totalMonthlySpent = monthlyTotal + requestedAmount;
+
+        if (totalMonthlySpent > monthlyLimit) {
           return res.status(400).json({
             success: false,
-            error: `This expense would exceed the monthly limit of ${card.monthlyLimit}. Current monthly spent: ${monthlySpent.total || 0}`
+            error: `This expense would exceed the monthly limit of ${monthlyLimit.toFixed(3)}. Current monthly spent: ${monthlyTotal.toFixed(3)}`
           });
         }
       }
@@ -310,7 +269,7 @@ router.post('/',
         receiptNumber: expenseData.receiptNumber || null,
         receiptPhoto: expenseData.receiptPhoto || null,
         status: 'pending',
-        submittedBy: req.user.id,
+        submittedBy: req.user.userId,
         notes: expenseData.notes || null
       };
       
@@ -323,7 +282,7 @@ router.post('/',
         amount: expenseData.amount,
         category: expenseData.category,
         companyId: req.user.companyId,
-        userId: req.user.id
+        userId: req.user.userId
       });
       
       res.status(201).json({
@@ -336,7 +295,7 @@ router.post('/',
       winston.error('Error creating petty cash expense', {
         error: error.message,
         companyId: req.user.companyId,
-        userId: req.user.id
+        userId: req.user.userId
       });
       
       if (error.code === 'ER_DUP_ENTRY') {
@@ -386,7 +345,7 @@ router.put('/:id',
       }
       
       // Check permission to update
-      if (existingExpense.submittedBy !== req.user.id && !req.user.permissions.includes('MANAGE_EXPENSES')) {
+      if (existingExpense.submittedBy !== req.user.userId && !req.user.permissions.includes('MANAGE_EXPENSES')) {
         return res.status(403).json({
           success: false,
           error: 'You can only update your own expenses'
@@ -394,7 +353,7 @@ router.put('/:id',
       }
       
       // Validate category if provided
-      if (updateData.category && !expenseCategories.includes(updateData.category)) {
+      if (updateData.category && !expenseCategoryIds.includes(updateData.category)) {
         return res.status(400).json({
           success: false,
           error: 'Invalid expense category'
@@ -409,7 +368,7 @@ router.put('/:id',
       winston.info('Petty cash expense updated', {
         expenseId: id,
         companyId: req.user.companyId,
-        userId: req.user.id
+        userId: req.user.userId
       });
       
       res.json({
@@ -422,7 +381,7 @@ router.put('/:id',
         error: error.message,
         expenseId: req.params.id,
         companyId: req.user.companyId,
-        userId: req.user.id
+        userId: req.user.userId
       });
       
       res.status(500).json({
@@ -449,7 +408,7 @@ router.post('/:id/approve',
       const result = await txnManager.processExpenseApproval(
         parseInt(id), 
         status, 
-        req.user.id, 
+        req.user.userId, 
         approvalNotes
       );
       
@@ -458,8 +417,8 @@ router.post('/:id/approve',
         status,
         amount: result.amount,
         companyId: req.user.companyId,
-        userId: req.user.id,
-        approvedBy: req.user.id
+        userId: req.user.userId,
+        approvedBy: req.user.userId
       });
       
       res.json({
@@ -473,7 +432,7 @@ router.post('/:id/approve',
         error: error.message,
         expenseId: req.params.id,
         companyId: req.user.companyId,
-        userId: req.user.id
+        userId: req.user.userId
       });
       
       res.status(400).json({
@@ -508,7 +467,7 @@ router.delete('/:id', requirePermission('CREATE_EXPENSE'), async (req, res) => {
     }
     
     // Check permission to delete
-    if (existingExpense.submittedBy !== req.user.id && !req.user.permissions.includes('MANAGE_EXPENSES')) {
+    if (existingExpense.submittedBy !== req.user.userId && !req.user.permissions.includes('MANAGE_EXPENSES')) {
       return res.status(403).json({
         success: false,
         error: 'You can only delete your own expenses'
@@ -520,7 +479,7 @@ router.delete('/:id', requirePermission('CREATE_EXPENSE'), async (req, res) => {
     winston.info('Petty cash expense deleted', {
       expenseId: id,
       companyId: req.user.companyId,
-      userId: req.user.id
+      userId: req.user.userId
     });
     
     res.json({
@@ -533,7 +492,7 @@ router.delete('/:id', requirePermission('CREATE_EXPENSE'), async (req, res) => {
       error: error.message,
       expenseId: req.params.id,
       companyId: req.user.companyId,
-      userId: req.user.id
+      userId: req.user.userId
     });
     
     res.status(500).json({
@@ -557,16 +516,15 @@ router.get('/analytics', requirePermission('VIEW_EXPENSE_REPORTS'), async (req, 
     
     // Get basic analytics
     const analyticsQuery = `
-      SELECT 
+      SELECT
         COUNT(*) as totalExpenses,
         COALESCE(SUM(amount), 0) as totalAmount,
         COALESCE(AVG(amount), 0) as averageAmount,
         COUNT(CASE WHEN status = 'approved' THEN 1 END) as approvedCount,
         COUNT(CASE WHEN status = 'pending' THEN 1 END) as pendingCount,
         COUNT(CASE WHEN status = 'rejected' THEN 1 END) as rejectedCount
-      FROM petty_cash_expenses 
-      WHERE deleted_at IS NULL 
-        AND DATE(expenseDate) >= ? 
+      FROM petty_cash_expenses
+      WHERE DATE(expenseDate) >= ?
         AND DATE(expenseDate) <= ?
     `;
     
@@ -616,7 +574,7 @@ router.get('/analytics/summary', requirePermission('VIEW_EXPENSE_REPORTS'), asyn
     
     // Apply user-specific filters for non-admin users
     if (!req.user.permissions.includes('VIEW_EXPENSE_REPORTS')) {
-      query = query.where('submittedBy', req.user.id);
+      query = query.where('submittedBy', req.user.userId);
     }
     
     // Get summary statistics
@@ -665,7 +623,7 @@ router.get('/analytics/summary', requirePermission('VIEW_EXPENSE_REPORTS'), asyn
     
     winston.info('Petty cash expense analytics retrieved', {
       companyId: req.user.companyId,
-      userId: req.user.id
+      userId: req.user.userId
     });
     
     res.json({
@@ -682,9 +640,74 @@ router.get('/analytics/summary', requirePermission('VIEW_EXPENSE_REPORTS'), asyn
     winston.error('Error fetching expense analytics', {
       error: error.message,
       companyId: req.user.companyId,
-      userId: req.user.id
+      userId: req.user.userId
     });
     
+    res.status(500).json({
+      success: false,
+      error: 'Internal server error'
+    });
+  }
+});
+
+// GET /petty-cash-expenses/:id - Get specific expense
+// NOTE: This route MUST be defined last, after all specific routes (like /analytics)
+router.get('/:id', requirePermission('VIEW_EXPENSE_REPORTS'), async (req, res) => {
+  try {
+    const db = getDbConnection(req.user.companyId);
+    const { id } = req.params;
+
+    let query = db('petty_cash_expenses')
+      .select(
+        'petty_cash_expenses.*',
+        'petty_cash_cards.cardNumber',
+        'petty_cash_cards.staffName',
+        'petty_cash_cards.department',
+        'petty_cash_cards.currentBalance as cardBalance',
+        'submittedUser.firstName as submittedByName',
+        'submittedUser.lastName as submittedByLastName',
+        'submittedUser.email as submittedByEmail',
+        'approvedUser.firstName as approvedByName',
+        'approvedUser.lastName as approvedByLastName'
+      )
+      .leftJoin('petty_cash_cards', 'petty_cash_expenses.cardId', 'petty_cash_cards.id')
+      .leftJoin('users as submittedUser', 'petty_cash_expenses.submittedBy', 'submittedUser.id')
+      .leftJoin('users as approvedUser', 'petty_cash_expenses.approvedBy', 'approvedUser.id')
+      .where('petty_cash_expenses.id', id);
+
+    // Apply user-specific filters based on role
+    if (!req.user.permissions.includes('VIEW_EXPENSE_REPORTS')) {
+      query = query.where('petty_cash_expenses.submittedBy', req.user.userId);
+    }
+
+    const expense = await query.first();
+
+    if (!expense) {
+      return res.status(404).json({
+        success: false,
+        error: 'Expense not found or access denied'
+      });
+    }
+
+    winston.info('Petty cash expense retrieved', {
+      expenseId: id,
+      companyId: req.user.companyId,
+      userId: req.user.userId
+    });
+
+    res.json({
+      success: true,
+      data: expense
+    });
+
+  } catch (error) {
+    winston.error('Error fetching petty cash expense', {
+      error: error.message,
+      expenseId: req.params.id,
+      companyId: req.user.companyId,
+      userId: req.user.userId
+    });
+
     res.status(500).json({
       success: false,
       error: 'Internal server error'

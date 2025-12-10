@@ -1,5 +1,6 @@
 const winston = require('winston');
 const { getDbConnection } = require('../config/database');
+const { allocateFIFO } = require('./fifoAllocator');
 
 /**
  * Advanced Transaction Manager for ACID Operations
@@ -18,31 +19,27 @@ class TransactionManager {
    * @returns {Promise} - Transaction result
    */
   async executeTransaction(operations, options = {}) {
-    const { isolationLevel = 'READ_COMMITTED', timeout = 30000 } = options;
-    
+    // Note: MySQL default isolation level (REPEATABLE READ) is used
+    // Cannot change isolation level inside an active transaction
+    const { timeout = 30000 } = options;
+
     return await this.db.transaction(async (trx) => {
-      // Set isolation level if specified
-      if (isolationLevel) {
-        await trx.raw(`SET TRANSACTION ISOLATION LEVEL ${isolationLevel}`);
-      }
-      
       // Set transaction timeout
       const timeoutPromise = new Promise((_, reject) => {
         setTimeout(() => reject(new Error('Transaction timeout')), timeout);
       });
-      
+
       try {
         // Execute operations with timeout
         const result = await Promise.race([
           operations(trx),
           timeoutPromise
         ]);
-        
+
         winston.info('Transaction completed successfully', {
-          companyId: this.companyId,
-          isolationLevel
+          companyId: this.companyId
         });
-        
+
         return result;
       } catch (error) {
         winston.error('Transaction failed and rolled back', {
@@ -241,14 +238,57 @@ class TransactionManager {
         });
 
       if (status === 'approved') {
-        // Update inventory if inventory record exists
+        let actualCOGS = wastage.totalCost; // Default to estimated cost
+
+        // FIFO allocation - consume from oldest batches for accurate COGS
+        if (wastage.materialId && wastage.quantity > 0) {
+          const fifoResult = await allocateFIFO(
+            trx,
+            wastage.materialId,
+            wastage.quantity,
+            'wastage',
+            'wastage',
+            wastageId,
+            userId,
+            {}
+          );
+
+          if (fifoResult.success) {
+            actualCOGS = fifoResult.totalCOGS;
+            winston.info('FIFO allocation for wastage', {
+              wastageId,
+              materialId: wastage.materialId,
+              quantity: wastage.quantity,
+              estimatedCost: wastage.totalCost,
+              actualCOGS: fifoResult.totalCOGS,
+              batchesUsed: fifoResult.batchesUsed
+            });
+
+            // Update wastage record with actual COGS from FIFO
+            await trx('wastages')
+              .where('id', wastageId)
+              .update({
+                totalCost: actualCOGS,
+                unitCost: actualCOGS / wastage.quantity
+              });
+          } else {
+            // FIFO failed (no batches) - log warning but continue with estimated cost
+            winston.warn('FIFO allocation failed for wastage, using estimated cost', {
+              wastageId,
+              materialId: wastage.materialId,
+              error: fifoResult.error
+            });
+          }
+        }
+
+        // Also update legacy inventory if inventory record exists
         if (wastage.inventoryId) {
           await trx('inventory')
             .where('id', wastage.inventoryId)
             .decrement('currentStock', wastage.quantity);
         }
 
-        // Record financial transaction
+        // Record financial transaction with actual COGS
         await trx('transactions').insert({
           transactionNumber: this.generateTransactionNumber('wastage'),
           transactionType: 'wastage',
@@ -256,8 +296,8 @@ class TransactionManager {
           referenceType: 'wastage',
           materialId: wastage.materialId,
           quantity: wastage.quantity,
-          unitPrice: wastage.unitCost,
-          amount: -wastage.totalCost, // Negative for loss
+          unitPrice: actualCOGS / wastage.quantity,
+          amount: -actualCOGS, // Negative for loss (actual COGS)
           transactionDate: wastage.wastageDate,
           description: `Wastage - ${wastage.wasteType}: ${wastage.reason}`,
           createdBy: userId
@@ -302,9 +342,15 @@ class TransactionManager {
           approvalNotes: notes
         });
 
+      // IMPORTANT: MySQL returns DECIMAL as strings, so we must parseFloat
+      const expenseAmount = parseFloat(expense.amount) || 0;
+
       if (status === 'approved') {
+        const cardBalance = parseFloat(expense.currentBalance) || 0;
+        const totalSpent = parseFloat(expense.totalSpent) || 0;
+
         // Check sufficient balance
-        if (expense.currentBalance < expense.amount) {
+        if (cardBalance < expenseAmount) {
           throw new Error('Insufficient card balance for approval');
         }
 
@@ -312,8 +358,8 @@ class TransactionManager {
         await trx('petty_cash_cards')
           .where('id', expense.cardId)
           .update({
-            currentBalance: expense.currentBalance - expense.amount,
-            totalSpent: expense.totalSpent + expense.amount
+            currentBalance: cardBalance - expenseAmount,
+            totalSpent: totalSpent + expenseAmount
           });
 
         // Record financial transaction
@@ -325,14 +371,14 @@ class TransactionManager {
           materialId: null,
           quantity: null,
           unitPrice: null,
-          amount: -expense.amount, // Negative for expense
+          amount: -expenseAmount, // Negative for expense
           transactionDate: expense.expenseDate,
           description: `Petty Cash - ${expense.category}: ${expense.description}`,
           createdBy: userId
         });
       }
 
-      return { expenseId, status, amount: status === 'approved' ? expense.amount : 0 };
+      return { expenseId, status, amount: status === 'approved' ? expenseAmount : 0 };
     });
   }
 

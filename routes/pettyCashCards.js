@@ -10,12 +10,12 @@ const winston = require('winston');
 const pettyCashCardSchema = Joi.object({
   assignedTo: Joi.number().integer().positive().required(),
   staffName: Joi.string().min(2).max(100).required(),
-  department: Joi.string().max(100).optional(),
+  department: Joi.string().max(100).allow('', null).optional(),
   initialBalance: Joi.number().min(0).required(),
-  monthlyLimit: Joi.number().min(0).optional(),
-  issueDate: Joi.date().iso().required(),
-  expiryDate: Joi.date().iso().optional(),
-  notes: Joi.string().max(1000).optional()
+  monthlyLimit: Joi.number().min(0).allow(null).optional(),
+  issueDate: Joi.alternatives().try(Joi.date().iso(), Joi.string().pattern(/^\d{4}-\d{2}-\d{2}$/)).required(),
+  expiryDate: Joi.alternatives().try(Joi.date().iso(), Joi.string().pattern(/^\d{4}-\d{2}-\d{2}$/)).allow('', null).optional(),
+  notes: Joi.string().max(1000).allow('', null).optional()
 });
 
 const updateCardSchema = pettyCashCardSchema.fork(
@@ -32,6 +32,16 @@ const balanceUpdateSchema = Joi.object({
   amount: Joi.number().required(),
   type: Joi.string().valid('add', 'deduct').required(),
   notes: Joi.string().max(500).optional()
+});
+
+const reloadCardSchema = Joi.object({
+  amount: Joi.number().positive().required().messages({
+    'number.positive': 'Reload amount must be greater than 0',
+    'any.required': 'Reload amount is required'
+  }),
+  reloadDate: Joi.alternatives().try(Joi.date().iso(), Joi.string().pattern(/^\d{4}-\d{2}-\d{2}$/)).optional(),
+  notes: Joi.string().max(500).allow('', null).optional(),
+  bankAccountId: Joi.number().integer().positive().allow(null).optional()
 });
 
 // Generate card number
@@ -101,7 +111,7 @@ router.get('/', requirePermission('VIEW_PETTY_CASH'), async (req, res) => {
     
     winston.info('Petty cash cards retrieved', {
       companyId: req.user.companyId,
-      userId: req.user.id,
+      userId: req.user.userId,
       count: cards.length,
       totalCount: count
     });
@@ -121,7 +131,7 @@ router.get('/', requirePermission('VIEW_PETTY_CASH'), async (req, res) => {
     winston.error('Error fetching petty cash cards', {
       error: error.message,
       companyId: req.user.companyId,
-      userId: req.user.id
+      userId: req.user.userId
     });
     
     res.status(500).json({
@@ -174,7 +184,7 @@ router.get('/:id', requirePermission('VIEW_PETTY_CASH'), async (req, res) => {
     winston.info('Petty cash card retrieved', {
       cardId: id,
       companyId: req.user.companyId,
-      userId: req.user.id
+      userId: req.user.userId
     });
     
     res.json({
@@ -187,7 +197,7 @@ router.get('/:id', requirePermission('VIEW_PETTY_CASH'), async (req, res) => {
       error: error.message,
       cardId: req.params.id,
       companyId: req.user.companyId,
-      userId: req.user.id
+      userId: req.user.userId
     });
     
     res.status(500).json({
@@ -244,7 +254,7 @@ router.post('/',
         expiryDate: cardData.expiryDate || null,
         status: 'active',
         notes: cardData.notes || null,
-        createdBy: req.user.id
+        createdBy: req.user.userId
       };
       
       const [id] = await db('petty_cash_cards').insert(newCard);
@@ -255,7 +265,7 @@ router.post('/',
         assignedTo: cardData.assignedTo,
         initialBalance: cardData.initialBalance,
         companyId: req.user.companyId,
-        userId: req.user.id
+        userId: req.user.userId
       });
       
       res.status(201).json({
@@ -268,7 +278,7 @@ router.post('/',
       winston.error('Error creating petty cash card', {
         error: error.message,
         companyId: req.user.companyId,
-        userId: req.user.id
+        userId: req.user.userId
       });
       
       if (error.code === 'ER_DUP_ENTRY') {
@@ -338,7 +348,7 @@ router.put('/:id',
       winston.info('Petty cash card updated', {
         cardId: id,
         companyId: req.user.companyId,
-        userId: req.user.id
+        userId: req.user.userId
       });
       
       res.json({
@@ -351,7 +361,7 @@ router.put('/:id',
         error: error.message,
         cardId: req.params.id,
         companyId: req.user.companyId,
-        userId: req.user.id
+        userId: req.user.userId
       });
       
       res.status(500).json({
@@ -393,7 +403,7 @@ router.post('/:id/status',
         oldStatus: existingCard.status,
         newStatus: status,
         companyId: req.user.companyId,
-        userId: req.user.id
+        userId: req.user.userId
       });
       
       res.json({
@@ -406,7 +416,7 @@ router.post('/:id/status',
         error: error.message,
         cardId: req.params.id,
         companyId: req.user.companyId,
-        userId: req.user.id
+        userId: req.user.userId
       });
       
       res.status(500).json({
@@ -445,18 +455,21 @@ router.post('/:id/balance',
       }
       
       // Calculate new balance
-      let newBalance = existingCard.currentBalance;
-      
+      // IMPORTANT: MySQL returns DECIMAL as strings, so we must parseFloat
+      const currentBalance = parseFloat(existingCard.currentBalance) || 0;
+      let newBalance = currentBalance;
+
       if (type === 'add') {
-        newBalance += amount;
+        newBalance += parseFloat(amount);
       } else if (type === 'deduct') {
-        if (amount > existingCard.currentBalance) {
+        const deductAmount = parseFloat(amount);
+        if (deductAmount > currentBalance) {
           return res.status(400).json({
             success: false,
             error: 'Insufficient balance for deduction'
           });
         }
-        newBalance -= amount;
+        newBalance -= deductAmount;
       }
       
       await db('petty_cash_cards').where('id', id).update({
@@ -467,19 +480,19 @@ router.post('/:id/balance',
       winston.info('Petty cash card balance updated', {
         cardId: id,
         type,
-        amount,
-        oldBalance: existingCard.currentBalance,
+        amount: parseFloat(amount),
+        oldBalance: currentBalance,
         newBalance,
         companyId: req.user.companyId,
-        userId: req.user.id
+        userId: req.user.userId
       });
-      
+
       res.json({
         success: true,
         data: {
-          oldBalance: existingCard.currentBalance,
+          oldBalance: currentBalance,
           newBalance,
-          change: type === 'add' ? amount : -amount
+          change: type === 'add' ? parseFloat(amount) : -parseFloat(amount)
         },
         message: `Balance ${type === 'add' ? 'added' : 'deducted'} successfully`
       });
@@ -489,9 +502,147 @@ router.post('/:id/balance',
         error: error.message,
         cardId: req.params.id,
         companyId: req.user.companyId,
-        userId: req.user.id
+        userId: req.user.userId
       });
       
+      res.status(500).json({
+        success: false,
+        error: 'Internal server error'
+      });
+    }
+  }
+);
+
+// POST /petty-cash-cards/:id/reload - Reload card balance
+router.post('/:id/reload',
+  requirePermission('MANAGE_PETTY_CASH'),
+  validate(reloadCardSchema),
+  async (req, res) => {
+    try {
+      const db = getDbConnection(req.user.companyId);
+      const { id } = req.params;
+      const { amount, reloadDate, notes, bankAccountId } = req.body;
+
+      // Check if card exists
+      const existingCard = await db('petty_cash_cards').where('id', id).first();
+
+      if (!existingCard) {
+        return res.status(404).json({
+          success: false,
+          error: 'Petty cash card not found'
+        });
+      }
+
+      // Check if card is active
+      if (existingCard.status !== 'active') {
+        return res.status(400).json({
+          success: false,
+          error: 'Cannot reload inactive card. Card status: ' + existingCard.status
+        });
+      }
+
+      // Calculate new balance
+      // IMPORTANT: MySQL returns DECIMAL as strings, so we must parseFloat both values
+      // to prevent string concatenation (e.g., "500.000" + 100 = "500.000100")
+      const oldBalance = parseFloat(existingCard.currentBalance) || 0;
+      const newBalance = oldBalance + parseFloat(amount);
+
+      // Update card balance
+      await db('petty_cash_cards').where('id', id).update({
+        currentBalance: newBalance,
+        updated_at: new Date()
+      });
+
+      // If bank account is specified, create a bank transaction (withdrawal for petty cash reload)
+      if (bankAccountId) {
+        // Get assigned user name for description
+        let userName = 'Staff';
+        if (existingCard.assignedTo) {
+          const user = await db('users')
+            .where({ id: existingCard.assignedTo })
+            .select('firstName', 'lastName')
+            .first();
+          if (user) {
+            userName = `${user.firstName || ''} ${user.lastName || ''}`.trim();
+          }
+        }
+
+        // Create bank transaction (withdrawal)
+        await db('bank_transactions').insert({
+          account_id: bankAccountId,
+          transaction_type: 'withdrawal',
+          amount: parseFloat(amount),
+          transaction_date: reloadDate || new Date().toISOString().split('T')[0],
+          description: `Petty Cash Reload - Card ${existingCard.cardNumber}${userName ? ` (${userName})` : ''}`,
+          reference_type: 'petty_cash_reload',
+          reference_id: id,
+          category: 'petty_cash',
+          reconciled: false,
+          notes: notes || '',
+          created_by: req.user.userId,
+          created_at: new Date(),
+          updated_at: new Date()
+        });
+
+        // Update bank account balance
+        await db('bank_accounts')
+          .where({ id: bankAccountId })
+          .decrement('current_balance', parseFloat(amount));
+
+        winston.info('Bank transaction created for petty cash reload', {
+          cardId: id,
+          cardNumber: existingCard.cardNumber,
+          bankAccountId,
+          amount
+        });
+      }
+
+      // Get updated card with user info
+      const updatedCard = await db('petty_cash_cards')
+        .select(
+          'petty_cash_cards.*',
+          'assignedUser.firstName as assignedUserFirstName',
+          'assignedUser.lastName as assignedUserLastName'
+        )
+        .leftJoin('users as assignedUser', 'petty_cash_cards.assignedTo', 'assignedUser.id')
+        .where('petty_cash_cards.id', id)
+        .first();
+
+      winston.info('Petty cash card reloaded', {
+        cardId: id,
+        cardNumber: existingCard.cardNumber,
+        amount,
+        oldBalance,
+        newBalance,
+        reloadDate: reloadDate || new Date().toISOString().split('T')[0],
+        notes,
+        companyId: req.user.companyId,
+        userId: req.user.userId
+      });
+
+      res.json({
+        success: true,
+        data: {
+          card: updatedCard,
+          reload: {
+            amount: parseFloat(amount),
+            oldBalance,
+            newBalance,
+            reloadDate: reloadDate || new Date().toISOString().split('T')[0],
+            notes
+          }
+        },
+        message: 'Card reloaded successfully'
+      });
+
+    } catch (error) {
+      winston.error('Error reloading petty cash card', {
+        error: error.message,
+        cardId: req.params.id,
+        companyId: req.user.companyId,
+        userId: req.user.userId
+      });
+
       res.status(500).json({
         success: false,
         error: 'Internal server error'
@@ -549,7 +700,7 @@ router.get('/analytics/summary', requirePermission('VIEW_PETTY_CASH'), async (re
     
     winston.info('Petty cash cards analytics retrieved', {
       companyId: req.user.companyId,
-      userId: req.user.id
+      userId: req.user.userId
     });
     
     res.json({
@@ -566,7 +717,7 @@ router.get('/analytics/summary', requirePermission('VIEW_PETTY_CASH'), async (re
     winston.error('Error fetching petty cash cards analytics', {
       error: error.message,
       companyId: req.user.companyId,
-      userId: req.user.id
+      userId: req.user.userId
     });
     
     res.status(500).json({
@@ -605,7 +756,7 @@ router.delete('/:id', requirePermission('MANAGE_PETTY_CASH'), async (req, res) =
       winston.info('Petty cash card closed (soft delete)', {
         cardId: id,
         companyId: req.user.companyId,
-        userId: req.user.id
+        userId: req.user.userId
       });
       
       res.json({
@@ -619,7 +770,7 @@ router.delete('/:id', requirePermission('MANAGE_PETTY_CASH'), async (req, res) =
       winston.info('Petty cash card deleted', {
         cardId: id,
         companyId: req.user.companyId,
-        userId: req.user.id
+        userId: req.user.userId
       });
       
       res.json({
@@ -633,7 +784,7 @@ router.delete('/:id', requirePermission('MANAGE_PETTY_CASH'), async (req, res) =
       error: error.message,
       cardId: req.params.id,
       companyId: req.user.companyId,
-      userId: req.user.id
+      userId: req.user.userId
     });
     
     res.status(500).json({

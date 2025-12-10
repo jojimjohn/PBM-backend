@@ -32,12 +32,19 @@
     "express-rate-limit": "^6.10.0",
     "express-validator": "^7.0.1",
     "helmet": "^7.0.0",
+    "ioredis": "^5.8.2",
     "joi": "^17.9.2",
+    "json2csv": "^6.0.0-alpha.2",
     "jsonwebtoken": "^9.0.2",
     "knex": "^2.5.1",
+    "multer": "^2.0.2",
     "mysql2": "^3.6.0",
     "node-cron": "^4.2.1",
-    "winston": "^3.10.0"
+    "nodemailer": "^7.0.11",
+    "otplib": "^12.0.1",
+    "qrcode": "^1.5.4",
+    "winston": "^3.10.0",
+    "xlsx": "^0.18.5"
   },
   "devDependencies": {
     "axios": "^1.11.0",

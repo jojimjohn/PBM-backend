@@ -62,7 +62,8 @@ const schemas = {
       .min(8)
       .max(128)
       .required()
-      .pattern(/^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[@$!%*?&])[A-Za-z\d@$!%*?&]/)
+      // SECURITY FIX: Added {8,}$ to ensure full string match (prevents trailing invalid chars)
+      .pattern(/^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[@$!%*?&])[A-Za-z\d@$!%*?&]{8,}$/)
       .message('Password must contain at least one lowercase letter, one uppercase letter, one number, and one special character'),
     confirmPassword: Joi.string()
       .valid(Joi.ref('password'))
@@ -160,6 +161,108 @@ const schemas = {
   companyId: Joi.object({
     companyId: Joi.string()
       .valid('al-ramrami', 'pride-muscat')
+      .required()
+  }),
+
+  // ============================================================================
+  // User Management Schemas (Task 26)
+  // ============================================================================
+
+  // Create user - for admin user creation
+  // Updated to use roleId (database role ID) instead of hardcoded role strings
+  createUser: Joi.object({
+    email: Joi.string()
+      .email()
+      .required()
+      .max(255)
+      .lowercase()
+      .trim(),
+    firstName: Joi.string()
+      .min(2)
+      .max(50)
+      .required()
+      .trim()
+      .pattern(/^[a-zA-Z\s]+$/)
+      .message('First name must contain only letters and spaces'),
+    lastName: Joi.string()
+      .min(2)
+      .max(50)
+      .required()
+      .trim()
+      .pattern(/^[a-zA-Z\s]+$/)
+      .message('Last name must contain only letters and spaces'),
+    roleId: Joi.number()
+      .integer()
+      .positive()
+      .required()
+      .description('Database ID of the role to assign'),
+    sendWelcomeEmail: Joi.boolean()
+      .default(true)
+      .description('Send welcome email with temporary password')
+  }),
+
+  // Update user - for editing existing users
+  // Updated to use roleId (database role ID) instead of hardcoded role strings
+  updateUser: Joi.object({
+    firstName: Joi.string()
+      .min(2)
+      .max(50)
+      .trim()
+      .pattern(/^[a-zA-Z\s]+$/)
+      .message('First name must contain only letters and spaces'),
+    lastName: Joi.string()
+      .min(2)
+      .max(50)
+      .trim()
+      .pattern(/^[a-zA-Z\s]+$/)
+      .message('Last name must contain only letters and spaces'),
+    roleId: Joi.number()
+      .integer()
+      .positive()
+      .description('Database ID of the role to assign'),
+    isActive: Joi.boolean()
+  }).min(1).message('At least one field must be provided for update'),
+
+  // Admin reset password
+  resetPassword: Joi.object({
+    sendEmail: Joi.boolean()
+      .default(true)
+      .description('Email the new temporary password to user')
+  }),
+
+  // Permission override - grant/revoke specific permissions
+  permissionOverride: Joi.object({
+    permission: Joi.string()
+      .required()
+      .max(100)
+      .description('Permission key to grant/revoke'),
+    granted: Joi.boolean()
+      .required()
+      .description('true = grant, false = revoke'),
+    reason: Joi.string()
+      .max(500)
+      .allow('')
+      .description('Reason for the override')
+  }),
+
+  // Batch permission overrides
+  batchPermissionOverrides: Joi.object({
+    overrides: Joi.array()
+      .items(Joi.object({
+        permission: Joi.string().required().max(100),
+        granted: Joi.boolean().required(),
+        reason: Joi.string().max(500).allow('')
+      }))
+      .min(1)
+      .max(50)
+      .required()
+  }),
+
+  // User ID parameter validation
+  userId: Joi.object({
+    id: Joi.number()
+      .integer()
+      .positive()
       .required()
   })
 };

@@ -46,7 +46,7 @@ function generateTransactionNumber(companyId, transactionType) {
 }
 
 // GET /transactions - List all transactions with comprehensive filtering
-router.get('/', requirePermission(['financial:read']), async (req, res) => {
+router.get('/', requirePermission(['VIEW_FINANCIALS']), async (req, res) => {
   try {
     const db = getDbConnection(req.user.companyId);
     
@@ -159,7 +159,7 @@ router.get('/', requirePermission(['financial:read']), async (req, res) => {
 });
 
 // GET /transactions/:id - Get specific transaction
-router.get('/:id', requirePermission(['financial:read']), async (req, res) => {
+router.get('/:id', requirePermission(['VIEW_FINANCIALS']), async (req, res) => {
   try {
     const db = getDbConnection(req.user.companyId);
     const { id } = req.params;
@@ -418,7 +418,7 @@ router.post('/bulk',
 );
 
 // GET /transactions/analytics/summary - Get comprehensive financial analytics
-router.get('/analytics/summary', requirePermission(['financial:read']), async (req, res) => {
+router.get('/analytics/summary', requirePermission(['VIEW_FINANCIALS']), async (req, res) => {
   try {
     const db = getDbConnection(req.user.companyId);
     const { dateFrom, dateTo, transactionType } = req.query;
@@ -524,7 +524,7 @@ router.get('/analytics/summary', requirePermission(['financial:read']), async (r
 });
 
 // GET /transactions/balance-sheet - Get balance sheet data
-router.get('/balance-sheet', requirePermission(['financial:read']), async (req, res) => {
+router.get('/balance-sheet', requirePermission(['VIEW_FINANCIALS']), async (req, res) => {
   try {
     const db = getDbConnection(req.user.companyId);
     const { dateFrom, dateTo } = req.query;

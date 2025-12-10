@@ -16,11 +16,11 @@ const dbConfig = {
     bigNumberStrings: true,
   },
   pool: {
-    min: 1,
-    max: 5,
+    min: 2,
+    max: 20, // Increased from 5 to handle concurrent requests
     createTimeoutMillis: 10000,
-    acquireTimeoutMillis: 60000,
-    idleTimeoutMillis: 600000,
+    acquireTimeoutMillis: 30000, // Reduced from 60s to fail faster
+    idleTimeoutMillis: 30000, // Reduced from 600s to release idle connections quicker
     reapIntervalMillis: 10000,
     createRetryIntervalMillis: 500,
   },
@@ -131,24 +131,44 @@ const getDbConnection = (companyId) => {
 // Database health check
 const healthCheck = async () => {
   const results = {};
-  
+
   try {
     if (alRamramiDb) {
       await alRamramiDb.raw('SELECT 1');
-      results.alRamrami = 'healthy';
+      const pool = alRamramiDb.client.pool;
+      results.alRamrami = {
+        status: 'healthy',
+        pool: {
+          size: pool.numUsed() + pool.numFree(),
+          used: pool.numUsed(),
+          free: pool.numFree(),
+          pending: pool.numPendingAcquires(),
+          waiting: pool.numPendingCreates()
+        }
+      };
     }
   } catch (error) {
-    results.alRamrami = 'unhealthy';
+    results.alRamrami = { status: 'unhealthy', error: error.message };
     logger.error('Al Ramrami DB health check failed', { error: error.message });
   }
 
   try {
     if (prideMuscatDb) {
       await prideMuscatDb.raw('SELECT 1');
-      results.prideMuscat = 'healthy';
+      const pool = prideMuscatDb.client.pool;
+      results.prideMuscat = {
+        status: 'healthy',
+        pool: {
+          size: pool.numUsed() + pool.numFree(),
+          used: pool.numUsed(),
+          free: pool.numFree(),
+          pending: pool.numPendingAcquires(),
+          waiting: pool.numPendingCreates()
+        }
+      };
     }
   } catch (error) {
-    results.prideMuscat = 'unhealthy';
+    results.prideMuscat = { status: 'unhealthy', error: error.message };
     logger.error('Pride Muscat DB health check failed', { error: error.message });
   }
 

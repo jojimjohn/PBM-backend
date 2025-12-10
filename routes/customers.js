@@ -22,6 +22,7 @@ const customerSchema = Joi.object({
   creditLimit: Joi.number().min(0).default(0),
   paymentTermDays: Joi.number().integer().min(0).default(0),
   notes: Joi.string().allow('').optional(),
+  is_taxable: Joi.boolean().default(true),
   isActive: Joi.boolean().default(true)
 });
 

@@ -1,23 +1,74 @@
 const { verifyToken } = require('../utils/jwt');
 const { logger, auditLog } = require('../utils/logger');
+const tokenBlacklist = require('../utils/tokenBlacklist');
 
-// Authentication middleware
+/**
+ * Authentication middleware
+ *
+ * Token extraction priority:
+ * 1. HttpOnly cookie (accessToken) - preferred, secure
+ * 2. Authorization header (Bearer token) - fallback for migration/mobile
+ *
+ * Validation checks:
+ * 1. Token exists
+ * 2. Token is valid JWT
+ * 3. Token is not blacklisted (individual)
+ * 4. User is not force logged out (user-wide)
+ */
 const authenticateToken = async (req, res, next) => {
   try {
-    const authHeader = req.headers['authorization'];
-    const token = authHeader && authHeader.split(' ')[1]; // Bearer TOKEN
+    // 1. Extract token - cookies first, then header (for migration)
+    let token = req.cookies?.accessToken;
+    let tokenSource = 'cookie';
+
+    // Fallback to Authorization header if no cookie
+    if (!token) {
+      const authHeader = req.headers['authorization'];
+      token = authHeader && authHeader.split(' ')[1]; // Bearer TOKEN
+      tokenSource = 'header';
+    }
 
     if (!token) {
       return res.status(401).json({
         success: false,
-        error: 'Access token is required'
+        error: 'Authentication required',
+        code: 'NO_TOKEN'
       });
     }
 
-    // Verify token
+    // 2. Verify token signature and expiration
     const decoded = verifyToken(token);
-    
-    // Add user info to request
+
+    // 3. Check token blacklist (individual token and user-wide)
+    const blacklistCheck = await tokenBlacklist.isTokenValid(
+      token,
+      decoded.userId,
+      decoded.iat
+    );
+
+    if (!blacklistCheck.valid) {
+      auditLog('TOKEN_REJECTED', decoded.userId, {
+        reason: blacklistCheck.reason,
+        email: decoded.email,
+        ip: req.ip,
+        userAgent: req.get('User-Agent'),
+        endpoint: req.originalUrl
+      });
+
+      // Clear cookies if token is revoked
+      res.clearCookie('accessToken');
+      res.clearCookie('refreshToken');
+
+      return res.status(401).json({
+        success: false,
+        error: blacklistCheck.reason === 'FORCE_LOGOUT'
+          ? 'Your session has been terminated by an administrator'
+          : 'Token has been revoked',
+        code: blacklistCheck.reason
+      });
+    }
+
+    // 4. Add user info and token to request
     req.user = {
       userId: decoded.userId,
       email: decoded.email,
@@ -26,13 +77,15 @@ const authenticateToken = async (req, res, next) => {
       permissions: decoded.permissions || []
     };
 
-    // Log successful authentication
-    auditLog('AUTH_SUCCESS', decoded.userId, {
-      email: decoded.email,
-      role: decoded.role,
-      companyId: decoded.companyId,
-      ip: req.ip,
-      userAgent: req.get('User-Agent'),
+    // Store token for potential logout blacklisting
+    req.token = token;
+    req.tokenSource = tokenSource;
+    req.tokenIssuedAt = decoded.iat;
+
+    // Log successful authentication (debug level to reduce noise)
+    logger.debug('Auth success', {
+      userId: decoded.userId,
+      source: tokenSource,
       endpoint: req.originalUrl
     });
 
@@ -46,9 +99,22 @@ const authenticateToken = async (req, res, next) => {
       endpoint: req.originalUrl
     });
 
+    // Determine error type for appropriate response
+    let errorCode = 'INVALID_TOKEN';
+    let errorMessage = 'Invalid or expired token';
+
+    if (error.name === 'TokenExpiredError') {
+      errorCode = 'TOKEN_EXPIRED';
+      errorMessage = 'Token has expired';
+    } else if (error.name === 'JsonWebTokenError') {
+      errorCode = 'INVALID_TOKEN';
+      errorMessage = 'Invalid token';
+    }
+
     return res.status(401).json({
       success: false,
-      error: error.message
+      error: errorMessage,
+      code: errorCode
     });
   }
 };

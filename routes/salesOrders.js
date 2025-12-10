@@ -3,6 +3,7 @@ const { validate, validateParams, sanitize } = require('../middleware/validation
 const { requirePermission } = require('../middleware/auth');
 const { logger, auditLog } = require('../utils/logger');
 const { getDbConnection } = require('../config/database');
+const { allocateFIFO } = require('../utils/fifoAllocator');
 const Joi = require('joi');
 
 const router = express.Router();
@@ -12,16 +13,62 @@ router.use(sanitize);
 
 // Sales order validation schema
 const salesOrderSchema = Joi.object({
-  customerId: Joi.number().integer().positive().required(),
+  customerId: Joi.number().integer().positive().optional(), // Optional if customer object provided
   orderDate: Joi.date().default(() => new Date()),
   expectedDeliveryDate: Joi.date().optional(),
+  deliveryDate: Joi.string().allow('').optional(),
   orderStatus: Joi.string().valid('draft', 'confirmed', 'delivered', 'cancelled').default('draft'),
-  paymentStatus: Joi.string().valid('pending', 'partial', 'paid').default('pending'),
   subtotal: Joi.number().min(0).precision(3).default(0),
   taxAmount: Joi.number().min(0).precision(3).default(0),
+  vatAmount: Joi.number().min(0).precision(3).optional().default(0),
+  vatRate: Joi.number().min(0).max(100).optional().default(5),
   totalAmount: Joi.number().min(0).precision(3).default(0),
+  netAmount: Joi.number().min(0).precision(3).optional().default(0),
   discountAmount: Joi.number().min(0).precision(3).default(0),
+  discountPercent: Joi.number().min(0).max(100).optional().default(0),
   notes: Joi.string().allow('').optional(),
+  specialInstructions: Joi.string().allow('').optional(),
+  orderNumber: Joi.string().optional(), // Frontend may send this but backend generates it
+  branch_id: Joi.number().integer().positive().allow(null).optional(), // Branch ID for multi-branch support
+  // Items array for creating order with items in one request
+  items: Joi.array().items(Joi.object({
+    materialId: Joi.number().integer().positive().required(),
+    // For drafts, quantity/rate are optional; for other statuses they're required
+    quantity: Joi.number().min(0.001).precision(3).optional().default(0),
+    rate: Joi.number().min(0).precision(3).optional().default(0),
+    amount: Joi.number().min(0).precision(3).optional().default(0)
+  }).options({ stripUnknown: true })).optional(),
+  // Additional fields that frontend may send
+  status: Joi.string().valid('draft', 'pending', 'confirmed', 'delivered', 'cancelled').optional(),
+  customer: Joi.object().unknown(true).optional(), // Frontend sends full customer object
+  contractInfo: Joi.object().unknown(true).allow(null).optional(), // Frontend sends contract info
+  id: Joi.string().optional(), // Frontend generated ID, ignored by backend
+  createdAt: Joi.date().optional(), // Frontend timestamp, ignored by backend
+  createdBy: Joi.string().optional() // Frontend user, ignored by backend
+}).options({ stripUnknown: true }).custom((value, helpers) => {
+  // Extract customerId from customer object if not provided directly
+  if (!value.customerId && value.customer && value.customer.id) {
+    value.customerId = value.customer.id;
+  }
+
+  // Validate customerId is present
+  if (!value.customerId) {
+    return helpers.error('any.custom', { message: 'Customer ID is required' });
+  }
+
+  // If not a draft, require quantity and rate for all items
+  const status = value.status || value.orderStatus || 'draft';
+  if (status !== 'draft' && value.items && value.items.length > 0) {
+    for (const item of value.items) {
+      if (!item.quantity || item.quantity <= 0) {
+        return helpers.error('any.custom', { message: 'Quantity is required for non-draft orders' });
+      }
+      if (item.rate === undefined || item.rate === null) {
+        return helpers.error('any.custom', { message: 'Rate is required for non-draft orders' });
+      }
+    }
+  }
+  return value;
 });
 
 // Sales order item validation schema
@@ -34,19 +81,54 @@ const salesOrderItemSchema = Joi.object({
   notes: Joi.string().allow('').optional()
 });
 
+/**
+ * Convert decimal fields from MySQL strings to numbers
+ * MySQL DECIMAL fields are returned as strings by the driver
+ * @param {Object|Array} data - Single order object or array of orders
+ * @returns {Object|Array} Data with decimal fields converted to numbers
+ */
+function convertDecimalFields(data) {
+  const decimalFields = [
+    'subtotal', 'taxAmount', 'discountAmount', 'shippingCost', 'totalAmount',
+    'quantity', 'unitPrice', 'totalPrice', 'discountPercentage'
+  ];
+
+  const convertObject = (obj) => {
+    if (!obj) return obj;
+    const converted = { ...obj };
+    decimalFields.forEach(field => {
+      if (converted[field] !== undefined && converted[field] !== null) {
+        converted[field] = parseFloat(converted[field]) || 0;
+      }
+    });
+
+    // Map database taxAmount to frontend vatAmount for consistency
+    if (converted.taxAmount !== undefined) {
+      converted.vatAmount = converted.taxAmount;
+    }
+
+    // Convert items if present
+    if (converted.items && Array.isArray(converted.items)) {
+      converted.items = converted.items.map(item => convertObject(item));
+    }
+    return converted;
+  };
+
+  return Array.isArray(data) ? data.map(convertObject) : convertObject(data);
+}
+
 // GET /api/sales-orders - List all sales orders
 router.get('/', requirePermission('VIEW_SALES'), async (req, res) => {
   try {
     const { companyId } = req.user;
     const db = getDbConnection(companyId);
     
-    const { 
-      page = 1, 
-      limit = 50, 
-      search = '', 
+    const {
+      page = 1,
+      limit = 50,
+      search = '',
       customerId = '',
       orderStatus = '',
-      paymentStatus = '',
       fromDate = '',
       toDate = ''
     } = req.query;
@@ -79,12 +161,7 @@ router.get('/', requirePermission('VIEW_SALES'), async (req, res) => {
 
     // Order status filter
     if (orderStatus) {
-      query = query.where('sales_orders.orderStatus', orderStatus);
-    }
-
-    // Payment status filter
-    if (paymentStatus) {
-      query = query.where('sales_orders.paymentStatus', paymentStatus);
+      query = query.where('sales_orders.status', orderStatus);
     }
 
     // Date range filter
@@ -106,15 +183,18 @@ router.get('/', requirePermission('VIEW_SALES'), async (req, res) => {
       .limit(limit)
       .offset(offset);
 
+    // Convert decimal fields from strings to numbers
+    const convertedOrders = convertDecimalFields(orders);
+
     auditLog('SALES_ORDERS_VIEWED', req.user.userId, {
       companyId,
-      count: orders.length,
-      filters: { search, customerId, orderStatus, paymentStatus, fromDate, toDate }
+      count: convertedOrders.length,
+      filters: { search, customerId, orderStatus, fromDate, toDate }
     });
 
     res.json({
       success: true,
-      data: orders,
+      data: convertedOrders,
       pagination: {
         page: parseInt(page),
         limit: parseInt(limit),
@@ -233,17 +313,21 @@ router.get('/:id',
         .where('sales_order_items.salesOrderId', id)
         .orderBy('sales_order_items.id');
 
+      // Convert decimal fields from strings to numbers for order and items
+      const convertedOrder = convertDecimalFields(order);
+      const convertedItems = convertDecimalFields(items);
+
       auditLog('SALES_ORDER_VIEWED', req.user.userId, {
         salesOrderId: id,
-        orderNumber: order.orderNumber,
-        customerName: order.customerName
+        orderNumber: convertedOrder.orderNumber,
+        customerName: convertedOrder.customerName
       });
 
       res.json({
         success: true,
         data: {
-          ...order,
-          items
+          ...convertedOrder,
+          items: convertedItems
         }
       });
 
@@ -262,7 +346,7 @@ router.get('/:id',
 );
 
 // POST /api/sales-orders - Create new sales order
-router.post('/', 
+router.post('/',
   validate(salesOrderSchema),
   requirePermission('CREATE_SALES'),
   async (req, res) => {
@@ -285,14 +369,66 @@ router.post('/',
       // Generate order number
       const orderNumber = `SO-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
 
+      // Extract items and other frontend-only fields
+      const {
+        items,
+        customer: customerObj,
+        contractInfo,
+        status,
+        id,
+        createdAt,
+        createdBy,
+        deliveryDate, // Frontend sends this but DB uses expectedDeliveryDate
+        discountPercent, // Frontend field, not in DB
+        netAmount, // Frontend field, not in DB
+        vatAmount, // Frontend sends this, map to taxAmount
+        vatRate, // Frontend sends this, map to taxPercent (if needed)
+        specialInstructions, // Check if DB has this column
+        ...orderFields
+      } = req.body;
+
+      // Map frontend status/orderStatus field to database 'status' column
       const orderData = {
-        ...req.body,
+        ...orderFields,
+        status: status || orderFields.orderStatus || orderFields.status || 'draft',
         orderNumber,
+        createdBy: req.user.userId,
         created_at: new Date(),
         updated_at: new Date()
       };
 
+      // Map vatAmount to taxAmount (database column)
+      if (vatAmount !== undefined) {
+        orderData.taxAmount = vatAmount;
+      }
+
+      // Map deliveryDate to expectedDeliveryDate if provided
+      if (deliveryDate) {
+        orderData.expectedDeliveryDate = deliveryDate;
+      }
+
+      // Remove frontend-only fields that don't exist in DB
+      delete orderData.orderStatus;
+      delete orderData.vatAmount;
+      delete orderData.vatRate;
+      delete orderData.netAmount;
+      delete orderData.discountPercent;
+
       const [orderId] = await db('sales_orders').insert(orderData);
+
+      // Insert items if provided
+      if (items && items.length > 0) {
+        const itemsData = items.map(item => ({
+          salesOrderId: orderId,
+          materialId: item.materialId,
+          quantity: item.quantity || 0,
+          unitPrice: item.rate || 0,
+          totalPrice: item.amount || (item.quantity * item.rate) || 0,
+          created_at: new Date(),
+          updated_at: new Date()
+        }));
+        await db('sales_order_items').insert(itemsData);
+      }
       
       const newOrder = await db('sales_orders')
         .leftJoin('customers', 'sales_orders.customerId', 'customers.id')
@@ -303,23 +439,43 @@ router.post('/',
         .where('sales_orders.id', orderId)
         .first();
 
+      // Get order items with material details
+      const orderItems = await db('sales_order_items')
+        .leftJoin('materials', 'sales_order_items.materialId', 'materials.id')
+        .select(
+          'sales_order_items.*',
+          'materials.name as materialName',
+          'materials.code as materialCode',
+          'materials.unit',
+          'materials.category'
+        )
+        .where('sales_order_items.salesOrderId', orderId)
+        .orderBy('sales_order_items.id');
+
+      // Convert decimal fields from strings to numbers
+      const convertedOrder = convertDecimalFields(newOrder);
+      const convertedItems = convertDecimalFields(orderItems);
+
       auditLog('SALES_ORDER_CREATED', req.user.userId, {
         salesOrderId: orderId,
-        orderNumber: newOrder.orderNumber,
-        customerName: newOrder.customerName,
-        totalAmount: newOrder.totalAmount
+        orderNumber: convertedOrder.orderNumber,
+        customerName: convertedOrder.customerName,
+        totalAmount: convertedOrder.totalAmount
       });
 
       logger.info('Sales order created', {
         salesOrderId: orderId,
-        orderNumber: newOrder.orderNumber,
+        orderNumber: convertedOrder.orderNumber,
         createdBy: req.user.userId
       });
 
       res.status(201).json({
         success: true,
         message: 'Sales order created successfully',
-        data: newOrder
+        data: {
+          ...convertedOrder,
+          salesOrderItems: convertedItems
+        }
       });
 
     } catch (error) {
@@ -331,6 +487,158 @@ router.post('/',
       res.status(500).json({
         success: false,
         error: 'Failed to create sales order'
+      });
+    }
+  }
+);
+
+// PUT /api/sales-orders/:id - Update existing sales order
+router.put('/:id',
+  validateParams(Joi.object({ id: Joi.number().integer().positive().required() })),
+  validate(salesOrderSchema),
+  requirePermission('EDIT_SALES'),
+  async (req, res) => {
+    try {
+      const { id } = req.params;
+      const { companyId } = req.user;
+      const db = getDbConnection(companyId);
+
+      // Check if order exists
+      const existingOrder = await db('sales_orders')
+        .where({ id })
+        .first();
+
+      if (!existingOrder) {
+        return res.status(404).json({
+          success: false,
+          error: 'Sales order not found'
+        });
+      }
+
+      // Extract items and other frontend-only fields
+      const {
+        items,
+        customer: customerObj,
+        contractInfo,
+        status,
+        id: frontendId,
+        createdAt,
+        createdBy,
+        deliveryDate,
+        discountPercent,
+        netAmount,
+        vatAmount,
+        vatRate,
+        specialInstructions,
+        ...orderFields
+      } = req.body;
+
+      // Map frontend status/orderStatus field to database 'status' column
+      const updateData = {
+        ...orderFields,
+        status: status || orderFields.orderStatus || existingOrder.status,
+        updated_at: new Date()
+      };
+
+      // Map vatAmount to taxAmount (database column)
+      if (vatAmount !== undefined) {
+        updateData.taxAmount = vatAmount;
+      }
+
+      // Map deliveryDate to expectedDeliveryDate if provided
+      if (deliveryDate) {
+        updateData.expectedDeliveryDate = deliveryDate;
+      }
+
+      // Remove frontend-only fields that don't exist in DB
+      delete updateData.orderStatus;
+      delete updateData.vatAmount;
+      delete updateData.vatRate;
+      delete updateData.netAmount;
+      delete updateData.discountPercent;
+      // Don't allow changing order number
+      delete updateData.orderNumber;
+
+      await db('sales_orders')
+        .where({ id })
+        .update(updateData);
+
+      // If items provided, update them
+      if (items && items.length > 0) {
+        // Delete existing items
+        await db('sales_order_items').where({ salesOrderId: id }).delete();
+
+        // Insert new items
+        const itemsData = items.map(item => ({
+          salesOrderId: id,
+          materialId: item.materialId,
+          quantity: item.quantity || 0,
+          unitPrice: item.rate || 0,
+          totalPrice: item.amount || (item.quantity * item.rate) || 0,
+          created_at: new Date(),
+          updated_at: new Date()
+        }));
+        await db('sales_order_items').insert(itemsData);
+      }
+
+      const updatedOrder = await db('sales_orders')
+        .leftJoin('customers', 'sales_orders.customerId', 'customers.id')
+        .select(
+          'sales_orders.*',
+          'customers.name as customerName'
+        )
+        .where('sales_orders.id', id)
+        .first();
+
+      // Get order items with material details
+      const orderItems = await db('sales_order_items')
+        .leftJoin('materials', 'sales_order_items.materialId', 'materials.id')
+        .select(
+          'sales_order_items.*',
+          'materials.name as materialName',
+          'materials.code as materialCode',
+          'materials.unit',
+          'materials.category'
+        )
+        .where('sales_order_items.salesOrderId', id)
+        .orderBy('sales_order_items.id');
+
+      // Convert decimal fields from strings to numbers
+      const convertedOrder = convertDecimalFields(updatedOrder);
+      const convertedItems = convertDecimalFields(orderItems);
+
+      auditLog('SALES_ORDER_UPDATED', req.user.userId, {
+        salesOrderId: id,
+        orderNumber: convertedOrder.orderNumber,
+        customerName: convertedOrder.customerName,
+        totalAmount: convertedOrder.totalAmount
+      });
+
+      logger.info('Sales order updated', {
+        salesOrderId: id,
+        orderNumber: convertedOrder.orderNumber,
+        updatedBy: req.user.userId
+      });
+
+      res.json({
+        success: true,
+        message: 'Sales order updated successfully',
+        data: {
+          ...convertedOrder,
+          salesOrderItems: convertedItems
+        }
+      });
+
+    } catch (error) {
+      logger.error('Error updating sales order', {
+        error: error.message,
+        salesOrderId: req.params.id,
+        userId: req.user.userId,
+        orderData: req.body
+      });
+      res.status(500).json({
+        success: false,
+        error: 'Failed to update sales order'
       });
     }
   }
@@ -350,7 +658,7 @@ router.post('/:id/items',
       // Verify order exists and is editable
       const order = await db('sales_orders')
         .where({ id })
-        .whereIn('orderStatus', ['draft', 'confirmed'])
+        .whereIn('status', ['draft', 'confirmed'])
         .first();
 
       if (!order) {
@@ -456,14 +764,13 @@ router.put('/:id/status',
   validateParams(Joi.object({ id: Joi.number().integer().positive().required() })),
   validate(Joi.object({
     orderStatus: Joi.string().valid('draft', 'confirmed', 'delivered', 'cancelled').required(),
-    paymentStatus: Joi.string().valid('pending', 'partial', 'paid').optional(),
     notes: Joi.string().allow('').optional()
   })),
   requirePermission('EDIT_SALES'),
   async (req, res) => {
     try {
       const { id } = req.params;
-      const { orderStatus, paymentStatus, notes } = req.body;
+      const { orderStatus, notes } = req.body;
       const { companyId } = req.user;
       const db = getDbConnection(companyId);
 
@@ -482,10 +789,6 @@ router.put('/:id/status',
         orderStatus,
         updated_at: new Date()
       };
-
-      if (paymentStatus) {
-        updateData.paymentStatus = paymentStatus;
-      }
 
       if (notes !== undefined) {
         updateData.notes = notes;
@@ -509,21 +812,51 @@ router.put('/:id/status',
         }
       }
 
-      // If order is delivered, reduce actual inventory
+      // If order is delivered, reduce actual inventory using FIFO allocation
       if (orderStatus === 'delivered' && order.orderStatus !== 'delivered') {
         const items = await db('sales_order_items')
           .where({ salesOrderId: id });
 
-        for (const item of items) {
-          await db.transaction(async (trx) => {
-            // Reduce inventory
+        let totalOrderCOGS = 0;
+
+        await db.transaction(async (trx) => {
+          for (const item of items) {
+            // FIFO allocation - consume from oldest batches first
+            const fifoResult = await allocateFIFO(
+              trx,
+              item.materialId,
+              item.quantity,
+              'sale',
+              'sales_order',
+              id,
+              req.user.userId,
+              { branchId: order.branchId || null }
+            );
+
+            if (!fifoResult.success) {
+              // If FIFO allocation fails, throw to rollback transaction
+              throw new Error(`FIFO allocation failed for material ${item.materialId}: ${fifoResult.error}`);
+            }
+
+            const itemCOGS = fifoResult.totalCOGS;
+            totalOrderCOGS += itemCOGS;
+
+            // Also reduce from legacy inventory table for backwards compatibility
             await trx('inventory')
               .where({ materialId: item.materialId })
               .decrement('quantity', item.quantity)
               .decrement('reservedQuantity', item.quantity)
               .update('updated_at', new Date());
 
-            // Create transaction record
+            // Update sales_order_items with actual COGS from FIFO
+            await trx('sales_order_items')
+              .where({ id: item.id })
+              .update({
+                cogs: itemCOGS,
+                updated_at: new Date()
+              });
+
+            // Create transaction record with actual COGS
             await trx('transactions').insert({
               transactionNumber: `SALE-${Date.now()}-${item.id}`,
               transactionType: 'sale',
@@ -533,13 +866,40 @@ router.put('/:id/status',
               quantity: -item.quantity,
               amount: -item.totalPrice,
               transactionDate: new Date(),
-              description: `Sale delivery - Order ${order.orderNumber}`,
+              description: `Sale delivery - Order ${order.orderNumber} | COGS: ${itemCOGS.toFixed(3)} from ${fifoResult.batchesUsed} batch(es)`,
               createdBy: req.user.userId,
               created_at: new Date(),
               updated_at: new Date()
             });
-          });
-        }
+
+            logger.info('FIFO allocation for sale', {
+              salesOrderId: id,
+              orderNumber: order.orderNumber,
+              materialId: item.materialId,
+              quantity: item.quantity,
+              cogs: itemCOGS,
+              salePrice: item.totalPrice,
+              grossMargin: item.totalPrice - itemCOGS,
+              batchesUsed: fifoResult.batchesUsed
+            });
+          }
+
+          // Update sales order with total COGS
+          await trx('sales_orders')
+            .where({ id })
+            .update({
+              cogs: totalOrderCOGS,
+              updated_at: new Date()
+            });
+        });
+
+        logger.info('Sales order delivered with FIFO COGS', {
+          salesOrderId: id,
+          orderNumber: order.orderNumber,
+          totalCOGS: totalOrderCOGS,
+          totalRevenue: order.totalAmount,
+          grossProfit: order.totalAmount - totalOrderCOGS
+        });
       }
 
       auditLog('SALES_ORDER_STATUS_UPDATED', req.user.userId, {
@@ -556,14 +916,108 @@ router.put('/:id/status',
       });
 
     } catch (error) {
-      logger.error('Error updating sales order status', { 
-        error: error.message, 
+      logger.error('Error updating sales order status', {
+        error: error.message,
         salesOrderId: req.params.id,
         userId: req.user.userId
       });
       res.status(500).json({
         success: false,
         error: 'Failed to update sales order status'
+      });
+    }
+  }
+);
+
+// POST /api/sales-orders/:id/invoice - Generate invoice from sales order
+router.post('/:id/invoice',
+  validateParams(Joi.object({ id: Joi.number().integer().positive().required() })),
+  requirePermission('CREATE_INVOICES'),
+  async (req, res) => {
+    try {
+      const { id } = req.params;
+      const { companyId, userId } = req.user;
+      const db = getDbConnection(companyId);
+
+      // Get sales order with items
+      const order = await db('sales_orders')
+        .where({ id })
+        .first();
+
+      if (!order) {
+        return res.status(404).json({
+          success: false,
+          error: 'Sales order not found'
+        });
+      }
+
+      // Only allow invoice generation for confirmed or delivered orders
+      if (order.status !== 'confirmed' && order.status !== 'delivered') {
+        return res.status(400).json({
+          success: false,
+          error: 'Invoice can only be generated for confirmed or delivered orders'
+        });
+      }
+
+      // Get order items
+      const items = await db('sales_order_items')
+        .select('sales_order_items.*', 'materials.name as materialName', 'materials.unit')
+        .leftJoin('materials', 'sales_order_items.materialId', 'materials.id')
+        .where({ salesOrderId: id });
+
+      if (items.length === 0) {
+        return res.status(400).json({
+          success: false,
+          error: 'Cannot generate invoice for order with no items'
+        });
+      }
+
+      // Generate invoice number
+      const invoiceNumber = `INV-${order.orderNumber}-${Date.now()}`;
+
+      // Create invoice record (stored in sales_orders table with invoice metadata)
+      await db('sales_orders')
+        .where({ id })
+        .update({
+          invoiceNumber,
+          invoiceGeneratedAt: new Date(),
+          invoiceGeneratedBy: userId,
+          updated_at: new Date()
+        });
+
+      auditLog('SALES_INVOICE_GENERATED', userId, {
+        salesOrderId: id,
+        orderNumber: order.orderNumber,
+        invoiceNumber,
+        totalAmount: order.totalAmount
+      });
+
+      res.json({
+        success: true,
+        message: 'Invoice generated successfully',
+        data: {
+          invoiceNumber,
+          orderNumber: order.orderNumber,
+          totalAmount: parseFloat(order.totalAmount || 0),
+          items: items.map(item => ({
+            materialName: item.materialName,
+            quantity: parseFloat(item.quantity || 0),
+            unitPrice: parseFloat(item.unitPrice || 0),
+            totalPrice: parseFloat(item.totalPrice || 0),
+            unit: item.unit
+          }))
+        }
+      });
+
+    } catch (error) {
+      logger.error('Error generating sales invoice', {
+        error: error.message,
+        salesOrderId: req.params.id,
+        userId: req.user.userId
+      });
+      res.status(500).json({
+        success: false,
+        error: 'Failed to generate invoice'
       });
     }
   }
