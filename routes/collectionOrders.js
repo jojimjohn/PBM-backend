@@ -168,6 +168,10 @@ router.get('/callouts', requirePermission('VIEW_COLLECTIONS'), async (req, res) 
       page = 1,
       limit = 50,
       status = '',
+    const {
+      page = 1,
+      limit = 50,
+      status = '',
       priority = '',
       search = '',
       supplierId = '',
@@ -175,6 +179,7 @@ router.get('/callouts', requirePermission('VIEW_COLLECTIONS'), async (req, res) 
     } = req.query;
 
     const offset = (page - 1) * limit;
+
 
     // Check if collection_orders table exists
     const tableExists = await db.schema.hasTable('collection_orders');
@@ -197,6 +202,17 @@ router.get('/callouts', requirePermission('VIEW_COLLECTIONS'), async (req, res) 
         'suppliers.name as supplierName',
         'supplier_locations.locationName',
         'supplier_locations.locationCode'
+      );
+
+    // Status filter - if not provided, show all statuses
+    if (status && status !== 'all') {
+      query = query.where('collection_orders.status', status);
+    }
+
+    // Priority filter
+    if (priority && priority !== 'all') {
+      query = query.where('collection_orders.priority', priority);
+    }
       );
 
     // Status filter - if not provided, show all statuses
@@ -469,6 +485,7 @@ router.put('/:id/status',
   validateParams(Joi.object({ id: Joi.number().integer().positive().required() })),
   validate(Joi.object({
     status: Joi.string().valid('scheduled', 'in_transit', 'collecting', 'completed', 'cancelled', 'failed').required(),
+    status: Joi.string().valid('scheduled', 'in_transit', 'collecting', 'completed', 'cancelled', 'failed').required(),
     notes: Joi.string().allow('').optional(),
     actualCollectionDate: Joi.date().optional(),
     actualQuantity: Joi.number().min(0).precision(3).optional()
@@ -502,8 +519,18 @@ router.put('/:id/status',
       // Allow all status transitions (matching database ENUM)
       const validStatuses = ['scheduled', 'in_transit', 'collecting', 'completed', 'cancelled', 'failed'];
       if (!validStatuses.includes(status)) {
+      // Fix empty status values before validation
+      if (!collectionOrder.status || collectionOrder.status === '') {
+        collectionOrder.status = 'scheduled';
+        await db('collection_orders').where({ id }).update({ status: 'scheduled' });
+      }
+
+      // Allow all status transitions (matching database ENUM)
+      const validStatuses = ['scheduled', 'in_transit', 'collecting', 'completed', 'cancelled', 'failed'];
+      if (!validStatuses.includes(status)) {
         return res.status(400).json({
           success: false,
+          error: `Invalid status: ${status}`
           error: `Invalid status: ${status}`
         });
       }
@@ -520,6 +547,7 @@ router.put('/:id/status',
 
       // Set timestamps based on status
       if (status === 'in_transit' && !collectionOrder.actualStartTime) {
+      if (status === 'in_transit' && !collectionOrder.actualStartTime) {
         updateData.actualStartTime = new Date();
       }
       
@@ -527,10 +555,18 @@ router.put('/:id/status',
         updateData.actualEndTime = actualCollectionDate || new Date();
         updateData.completedBy = req.user.userId;
 
+
         if (actualQuantity !== undefined) {
           updateData.actualQuantity = actualQuantity;
         }
 
+        // NOTE: Inventory is NOT updated here anymore.
+        // Inventory updates happen ONLY during WCN finalization (POST /:id/finalize-wcn)
+        // which properly handles:
+        // 1. Composite material auto-splitting into components
+        // 2. Proper WCN batch number tracking
+        // 3. Auto-PO generation for billing
+        // This prevents duplicate inventory entries.
         // NOTE: Inventory is NOT updated here anymore.
         // Inventory updates happen ONLY during WCN finalization (POST /:id/finalize-wcn)
         // which properly handles:
@@ -559,12 +595,79 @@ router.put('/:id/status',
     } catch (error) {
       logger.error('Error updating collection order status', {
         error: error.message,
+      logger.error('Error updating collection order status', {
+        error: error.message,
         collectionOrderId: req.params.id,
         userId: req.user.userId
       });
       res.status(500).json({
         success: false,
         error: 'Failed to update collection order status'
+      });
+    }
+  }
+);
+
+// PUT /api/collection-orders/:id/driver - Update driver details
+router.put('/:id/driver',
+  validateParams(Joi.object({ id: Joi.number().integer().positive().required() })),
+  validate(Joi.object({
+    driverName: Joi.string().required(),
+    driverPhone: Joi.string().allow('').optional(), // Not in DB but accepted for future
+    vehiclePlate: Joi.string().required(),
+    vehicleType: Joi.string().valid('truck', 'pickup', 'van', 'trailer').required()
+  })),
+  requirePermission('EDIT_COLLECTIONS'),
+  async (req, res) => {
+    try {
+      const { id } = req.params;
+      const { driverName, vehiclePlate, vehicleType } = req.body;
+      const { companyId } = req.user;
+      const db = getDbConnection(companyId);
+
+      // Check if collection order exists
+      const collectionOrder = await db('collection_orders')
+        .where({ id })
+        .first();
+
+      if (!collectionOrder) {
+        return res.status(404).json({
+          success: false,
+          error: 'Collection order not found'
+        });
+      }
+
+      // Update driver details (driverPhone not in DB schema)
+      await db('collection_orders')
+        .where({ id })
+        .update({
+          driverName,
+          vehiclePlate,
+          vehicleType,
+          updated_at: new Date()
+        });
+
+      auditLog('DRIVER_ASSIGNED', req.user.userId, {
+        collectionOrderId: id,
+        orderNumber: collectionOrder.orderNumber,
+        driverName,
+        vehiclePlate
+      });
+
+      res.json({
+        success: true,
+        message: 'Driver assigned successfully'
+      });
+
+    } catch (error) {
+      logger.error('Error assigning driver', {
+        error: error.message,
+        collectionOrderId: req.params.id,
+        userId: req.user.userId
+      });
+      res.status(500).json({
+        success: false,
+        error: 'Failed to assign driver'
       });
     }
   }

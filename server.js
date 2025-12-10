@@ -240,6 +240,7 @@ app.use('/api/collection-orders', collectionOrdersRoutes);
 app.use('/api/sales-orders', salesOrdersRoutes);
 app.use('/api/purchase-orders', purchaseOrdersRoutes);
 app.use('/api/purchase-orders', purchaseOrderExpensesRoutes);
+app.use('/api/purchase-orders', purchaseOrderExpensesRoutes);
 app.use('/api/expenses', expensesRoutes);
 app.use('/api/wastages', wastagesRoutes);
 app.use('/api/petty-cash-cards', pettyCashCardsRoutes);

@@ -517,12 +517,15 @@ router.get('/analytics', requirePermission('VIEW_EXPENSE_REPORTS'), async (req, 
     // Get basic analytics
     const analyticsQuery = `
       SELECT
+      SELECT
         COUNT(*) as totalExpenses,
         COALESCE(SUM(amount), 0) as totalAmount,
         COALESCE(AVG(amount), 0) as averageAmount,
         COUNT(CASE WHEN status = 'approved' THEN 1 END) as approvedCount,
         COUNT(CASE WHEN status = 'pending' THEN 1 END) as pendingCount,
         COUNT(CASE WHEN status = 'rejected' THEN 1 END) as rejectedCount
+      FROM petty_cash_expenses
+      WHERE DATE(expenseDate) >= ?
       FROM petty_cash_expenses
       WHERE DATE(expenseDate) >= ?
         AND DATE(expenseDate) <= ?
