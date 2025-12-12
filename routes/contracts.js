@@ -10,10 +10,38 @@ const router = express.Router();
 // Apply sanitization to all routes
 router.use(sanitize);
 
+/**
+ * Generate a unique contract number
+ * Format: CT-YYYYMM-XXX (e.g., CT-202512-001)
+ * Sequence resets each month for clean numbering
+ */
+async function generateContractNumber(db) {
+  const now = new Date();
+  const yearMonth = `${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, '0')}`;
+  const prefix = `CT-${yearMonth}-`;
+
+  // Find the highest contract number for this month
+  const lastContract = await db('contracts')
+    .where('contractNumber', 'like', `${prefix}%`)
+    .orderBy('contractNumber', 'desc')
+    .first();
+
+  let sequence = 1;
+  if (lastContract && lastContract.contractNumber) {
+    // Extract the sequence number from the last contract
+    const lastSequence = parseInt(lastContract.contractNumber.replace(prefix, ''), 10);
+    if (!isNaN(lastSequence)) {
+      sequence = lastSequence + 1;
+    }
+  }
+
+  return `${prefix}${String(sequence).padStart(3, '0')}`;
+}
+
 // Contract validation schema - Supplier-based contracts
 // Schema matches exact database columns: id, supplierId, contractNumber, title, startDate, endDate, status, totalValue, currency, terms, notes, createdBy, approvedBy, approvedAt, created_at, updated_at
 const contractSchema = Joi.object({
-  contractNumber: Joi.string().max(100).required().trim(),
+  contractNumber: Joi.string().max(100).optional().trim(), // Optional - auto-generated if not provided
   supplierId: Joi.number().integer().positive().required(),
   title: Joi.string().max(200).required().trim(),
   startDate: Joi.date().required(),
@@ -55,6 +83,30 @@ const contractRateSchema = Joi.object({
   minimumPrice: Joi.number().min(0).precision(3).optional(),
   description: Joi.string().allow('').optional(),
   isActive: Joi.boolean().default(true)
+});
+
+// GET /api/contracts/next-number - Get next available contract number
+// Used to pre-populate the form with auto-generated number
+router.get('/next-number', requirePermission('MANAGE_CONTRACTS'), async (req, res) => {
+  try {
+    const { companyId } = req.user;
+    const db = getDbConnection(companyId);
+
+    const nextNumber = await generateContractNumber(db);
+
+    res.json({
+      success: true,
+      data: {
+        contractNumber: nextNumber
+      }
+    });
+  } catch (error) {
+    logger.error('Error generating next contract number', { error: error.message });
+    res.status(500).json({
+      success: false,
+      error: 'Failed to generate contract number'
+    });
+  }
 });
 
 // GET /api/contracts - List all contracts
@@ -375,23 +427,31 @@ router.post('/',
         });
       }
 
-      // Check if contract number already exists
-      const existingContract = await db('contracts')
-        .where({ contractNumber: req.body.contractNumber })
-        .first();
+      // Auto-generate contract number if not provided
+      let contractNumber = req.body.contractNumber;
+      if (!contractNumber) {
+        contractNumber = await generateContractNumber(db);
+        logger.info('Auto-generated contract number', { contractNumber });
+      } else {
+        // Only check for duplicates if user provided a contract number
+        const existingContract = await db('contracts')
+          .where({ contractNumber: contractNumber })
+          .first();
 
-      if (existingContract) {
-        return res.status(400).json({
-          success: false,
-          error: 'Contract with this number already exists'
-        });
+        if (existingContract) {
+          return res.status(400).json({
+            success: false,
+            error: 'Contract with this number already exists'
+          });
+        }
       }
 
       // Extract locations for separate handling
-      const { locations, ...contractFields } = req.body;
-      
+      const { locations, contractNumber: _, ...contractFields } = req.body;
+
       const contractData = {
         ...contractFields,
+        contractNumber, // Use generated or provided contract number
         createdBy: req.user.userId,
         created_at: new Date(),
         updated_at: new Date()

@@ -179,6 +179,42 @@ const requirePermission = (requiredPermission) => {
   };
 };
 
+/**
+ * Require any of the specified permissions
+ * @param {string[]} permissions - Array of permission strings (user needs at least ONE)
+ */
+const requireAnyPermission = (permissions) => {
+  return (req, res, next) => {
+    if (!req.user) {
+      return res.status(401).json({
+        success: false,
+        error: 'Authentication required'
+      });
+    }
+
+    const userPermissions = req.user.permissions || [];
+
+    // Check if user has ANY of the required permissions
+    const hasPermission = permissions.some(p => userPermissions.includes(p));
+
+    if (!hasPermission) {
+      auditLog('PERMISSION_DENIED', req.user.userId, {
+        requiredPermissions: permissions,
+        userPermissions,
+        endpoint: req.originalUrl,
+        ip: req.ip
+      });
+
+      return res.status(403).json({
+        success: false,
+        error: `One of these permissions is required: ${permissions.join(', ')}`
+      });
+    }
+
+    next();
+  };
+};
+
 // Company access middleware
 const requireCompanyAccess = (req, res, next) => {
   if (!req.user) {
@@ -233,6 +269,7 @@ module.exports = {
   authenticateToken,
   requireRole,
   requirePermission,
+  requireAnyPermission,
   requireCompanyAccess,
   authRateLimit
 };
