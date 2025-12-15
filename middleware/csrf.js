@@ -52,9 +52,11 @@ const setCsrfCookie = (res, token = null) => {
   res.cookie(CSRF_COOKIE_NAME, csrfToken, {
     httpOnly: false,  // MUST be false - JavaScript needs to read this
     secure: process.env.NODE_ENV === 'production',
-    sameSite: 'strict',
+    sameSite: 'lax',  // 'lax' is more compatible with reverse proxies while still preventing CSRF
     maxAge: CSRF_TOKEN_MAX_AGE,
-    path: '/'
+    path: '/',
+    // COOKIE_DOMAIN env var is required for Docker deployments behind reverse proxy
+    ...(process.env.COOKIE_DOMAIN ? { domain: process.env.COOKIE_DOMAIN } : {})
   });
 
   return csrfToken;

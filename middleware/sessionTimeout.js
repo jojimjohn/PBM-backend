@@ -101,9 +101,20 @@ const clearSessionTimeoutCache = async (companyId) => {
  * - /auth/session/status - Used by frontend to check remaining time
  * - /auth/session/extend - Manually extends session (handled separately)
  * - /auth/session/heartbeat - Heartbeat pings
+ *
+ * SESSION EXTENSION ENDPOINTS:
+ * These endpoints can extend a session even if it appears timed out.
+ * They are allowed to pass through to their route handlers which call extendSession().
  */
 const PASSIVE_ENDPOINTS = [
   '/api/auth/session/status',
+  '/api/auth/session/extend',
+  '/api/auth/session/heartbeat'
+];
+
+// Endpoints that can extend a session - allow them through even if session appears timed out
+// These route handlers explicitly call extendSession() to refresh the session
+const SESSION_EXTENSION_ENDPOINTS = [
   '/api/auth/session/extend',
   '/api/auth/session/heartbeat'
 ];
@@ -120,6 +131,10 @@ const checkSessionTimeout = async (req, res, next) => {
   const userId = req.user.userId;
   const companyId = req.user.companyId || 'al-ramrami';
   const sessionKey = getSessionKey(userId);
+
+  // Check if this is a session extension endpoint - these should be allowed through
+  // even if session appears timed out, so they can extend it
+  const isSessionExtensionEndpoint = SESSION_EXTENSION_ENDPOINTS.some(ep => req.originalUrl.startsWith(ep));
 
   // Determine if this request should count as "activity"
   // 1. Must be an active method (POST/PUT/DELETE/PATCH)
@@ -143,29 +158,42 @@ const checkSessionTimeout = async (req, res, next) => {
 
       // Check if session has timed out
       if (inactiveTime > timeoutMs) {
-        auditLog('SESSION_TIMEOUT', userId, {
-          email: req.user.email,
-          inactiveMinutes: Math.round(inactiveTime / 60000),
-          configuredTimeout: timeoutMinutes,
-          companyId,
-          ip: req.ip,
-          endpoint: req.originalUrl
-        });
+        // IMPORTANT: Allow session extension endpoints through even if session appears timed out
+        // These endpoints explicitly extend the session in their route handlers
+        if (isSessionExtensionEndpoint) {
+          logger.info('Session appeared timed out but allowing extension endpoint through', {
+            userId,
+            companyId,
+            endpoint: req.originalUrl,
+            inactiveMinutes: Math.round(inactiveTime / 60000)
+          });
+          // Don't block - let the route handler extend the session
+          // Fall through to next()
+        } else {
+          auditLog('SESSION_TIMEOUT', userId, {
+            email: req.user.email,
+            inactiveMinutes: Math.round(inactiveTime / 60000),
+            configuredTimeout: timeoutMinutes,
+            companyId,
+            ip: req.ip,
+            endpoint: req.originalUrl
+          });
 
-        // Clear session activity
-        await redis.del(sessionKey);
+          // Clear session activity
+          await redis.del(sessionKey);
 
-        // Clear auth cookies
-        res.clearCookie('accessToken', { path: '/' });
-        res.clearCookie('refreshToken', { path: '/api/auth/refresh' });
-        res.clearCookie('csrf-token', { path: '/' });
+          // Clear auth cookies
+          res.clearCookie('accessToken', { path: '/' });
+          res.clearCookie('refreshToken', { path: '/api/auth/refresh' });
+          res.clearCookie('csrf-token', { path: '/' });
 
-        return res.status(401).json({
-          success: false,
-          error: 'Session timed out due to inactivity',
-          code: 'SESSION_TIMEOUT',
-          timeoutMinutes: timeoutMinutes
-        });
+          return res.status(401).json({
+            success: false,
+            error: 'Session timed out due to inactivity',
+            code: 'SESSION_TIMEOUT',
+            timeoutMinutes: timeoutMinutes
+          });
+        }
       }
     }
 

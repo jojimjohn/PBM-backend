@@ -27,11 +27,13 @@ const {
 const { setCsrfCookie, clearCsrfCookie } = require('../middleware/csrf');
 
 // Cookie configuration for secure token storage
+// COOKIE_DOMAIN env var is required for Docker deployments behind reverse proxy
 const COOKIE_OPTIONS = {
   httpOnly: true,
   secure: process.env.NODE_ENV === 'production',
-  sameSite: 'strict',
-  path: '/'
+  sameSite: 'lax',  // 'lax' is more compatible with reverse proxies while still preventing CSRF
+  path: '/',
+  ...(process.env.COOKIE_DOMAIN ? { domain: process.env.COOKIE_DOMAIN } : {})
 };
 
 const ACCESS_TOKEN_MAX_AGE = 15 * 60 * 1000;        // 15 minutes
