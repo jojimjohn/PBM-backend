@@ -117,7 +117,7 @@ const runSafeMigrations = async () => {
   }
 };
 
-// Get database connection by company ID
+// Get database connection by company ID (requires kebab-case)
 const getDbConnection = (companyId) => {
   if (companyId === 'al-ramrami') {
     return alRamramiDb;
@@ -126,6 +126,20 @@ const getDbConnection = (companyId) => {
   } else {
     throw new Error(`Invalid company ID: ${companyId}`);
   }
+};
+
+// Get database connection with company ID normalization
+// Handles both camelCase (frontend) and kebab-case (backend) formats
+const getDbConnectionByCompanyId = (companyId) => {
+  // Normalize company ID (handle both formats)
+  const normalizedId =
+    companyId === 'alramrami' || companyId === 'al-ramrami'
+      ? 'al-ramrami'
+      : companyId === 'pridemuscat' || companyId === 'pride-muscat'
+      ? 'pride-muscat'
+      : companyId;
+
+  return getDbConnection(normalizedId);
 };
 
 // Database health check
@@ -194,6 +208,7 @@ const closeConnections = async () => {
 module.exports = {
   initializeDatabases,
   getDbConnection,
+  getDbConnectionByCompanyId,
   healthCheck,
   closeConnections,
   alRamramiDb: () => alRamramiDb,

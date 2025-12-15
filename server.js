@@ -44,6 +44,8 @@ const bankAccountsRoutes = require('./routes/bankAccounts');
 const bankTransactionsRoutes = require('./routes/bankTransactions');
 const inventoryBatchesRoutes = require('./routes/inventoryBatches');
 const rolesRoutes = require('./routes/roles');
+const pettyCashUsersRoutes = require('./routes/pettyCashUsers');
+const pettyCashUserPortalRoutes = require('./routes/pettyCashUserPortal');
 const { authenticateToken } = require('./middleware/auth');
 const { checkSessionTimeout } = require('./middleware/sessionTimeout');
 const { validateCsrfToken, ensureCsrfToken } = require('./middleware/csrf');
@@ -223,6 +225,10 @@ app.use('/api/auth/register', authLimiter);
 app.use('/api/auth/mfa', mfaLimiter);
 app.use('/api/auth', authRoutes);
 
+// Petty Cash Portal routes - PUBLIC (QR + PIN auth, separate from system auth)
+// Must be registered BEFORE authenticateToken middleware
+app.use('/api/pc-portal', pettyCashUserPortalRoutes);
+
 // Protected routes (require authentication + session timeout check + CSRF validation)
 app.use('/api', authenticateToken);
 app.use('/api', checkSessionTimeout);
@@ -246,6 +252,7 @@ app.use('/api/expenses', expensesRoutes);
 app.use('/api/wastages', wastagesRoutes);
 app.use('/api/petty-cash-cards', pettyCashCardsRoutes);
 app.use('/api/petty-cash-expenses', pettyCashExpensesRoutes);
+app.use('/api/petty-cash-users', pettyCashUsersRoutes);
 app.use('/api/transactions', transactionsRoutes);
 app.use('/api/backups', backupsRoutes);
 app.use('/api/workflow', workflowRoutes);

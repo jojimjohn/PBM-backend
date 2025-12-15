@@ -16,7 +16,9 @@ const expenseSchema = Joi.object({
   vendor: Joi.string().max(200).allow(null, '').optional(),
   receiptNumber: Joi.string().max(100).allow(null, '').optional(),
   receiptPhoto: Joi.string().max(500).allow(null, '').optional(),
-  notes: Joi.string().max(1000).allow(null, '').optional()
+  notes: Joi.string().max(1000).allow(null, '').optional(),
+  // Optional: Admin can assign expense to a specific PC user
+  submittedByPcUser: Joi.number().integer().positive().allow(null).optional()
 });
 
 const updateExpenseSchema = expenseSchema.fork(
@@ -258,6 +260,24 @@ router.post('/',
         }
       }
       
+      // If admin specifies a PC user, validate they belong to this card
+      let pcUserId = null;
+      if (expenseData.submittedByPcUser) {
+        const pcUser = await db('petty_cash_users')
+          .where('id', expenseData.submittedByPcUser)
+          .where('card_id', expenseData.cardId)
+          .where('is_active', true)
+          .first();
+
+        if (!pcUser) {
+          return res.status(400).json({
+            success: false,
+            error: 'Invalid petty cash user for this card'
+          });
+        }
+        pcUserId = pcUser.id;
+      }
+
       const newExpense = {
         expenseNumber,
         cardId: expenseData.cardId,
@@ -270,6 +290,7 @@ router.post('/',
         receiptPhoto: expenseData.receiptPhoto || null,
         status: 'pending',
         submittedBy: req.user.userId,
+        submitted_by_pc_user: pcUserId,
         notes: expenseData.notes || null
       };
       
@@ -517,7 +538,6 @@ router.get('/analytics', requirePermission('VIEW_EXPENSE_REPORTS'), async (req, 
     // Get basic analytics
     const analyticsQuery = `
       SELECT
-      SELECT
         COUNT(*) as totalExpenses,
         COALESCE(SUM(amount), 0) as totalAmount,
         COALESCE(AVG(amount), 0) as averageAmount,
@@ -526,11 +546,9 @@ router.get('/analytics', requirePermission('VIEW_EXPENSE_REPORTS'), async (req, 
         COUNT(CASE WHEN status = 'rejected' THEN 1 END) as rejectedCount
       FROM petty_cash_expenses
       WHERE DATE(expenseDate) >= ?
-      FROM petty_cash_expenses
-      WHERE DATE(expenseDate) >= ?
         AND DATE(expenseDate) <= ?
     `;
-    
+
     const [analytics] = await db.raw(analyticsQuery, [startDate, endDate]);
     
     res.json({

@@ -11,6 +11,7 @@ const {
   clearSession,
   getSessionStatus,
   extendSession,
+  getSessionTimeoutForCompany,
   SESSION_TIMEOUT_MINUTES
 } = require('../middleware/sessionTimeout');
 const {
@@ -363,8 +364,8 @@ router.post('/login', authRateLimit, validate(schemas.login), async (req, res) =
     // Set HttpOnly cookies for tokens (SECURITY: tokens not in response body)
     setAuthCookies(res, tokens.accessToken, tokens.refreshToken);
 
-    // Initialize session activity tracking (for 30-min timeout)
-    await initializeSession(user.id);
+    // Initialize session activity tracking (per-company configurable timeout)
+    await initializeSession(user.id, user.companyId);
 
     res.json({
       success: true,
@@ -805,7 +806,7 @@ router.post('/logout', async (req, res) => {
 // Used by frontend to show timeout warning
 router.get('/session/status', authenticateToken, async (req, res) => {
   try {
-    const status = await getSessionStatus(req.user.userId);
+    const status = await getSessionStatus(req.user.userId, req.user.companyId);
 
     if (!status || !status.active) {
       return res.status(401).json({
@@ -837,7 +838,7 @@ router.get('/session/status', authenticateToken, async (req, res) => {
 // Extend session endpoint - "Stay logged in" functionality
 router.post('/session/extend', authenticateToken, async (req, res) => {
   try {
-    const success = await extendSession(req.user.userId);
+    const success = await extendSession(req.user.userId, req.user.companyId);
 
     if (!success) {
       return res.status(500).json({
@@ -846,17 +847,21 @@ router.post('/session/extend', authenticateToken, async (req, res) => {
       });
     }
 
+    // Get the per-company timeout for response
+    const timeoutMinutes = await getSessionTimeoutForCompany(req.user.companyId);
+
     auditLog('SESSION_EXTENDED', req.user.userId, {
       email: req.user.email,
-      ip: req.ip
+      ip: req.ip,
+      timeoutMinutes
     });
 
     res.json({
       success: true,
       message: 'Session extended successfully',
       data: {
-        timeoutMinutes: SESSION_TIMEOUT_MINUTES,
-        expiresAt: Date.now() + (SESSION_TIMEOUT_MINUTES * 60 * 1000)
+        timeoutMinutes: timeoutMinutes,
+        expiresAt: Date.now() + (timeoutMinutes * 60 * 1000)
       }
     });
   } catch (error) {
@@ -864,6 +869,45 @@ router.post('/session/extend', authenticateToken, async (req, res) => {
     res.status(500).json({
       success: false,
       error: 'Failed to extend session'
+    });
+  }
+});
+
+// Session heartbeat endpoint - Silent activity tracking
+// Called by frontend when user activity is detected (mouse/keyboard/scroll)
+// Unlike /session/extend, this is a lightweight call without detailed audit logging
+router.post('/session/heartbeat', authenticateToken, async (req, res) => {
+  try {
+    const success = await extendSession(req.user.userId, req.user.companyId);
+
+    if (!success) {
+      return res.status(500).json({
+        success: false,
+        error: 'Failed to update session activity'
+      });
+    }
+
+    // Get updated session status
+    const status = await getSessionStatus(req.user.userId, req.user.companyId);
+
+    // Debug log (not audit) - too frequent for audit trail
+    logger.debug('Session heartbeat', {
+      userId: req.user.userId,
+      remainingMinutes: status?.remainingMinutes
+    });
+
+    res.json({
+      success: true,
+      data: {
+        remainingMinutes: status?.remainingMinutes || 0,
+        timeoutMinutes: status?.timeoutMinutes || 30
+      }
+    });
+  } catch (error) {
+    logger.error('Session heartbeat error', { error: error.message });
+    res.status(500).json({
+      success: false,
+      error: 'Failed to update session'
     });
   }
 });
@@ -1592,8 +1636,8 @@ router.post('/mfa/verify', async (req, res) => {
     // Set cookies
     setAuthCookies(res, tokens.accessToken, tokens.refreshToken);
 
-    // Initialize session
-    await initializeSession(user.id);
+    // Initialize session (per-company configurable timeout)
+    await initializeSession(user.id, user.companyId);
 
     auditLog('MFA_VERIFY_SUCCESS', userId, {
       email: user.email,

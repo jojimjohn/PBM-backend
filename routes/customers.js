@@ -11,12 +11,13 @@ const router = express.Router();
 router.use(sanitize);
 
 // Customer validation schema
+// Customer types: individual, business, project, contract
 const customerSchema = Joi.object({
   name: Joi.string().min(2).max(200).required().trim(),
   email: Joi.string().email().max(255).allow('').optional(),
   phone: Joi.string().max(20).allow('').optional(),
   address: Joi.string().allow('').optional(),
-  customerType: Joi.string().valid('walk-in', 'project-based', 'contract').required(),
+  customerType: Joi.string().valid('individual', 'business', 'project', 'contract').required(),
   vatRegistration: Joi.string().max(50).allow('').optional(),
   contactPerson: Joi.string().max(100).allow('').optional(),
   creditLimit: Joi.number().min(0).default(0),
@@ -321,13 +322,14 @@ router.delete('/:id',
         });
       }
 
-      // Check if customer has any orders (prevent deletion if has orders)
+      // Check if customer has any orders (prevent hard deletion if has orders)
       const orderCount = await db('sales_orders')
         .where({ customerId: id })
         .count('* as count')
         .first();
 
       if (orderCount.count > 0) {
+        // Customer has orders - cannot hard delete, suggest deactivation
         return res.status(400).json({
           success: false,
           error: 'Cannot delete customer with existing orders. Deactivate instead.'
@@ -337,20 +339,18 @@ router.delete('/:id',
       // Note: Contracts are now supplier-based, not customer-based
       // So we don't need to check contracts table for customer deletion
 
-      // Soft delete by setting isActive to false
+      // No foreign key relationships - safe to hard delete
       await db('customers')
         .where({ id })
-        .update({ 
-          isActive: false,
-          updated_at: new Date()
-        });
+        .delete();
 
       auditLog('CUSTOMER_DELETED', req.user.userId, {
         customerId: id,
-        customerName: customer.name
+        customerName: customer.name,
+        deleteType: 'hard_delete'
       });
 
-      logger.info('Customer deleted (deactivated)', {
+      logger.info('Customer permanently deleted', {
         customerId: id,
         customerName: customer.name,
         deletedBy: req.user.userId
@@ -358,7 +358,7 @@ router.delete('/:id',
 
       res.json({
         success: true,
-        message: 'Customer deactivated successfully'
+        message: 'Customer deleted successfully'
       });
 
     } catch (error) {
@@ -370,6 +370,79 @@ router.delete('/:id',
       res.status(500).json({
         success: false,
         error: 'Failed to delete customer'
+      });
+    }
+  }
+);
+
+// PATCH /api/customers/:id/status - Update customer active status
+router.patch('/:id/status',
+  requirePermission('MANAGE_CUSTOMERS'),
+  async (req, res) => {
+    try {
+      const { companyId, userId } = req.user;
+      const db = getDbConnection(companyId);
+      const { id } = req.params;
+      const { isActive } = req.body;
+
+      // Validate isActive is a boolean
+      if (typeof isActive !== 'boolean') {
+        return res.status(400).json({
+          success: false,
+          error: 'isActive must be a boolean value'
+        });
+      }
+
+      // Check if customer exists
+      const customer = await db('customers').where({ id }).first();
+
+      if (!customer) {
+        return res.status(404).json({
+          success: false,
+          error: 'Customer not found'
+        });
+      }
+
+      // Update customer status
+      await db('customers')
+        .where({ id })
+        .update({
+          isActive: isActive ? 1 : 0,
+          updated_at: db.fn.now()
+        });
+
+      // Get updated customer
+      const updatedCustomer = await db('customers').where({ id }).first();
+
+      auditLog('CUSTOMER_STATUS_UPDATED', userId, {
+        customerId: id,
+        customerName: customer.name,
+        previousStatus: customer.isActive ? 'active' : 'inactive',
+        newStatus: isActive ? 'active' : 'inactive'
+      });
+
+      logger.info('Customer status updated', {
+        customerId: id,
+        customerName: customer.name,
+        isActive,
+        updatedBy: userId
+      });
+
+      res.json({
+        success: true,
+        data: updatedCustomer,
+        message: `Customer ${isActive ? 'reactivated' : 'deactivated'} successfully`
+      });
+
+    } catch (error) {
+      logger.error('Error updating customer status', {
+        error: error.message,
+        customerId: req.params.id,
+        userId: req.user.userId
+      });
+      res.status(500).json({
+        success: false,
+        error: 'Failed to update customer status'
       });
     }
   }

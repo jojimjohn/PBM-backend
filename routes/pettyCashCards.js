@@ -7,9 +7,11 @@ const Joi = require('joi');
 const winston = require('winston');
 
 // Validation schemas
+// Note: assignedTo/staffName are now optional - petty cash users are managed separately via /petty-cash-users
 const pettyCashCardSchema = Joi.object({
-  assignedTo: Joi.number().integer().positive().required(),
-  staffName: Joi.string().min(2).max(100).required(),
+  cardName: Joi.string().max(100).allow('', null).optional(),
+  assignedTo: Joi.number().integer().positive().allow(null).optional(),
+  staffName: Joi.string().max(100).allow('', null).optional(),
   department: Joi.string().max(100).allow('', null).optional(),
   initialBalance: Joi.number().min(0).required(),
   monthlyLimit: Joi.number().min(0).allow(null).optional(),
@@ -75,10 +77,18 @@ router.get('/', requirePermission('VIEW_PETTY_CASH'), async (req, res) => {
         'assignedUser.lastName as assignedUserLastName',
         'assignedUser.email as assignedUserEmail',
         'createdByUser.firstName as createdByFirstName',
-        'createdByUser.lastName as createdByLastName'
+        'createdByUser.lastName as createdByLastName',
+        // Include petty cash user info (linked via card_id)
+        'petty_cash_users.id as pettyCashUserId',
+        'petty_cash_users.name as pettyCashUserName',
+        'petty_cash_users.phone as pettyCashUserPhone',
+        'petty_cash_users.department as pettyCashUserDepartment',
+        'petty_cash_users.employee_id as pettyCashUserEmployeeId',
+        'petty_cash_users.is_active as pettyCashUserIsActive'
       )
       .leftJoin('users as assignedUser', 'petty_cash_cards.assignedTo', 'assignedUser.id')
       .leftJoin('users as createdByUser', 'petty_cash_cards.createdBy', 'createdByUser.id')
+      .leftJoin('petty_cash_users', 'petty_cash_cards.id', 'petty_cash_users.card_id')
       .orderBy('petty_cash_cards.created_at', 'desc');
     
     // Apply filters
@@ -98,7 +108,9 @@ router.get('/', requirePermission('VIEW_PETTY_CASH'), async (req, res) => {
       query = query.where(function() {
         this.where('petty_cash_cards.cardNumber', 'like', `%${search}%`)
             .orWhere('petty_cash_cards.staffName', 'like', `%${search}%`)
-            .orWhere('petty_cash_cards.department', 'like', `%${search}%`);
+            .orWhere('petty_cash_cards.cardName', 'like', `%${search}%`)
+            .orWhere('petty_cash_cards.department', 'like', `%${search}%`)
+            .orWhere('petty_cash_users.name', 'like', `%${search}%`);
       });
     }
     
@@ -155,10 +167,18 @@ router.get('/:id', requirePermission('VIEW_PETTY_CASH'), async (req, res) => {
         'assignedUser.email as assignedUserEmail',
         'assignedUser.role as assignedUserRole',
         'createdByUser.firstName as createdByFirstName',
-        'createdByUser.lastName as createdByLastName'
+        'createdByUser.lastName as createdByLastName',
+        // Include petty cash user info (linked via card_id)
+        'petty_cash_users.id as pettyCashUserId',
+        'petty_cash_users.name as pettyCashUserName',
+        'petty_cash_users.phone as pettyCashUserPhone',
+        'petty_cash_users.department as pettyCashUserDepartment',
+        'petty_cash_users.employee_id as pettyCashUserEmployeeId',
+        'petty_cash_users.is_active as pettyCashUserIsActive'
       )
       .leftJoin('users as assignedUser', 'petty_cash_cards.assignedTo', 'assignedUser.id')
       .leftJoin('users as createdByUser', 'petty_cash_cards.createdBy', 'createdByUser.id')
+      .leftJoin('petty_cash_users', 'petty_cash_cards.id', 'petty_cash_users.card_id')
       .where('petty_cash_cards.id', id)
       .first();
     
@@ -208,43 +228,47 @@ router.get('/:id', requirePermission('VIEW_PETTY_CASH'), async (req, res) => {
 });
 
 // POST /petty-cash-cards - Create new petty cash card
-router.post('/', 
+router.post('/',
   requirePermission('MANAGE_PETTY_CASH'),
   validate(pettyCashCardSchema),
   async (req, res) => {
     try {
       const db = getDbConnection(req.user.companyId);
       const cardData = req.body;
-      
-      // Generate card number
+
+      // Generate card number (unique identifier for QR code)
       const cardNumber = generateCardNumber(req.user.companyId);
-      
-      // Verify assigned user exists
-      const assignedUser = await db('users').where('id', cardData.assignedTo).first();
-      if (!assignedUser) {
-        return res.status(400).json({
-          success: false,
-          error: 'Assigned user not found'
-        });
+
+      // Optional: Verify assigned user exists (if provided)
+      // Note: User assignment is now optional - petty cash users are managed separately
+      if (cardData.assignedTo) {
+        const assignedUser = await db('users').where('id', cardData.assignedTo).first();
+        if (!assignedUser) {
+          return res.status(400).json({
+            success: false,
+            error: 'Assigned user not found'
+          });
+        }
+
+        // Check if system user already has an active card (only if assignedTo provided)
+        const existingCard = await db('petty_cash_cards')
+          .where('assignedTo', cardData.assignedTo)
+          .where('status', 'active')
+          .first();
+
+        if (existingCard) {
+          return res.status(400).json({
+            success: false,
+            error: 'User already has an active petty cash card'
+          });
+        }
       }
-      
-      // Check if user already has an active card
-      const existingCard = await db('petty_cash_cards')
-        .where('assignedTo', cardData.assignedTo)
-        .where('status', 'active')
-        .first();
-      
-      if (existingCard) {
-        return res.status(400).json({
-          success: false,
-          error: 'User already has an active petty cash card'
-        });
-      }
-      
+
       const newCard = {
         cardNumber,
-        assignedTo: cardData.assignedTo,
-        staffName: cardData.staffName,
+        cardName: cardData.cardName || null,
+        assignedTo: cardData.assignedTo || null,
+        staffName: cardData.staffName || null,
         department: cardData.department || null,
         initialBalance: cardData.initialBalance,
         currentBalance: cardData.initialBalance, // Start with initial balance
@@ -256,7 +280,7 @@ router.post('/',
         notes: cardData.notes || null,
         createdBy: req.user.userId
       };
-      
+
       const [id] = await db('petty_cash_cards').insert(newCard);
       
       winston.info('Petty cash card created', {
