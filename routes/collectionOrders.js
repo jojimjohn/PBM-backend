@@ -190,18 +190,28 @@ router.get('/callouts', requirePermission('VIEW_COLLECTIONS'), async (req, res) 
       .leftJoin('contracts', 'collection_orders.contractId', 'contracts.id')
       .leftJoin('suppliers', 'collection_orders.supplierId', 'suppliers.id')
       .leftJoin('supplier_locations', 'collection_orders.locationId', 'supplier_locations.id')
+      .leftJoin('purchase_orders', 'collection_orders.purchase_order_id', 'purchase_orders.id')
       .select(
         'collection_orders.*',
         'contracts.contractNumber',
         'contracts.title as contractTitle',
         'suppliers.name as supplierName',
         'supplier_locations.locationName',
-        'supplier_locations.locationCode'
+        'supplier_locations.locationCode',
+        // Include PO number for display in callout details
+        'purchase_orders.orderNumber as purchaseOrderNumber',
+        'purchase_orders.totalAmount as purchaseOrderTotal'
       );
 
-    // Status filter - if not provided, show all statuses
+    // Status filter - supports comma-separated values for multiple statuses
+    // Example: status=in_transit,collecting to get both
     if (status && status !== 'all') {
-      query = query.where('collection_orders.status', status);
+      if (status.includes(',')) {
+        const statusArray = status.split(',').map(s => s.trim());
+        query = query.whereIn('collection_orders.status', statusArray);
+      } else {
+        query = query.where('collection_orders.status', status);
+      }
     }
 
     // Priority filter
@@ -311,9 +321,11 @@ router.put('/:id',
           const items = materials.map(material => ({
             collectionOrderId: id,
             materialId: material.materialId,
-            availableQuantity: material.availableQuantity,
+            availableQuantity: material.availableQuantity || 0,
             collectedQuantity: 0,
-            unit: material.unit,
+            unit: material.unit || 'kg',
+            contractRate: material.contractRate || null,
+            appliedRateType: material.appliedRateType || null,
             totalValue: material.estimatedValue || 0,
             materialCondition: material.condition || 'good',
             qualityGrade: material.qualityGrade || 'A',
@@ -757,11 +769,12 @@ router.get('/:id',
       const { companyId } = req.user;
       const db = getDbConnection(companyId);
 
-      // Get order details
+      // Get order details with linked purchase order info
       const order = await db('collection_orders')
         .leftJoin('contracts', 'collection_orders.contractId', 'contracts.id')
         .leftJoin('suppliers', 'collection_orders.supplierId', 'suppliers.id')
         .leftJoin('supplier_locations', 'collection_orders.locationId', 'supplier_locations.id')
+        .leftJoin('purchase_orders', 'collection_orders.purchase_order_id', 'purchase_orders.id')
         .select(
           'collection_orders.*',
           'collection_orders.orderNumber as calloutNumber',
@@ -773,7 +786,10 @@ router.get('/:id',
           'supplier_locations.locationName',
           'supplier_locations.address as locationAddress',
           'supplier_locations.contactPerson as locationContact',
-          'supplier_locations.contactPhone as locationPhone'
+          'supplier_locations.contactPhone as locationPhone',
+          // Include actual PO number from purchase_orders table
+          'purchase_orders.orderNumber as purchaseOrderNumber',
+          'purchase_orders.totalAmount as purchaseOrderTotal'
         )
         .where('collection_orders.id', id)
         .first();
@@ -785,8 +801,8 @@ router.get('/:id',
         });
       }
 
-      // Get collection items
-      const items = await db('collection_items')
+      // Get collection items with material details
+      let items = await db('collection_items')
         .leftJoin('materials', 'collection_items.materialId', 'materials.id')
         .select(
           'collection_items.*',
@@ -798,6 +814,31 @@ router.get('/:id',
         )
         .where('collection_items.collectionOrderId', id)
         .orderBy('materials.name');
+
+      // If items have null contractRate, fetch from contract_location_rates as fallback
+      if (items.length > 0 && order.contractId && order.locationId) {
+        const contractRates = await db('contract_location_rates')
+          .where({
+            contractId: order.contractId,
+            locationId: order.locationId
+          })
+          .select('materialId', 'contractRate', 'rateType', 'paymentDirection');
+
+        // Create a map for quick lookup
+        const rateMap = new Map(contractRates.map(r => [r.materialId, r]));
+
+        // Merge rates into items
+        items = items.map(item => {
+          const rate = rateMap.get(item.materialId);
+          return {
+            ...item,
+            // Use stored rate if available, otherwise use contract rate
+            contractRate: item.contractRate ?? rate?.contractRate ?? 0,
+            rateType: item.appliedRateType || rate?.rateType || 'fixed_rate',
+            paymentDirection: rate?.paymentDirection || 'we_pay'
+          };
+        });
+      }
 
       // Get collection expenses
       const expenses = await db('collection_expenses')
@@ -1370,9 +1411,20 @@ router.post('/:id/finalize-wcn',
         });
       }
 
-      // Get collection items
+      // Get collection items with contract rates from contract_location_rates
       let items = await db('collection_items')
-        .where({ collectionOrderId: id });
+        .leftJoin('contract_location_rates', function() {
+          this.on('collection_items.materialId', '=', 'contract_location_rates.materialId')
+              .andOn('contract_location_rates.contractId', '=', db.raw('?', [order.contractId]))
+              .andOn('contract_location_rates.locationId', '=', db.raw('?', [order.locationId]));
+        })
+        .select(
+          'collection_items.*',
+          db.raw('COALESCE(collection_items.contractRate, contract_location_rates.contractRate) as contractRate'),
+          'contract_location_rates.rateType',
+          'contract_location_rates.paymentDirection'
+        )
+        .where({ 'collection_items.collectionOrderId': id });
 
       // DEBUG: Log initial items from database
       logger.info('WCN Finalization - Initial DB items', {
@@ -1382,7 +1434,10 @@ router.post('/:id/finalize-wcn',
           id: i.id,
           materialId: i.materialId,
           collectedQuantity: i.collectedQuantity,
-          collectedQuantityType: typeof i.collectedQuantity
+          availableQuantity: i.availableQuantity,
+          contractRate: i.contractRate,
+          totalValue: i.totalValue,
+          rateType: i.rateType
         }))
       });
 

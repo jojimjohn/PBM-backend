@@ -14,7 +14,7 @@ router.use(sanitize);
 const supplierLocationSchema = Joi.object({
   supplierId: Joi.number().integer().positive().required(),
   locationName: Joi.string().min(2).max(200).required().trim(),
-  locationCode: Joi.string().max(10).required().trim(),
+  locationCode: Joi.string().max(50).optional().trim(), // Made optional - will auto-generate if not provided
   address: Joi.string().allow('').optional(),
   contactPerson: Joi.string().max(100).allow('').optional(),
   contactPhone: Joi.string().max(20).allow('').optional(),
@@ -23,6 +23,24 @@ const supplierLocationSchema = Joi.object({
   isActive: Joi.boolean().default(true),
   notes: Joi.string().allow('').optional()
 });
+
+// Helper function to generate unique location code
+async function generateLocationCode(db, supplierId, supplierName) {
+  // Create base code from supplier name (first 3 chars uppercase)
+  const cleanName = (supplierName || 'SUP').replace(/[^a-zA-Z0-9]/g, '').toUpperCase();
+  const prefix = cleanName.substring(0, 3).padEnd(3, 'X');
+
+  // Count existing locations for this supplier
+  const existingCount = await db('supplier_locations')
+    .where({ supplierId })
+    .count('* as count')
+    .first();
+
+  const sequence = (existingCount.count || 0) + 1;
+  const code = `${prefix}-LOC-${String(sequence).padStart(3, '0')}`;
+
+  return code;
+}
 
 // GET /api/supplier-locations - List all supplier locations
 router.get('/', requirePermission('VIEW_SUPPLIERS'), async (req, res) => {
@@ -166,7 +184,7 @@ router.get('/:id',
 );
 
 // POST /api/supplier-locations - Create new supplier location
-router.post('/', 
+router.post('/',
   validate(supplierLocationSchema),
   requirePermission('MANAGE_SUPPLIERS'),
   async (req, res) => {
@@ -186,23 +204,42 @@ router.post('/',
         });
       }
 
-      // Check if location code already exists for this supplier
-      const existingLocation = await db('supplier_locations')
-        .where({ 
+      // Auto-generate location code if not provided
+      let locationCode = req.body.locationCode;
+      if (!locationCode || locationCode.trim() === '') {
+        locationCode = await generateLocationCode(db, req.body.supplierId, supplier.name);
+      }
+
+      // Check if location code already exists globally (to prevent duplicates)
+      const existingByCode = await db('supplier_locations')
+        .where({ locationCode })
+        .first();
+
+      if (existingByCode) {
+        return res.status(400).json({
+          success: false,
+          error: `Location code "${locationCode}" already exists. Please use a different code.`
+        });
+      }
+
+      // Check if this supplier already has a location with the same name
+      const existingByName = await db('supplier_locations')
+        .where({
           supplierId: req.body.supplierId,
-          locationCode: req.body.locationCode 
+          locationName: req.body.locationName
         })
         .first();
 
-      if (existingLocation) {
+      if (existingByName) {
         return res.status(400).json({
           success: false,
-          error: 'Location code already exists for this supplier'
+          error: 'A location with this name already exists for this supplier'
         });
       }
 
       const locationData = {
         ...req.body,
+        locationCode, // Use the generated or provided code
         created_at: new Date(),
         updated_at: new Date()
       };
@@ -373,79 +410,116 @@ router.delete('/:id',
         });
       }
 
-      // Check if location has any collection orders or contracts (prevent deletion)
-      let orderCount = { count: 0 };
-      let contractCount = { count: 0 };
-      let orderDetails = [];
-      let contractDetails = [];
+      // Check if location has any dependencies (prevent deletion)
+      const dependencies = [];
 
       try {
-        // Check if tables exist and get counts
-        const tableExists = await Promise.all([
+        // Check multiple tables for dependencies
+        const tableChecks = await Promise.all([
           db.schema.hasTable('collection_orders'),
-          db.schema.hasTable('contract_location_rates')
+          db.schema.hasTable('contract_location_rates'),
+          db.schema.hasTable('collection_callouts'),
+          db.schema.hasTable('contracts'),
+          db.schema.hasTable('purchase_orders')
         ]);
 
-        if (tableExists[0]) {
-          orderCount = await db('collection_orders').where({ locationId: id }).count('* as count').first();
-          orderDetails = await db('collection_orders').where({ locationId: id }).select('id', 'orderNumber', 'status');
+        // Check collection_orders
+        if (tableChecks[0]) {
+          const orderCount = await db('collection_orders').where({ locationId: id }).count('* as count').first();
+          if (orderCount.count > 0) {
+            dependencies.push(`${orderCount.count} collection order(s)`);
+          }
         }
 
-        if (tableExists[1]) {
-          contractCount = await db('contract_location_rates').where({ locationId: id }).count('* as count').first();
-          contractDetails = await db('contract_location_rates').where({ locationId: id }).select('id', 'contractId', 'materialId');
+        // Check contract_location_rates
+        if (tableChecks[1]) {
+          const contractRateCount = await db('contract_location_rates').where({ locationId: id }).count('* as count').first();
+          if (contractRateCount.count > 0) {
+            dependencies.push(`${contractRateCount.count} contract rate(s)`);
+          }
         }
 
-        logger.info('Table existence check', {
+        // Check collection_callouts
+        if (tableChecks[2]) {
+          const calloutCount = await db('collection_callouts').where({ locationId: id }).count('* as count').first();
+          if (calloutCount.count > 0) {
+            dependencies.push(`${calloutCount.count} callout(s)`);
+          }
+        }
+
+        // Check contracts (if location is associated with contracts)
+        if (tableChecks[3]) {
+          const contractCount = await db('contracts')
+            .where({ supplierId: location.supplierId })
+            .whereIn('status', ['active', 'pending'])
+            .count('* as count')
+            .first();
+          if (contractCount.count > 0) {
+            // Only block if this is the only location for the supplier
+            const locationCount = await db('supplier_locations')
+              .where({ supplierId: location.supplierId, isActive: true })
+              .count('* as count')
+              .first();
+            if (locationCount.count <= 1) {
+              dependencies.push(`${contractCount.count} active contract(s) (last location for supplier)`);
+            }
+          }
+        }
+
+        // Check purchase_orders (if linked via supplier)
+        if (tableChecks[4]) {
+          const poCount = await db('purchase_orders')
+            .where({ supplierId: location.supplierId, locationId: id })
+            .count('* as count')
+            .first();
+          if (poCount.count > 0) {
+            dependencies.push(`${poCount.count} purchase order(s)`);
+          }
+        }
+
+        logger.info('SUPPLIER LOCATION DEPENDENCY CHECK', {
           locationId: id,
-          collectionOrdersExists: tableExists[0],
-          contractLocationRatesExists: tableExists[1]
+          locationName: location.locationName,
+          supplierName: location.supplierName,
+          dependencies,
+          willHardDelete: dependencies.length === 0
         });
       } catch (error) {
-        logger.warn('Error checking dependencies, defaulting to no dependencies', {
+        logger.warn('Error checking dependencies, blocking deletion for safety', {
           locationId: id,
           error: error.message
         });
+        dependencies.push('Unable to verify dependencies');
       }
 
-      // Enhanced debug logging
-      logger.info('SUPPLIER LOCATION DEPENDENCY CHECK', {
-        locationId: id,
-        locationName: location.locationName,
-        supplierName: location.supplierName,
-        orderCount: orderCount.count,
-        contractCount: contractCount.count,
-        orderDetails: orderDetails,
-        contractDetails: contractDetails,
-        willHardDelete: orderCount.count === 0 && contractCount.count === 0
-      });
-
-      if (orderCount.count > 0 || contractCount.count > 0) {
+      if (dependencies.length > 0) {
         // Soft delete when dependencies exist
         await db('supplier_locations')
           .where({ id })
-          .update({ 
+          .update({
             isActive: false,
             updated_at: new Date()
           });
+
+        const dependencyList = dependencies.join(', ');
 
         auditLog('SUPPLIER_LOCATION_DEACTIVATED', req.user.userId, {
           locationId: id,
           locationName: location.locationName,
           supplierName: location.supplierName,
-          reason: `Has dependencies: ${orderCount.count} orders, ${contractCount.count} contracts`
+          reason: `Has dependencies: ${dependencyList}`
         });
 
         logger.info('Supplier location deactivated due to dependencies', {
           locationId: id,
           locationName: location.locationName,
-          dependencies: { orders: orderCount.count, contracts: contractCount.count },
+          dependencies,
           deactivatedBy: req.user.userId
         });
 
         return res.json({
           success: true,
-          message: `Location deactivated due to existing dependencies (${orderCount.count} orders, ${contractCount.count} contracts)`
+          message: `Location deactivated due to existing dependencies: ${dependencyList}`
         });
       }
 

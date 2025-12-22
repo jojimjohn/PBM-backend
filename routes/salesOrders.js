@@ -317,6 +317,41 @@ router.get('/:id',
       const convertedOrder = convertDecimalFields(order);
       const convertedItems = convertDecimalFields(items);
 
+      // Get batch allocations for each item (FIFO allocations from delivered orders)
+      // Only fetch if order is delivered (batch_movements exist for delivered orders)
+      const itemsWithAllocations = await Promise.all(
+        convertedItems.map(async (item) => {
+          // Query batch_movements for this sales order and material
+          const batchMovements = await db('batch_movements')
+            .join('inventory_batches', 'batch_movements.batch_id', 'inventory_batches.id')
+            .where('batch_movements.reference_type', 'sales_order')
+            .where('batch_movements.reference_id', id)
+            .where('inventory_batches.material_id', item.materialId)
+            .where('batch_movements.movement_type', 'sale')
+            .select(
+              'inventory_batches.batch_number as batchNumber',
+              'batch_movements.quantity',
+              'inventory_batches.unit_cost as unitCost',
+              'inventory_batches.purchase_date as purchaseDate'
+            )
+            .orderBy('inventory_batches.purchase_date', 'asc');
+
+          // Format batch allocations
+          const batchAllocations = batchMovements.map(bm => ({
+            batchNumber: bm.batchNumber,
+            quantity: Math.abs(parseFloat(bm.quantity) || 0), // quantity is negative for sales, convert to positive
+            unitCost: parseFloat(bm.unitCost) || 0,
+            purchaseDate: bm.purchaseDate
+          }));
+
+          return {
+            ...item,
+            batchAllocations: batchAllocations.length > 0 ? batchAllocations : null,
+            hasBatchAllocation: batchAllocations.length > 0
+          };
+        })
+      );
+
       auditLog('SALES_ORDER_VIEWED', req.user.userId, {
         salesOrderId: id,
         orderNumber: convertedOrder.orderNumber,
@@ -327,7 +362,7 @@ router.get('/:id',
         success: true,
         data: {
           ...convertedOrder,
-          items: convertedItems
+          items: itemsWithAllocations
         }
       });
 

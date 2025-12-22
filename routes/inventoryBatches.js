@@ -79,12 +79,18 @@ router.get('/', requirePermission('VIEW_INVENTORY'), async (req, res) => {
       .leftJoin('materials', 'inventory_batches.material_id', 'materials.id')
       .leftJoin('suppliers', 'inventory_batches.supplier_id', 'suppliers.id')
       .leftJoin('branches', 'inventory_batches.branch_id', 'branches.id')
+      .leftJoin('purchase_orders', 'inventory_batches.purchase_order_id', 'purchase_orders.id')
+      .leftJoin('collection_orders', 'purchase_orders.collection_order_id', 'collection_orders.id')
       .select(
         'inventory_batches.*',
         'materials.name as materialName',
         'materials.unit as materialUnit',
         'suppliers.name as supplierName',
-        'branches.name as branchName'
+        'branches.name as branchName',
+        'purchase_orders.orderNumber as purchaseOrderNumber',
+        'purchase_orders.source_type as purchaseOrderSourceType',
+        'collection_orders.orderNumber as collectionOrderNumber',
+        'collection_orders.wcn_number as wcnNumber'
       );
 
     // Filter by material
@@ -126,13 +132,21 @@ router.get('/', requirePermission('VIEW_INVENTORY'), async (req, res) => {
       .limit(limit)
       .offset(offset);
 
-    // Format numeric fields
+    // Format numeric fields and add traceability
     const formattedBatches = batches.map(batch => ({
       ...batch,
       quantity_received: parseFloat(batch.quantity_received) || 0,
       remaining_quantity: parseFloat(batch.remaining_quantity) || 0,
       unit_cost: parseFloat(batch.unit_cost) || 0,
-      totalValue: (parseFloat(batch.remaining_quantity) || 0) * (parseFloat(batch.unit_cost) || 0)
+      totalValue: (parseFloat(batch.remaining_quantity) || 0) * (parseFloat(batch.unit_cost) || 0),
+      // Traceability chain: Collection Order → WCN → Purchase Order
+      traceability: {
+        collectionOrderNumber: batch.collectionOrderNumber || null,
+        wcnNumber: batch.wcnNumber || null,
+        purchaseOrderNumber: batch.purchaseOrderNumber || null,
+        sourceType: batch.purchaseOrderSourceType || 'manual',
+        isManualReceipt: !batch.collectionOrderNumber
+      }
     }));
 
     // Calculate summary
@@ -261,13 +275,17 @@ router.get('/:id',
         .leftJoin('suppliers', 'inventory_batches.supplier_id', 'suppliers.id')
         .leftJoin('branches', 'inventory_batches.branch_id', 'branches.id')
         .leftJoin('purchase_orders', 'inventory_batches.purchase_order_id', 'purchase_orders.id')
+        .leftJoin('collection_orders', 'purchase_orders.collection_order_id', 'collection_orders.id')
         .select(
           'inventory_batches.*',
           'materials.name as materialName',
           'materials.unit as materialUnit',
           'suppliers.name as supplierName',
           'branches.name as branchName',
-          'purchase_orders.orderNumber as purchaseOrderNumber'
+          'purchase_orders.orderNumber as purchaseOrderNumber',
+          'purchase_orders.source_type as purchaseOrderSourceType',
+          'collection_orders.orderNumber as collectionOrderNumber',
+          'collection_orders.wcn_number as wcnNumber'
         )
         .where('inventory_batches.id', id)
         .first();
@@ -291,13 +309,21 @@ router.get('/:id',
         .orderBy('batch_movements.created_at', 'desc')
         .limit(50);
 
-      // Format batch
+      // Format batch with traceability information
       const formattedBatch = {
         ...batch,
         quantity_received: parseFloat(batch.quantity_received) || 0,
         remaining_quantity: parseFloat(batch.remaining_quantity) || 0,
         unit_cost: parseFloat(batch.unit_cost) || 0,
-        totalValue: (parseFloat(batch.remaining_quantity) || 0) * (parseFloat(batch.unit_cost) || 0)
+        totalValue: (parseFloat(batch.remaining_quantity) || 0) * (parseFloat(batch.unit_cost) || 0),
+        // Traceability chain: Collection Order → WCN → Purchase Order
+        traceability: {
+          collectionOrderNumber: batch.collectionOrderNumber || null,
+          wcnNumber: batch.wcnNumber || null,
+          purchaseOrderNumber: batch.purchaseOrderNumber || null,
+          sourceType: batch.purchaseOrderSourceType || 'manual', // 'wcn_auto' or 'manual'
+          isManualReceipt: !batch.collectionOrderNumber
+        }
       };
 
       // Format movements
@@ -350,15 +376,16 @@ router.post('/',
 
         if (existingInventory) {
           // Update existing inventory record
-          const newQuantity = parseFloat(existingInventory.currentQuantity) + parseFloat(req.body.quantityReceived);
-          const currentValue = parseFloat(existingInventory.currentQuantity) * parseFloat(existingInventory.averageCost);
+          // Note: Column is 'quantity' not 'currentQuantity'
+          const newQuantity = parseFloat(existingInventory.quantity || 0) + parseFloat(req.body.quantityReceived);
+          const currentValue = parseFloat(existingInventory.quantity || 0) * parseFloat(existingInventory.averageCost || 0);
           const newValue = parseFloat(req.body.quantityReceived) * parseFloat(req.body.unitCost);
-          const newAverageCost = (currentValue + newValue) / newQuantity;
+          const newAverageCost = newQuantity > 0 ? (currentValue + newValue) / newQuantity : req.body.unitCost;
 
           await trx('inventory')
             .where({ materialId: req.body.materialId })
             .update({
-              currentQuantity: newQuantity,
+              quantity: newQuantity,
               averageCost: newAverageCost,
               lastPurchasePrice: req.body.unitCost,
               lastPurchaseDate: req.body.purchaseDate,
@@ -369,7 +396,7 @@ router.post('/',
           // Create new inventory record
           await trx('inventory').insert({
             materialId: req.body.materialId,
-            currentQuantity: req.body.quantityReceived,
+            quantity: req.body.quantityReceived,
             averageCost: req.body.unitCost,
             lastPurchasePrice: req.body.unitCost,
             lastPurchaseDate: req.body.purchaseDate,
@@ -505,10 +532,10 @@ router.post('/:id/adjustment',
           created_at: new Date()
         });
 
-        // Update main inventory
+        // Update main inventory (column is 'quantity' not 'currentQuantity')
         await trx('inventory')
           .where({ materialId: batch.material_id })
-          .increment('currentQuantity', parseFloat(quantity));
+          .increment('quantity', parseFloat(quantity));
 
         auditLog('INVENTORY_BATCH_ADJUSTED', userId, {
           batchId: id,

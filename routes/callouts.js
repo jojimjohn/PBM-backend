@@ -230,6 +230,20 @@ router.get('/:id',
         .where('callout_items.calloutId', id)
         .orderBy('materials.name');
 
+      // Get linked collection order and purchase order info
+      const collectionOrder = await db('collection_orders')
+        .leftJoin('purchase_orders', 'collection_orders.purchase_order_id', 'purchase_orders.id')
+        .select(
+          'collection_orders.id as collectionOrderId',
+          'collection_orders.orderNumber as collectionOrderNumber',
+          'collection_orders.status as collectionOrderStatus',
+          'collection_orders.is_finalized as isFinalized',
+          'collection_orders.purchase_order_id as purchaseOrderId',
+          'purchase_orders.poNumber as purchaseOrderNumber'
+        )
+        .where('collection_orders.calloutId', id)
+        .first();
+
       auditLog('CALLOUT_VIEWED', req.user.userId, {
         calloutId: id,
         calloutNumber: callout.calloutNumber,
@@ -241,7 +255,11 @@ router.get('/:id',
         success: true,
         data: {
           ...callout,
-          items
+          items,
+          // Include collection order and PO info if available
+          collectionOrder: collectionOrder || null,
+          purchaseOrderId: collectionOrder?.purchaseOrderId || null,
+          purchaseOrderNumber: collectionOrder?.purchaseOrderNumber || null
         }
       });
 

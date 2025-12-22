@@ -128,10 +128,38 @@ class WastageRepository extends BaseRepository {
         .orderBy('totalCost', 'desc')
         .limit(10);
 
+      // Get monthly trends (last 12 months by default, or within date range)
+      let monthlyTrendsQuery = this.db(this.tableName)
+        .select(
+          this.db.raw('DATE_FORMAT(wastageDate, "%Y-%m-01") as month'),
+          this.db.raw('COUNT(*) as count'),
+          this.db.raw('SUM(totalCost) as totalCost')
+        )
+        .where('status', 'approved');
+
+      // Apply date filters to monthly trends
+      if (filters.dateFrom) {
+        monthlyTrendsQuery = monthlyTrendsQuery.where('wastageDate', '>=', filters.dateFrom);
+      } else {
+        // Default to last 12 months if no dateFrom specified
+        monthlyTrendsQuery = monthlyTrendsQuery.where('wastageDate', '>=', this.db.raw('DATE_SUB(CURDATE(), INTERVAL 12 MONTH)'));
+      }
+      if (filters.dateTo) {
+        monthlyTrendsQuery = monthlyTrendsQuery.where('wastageDate', '<=', filters.dateTo);
+      }
+      if (filters.materialId) {
+        monthlyTrendsQuery = monthlyTrendsQuery.where('materialId', filters.materialId);
+      }
+
+      const monthlyTrends = await monthlyTrendsQuery
+        .groupBy(this.db.raw('DATE_FORMAT(wastageDate, "%Y-%m-01")'))
+        .orderBy('month', 'asc');
+
       return {
         summary: totalStats,
         byType: wastageByType,
-        topMaterials
+        topMaterials,
+        monthlyTrends
       };
     } catch (error) {
       throw error;

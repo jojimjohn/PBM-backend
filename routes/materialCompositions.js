@@ -22,7 +22,8 @@ const updateCompositionSchema = compositionSchema.fork(
 ).options({ stripUnknown: true });
 
 // GET /api/material-compositions - List all compositions
-router.get('/', requirePermission('VIEW_SETTINGS'), async (req, res) => {
+// Using VIEW_INVENTORY permission since this is needed for inventory page filtering
+router.get('/', requirePermission('VIEW_INVENTORY'), async (req, res) => {
   try {
     const { companyId } = req.user;
     const db = getDbConnection(companyId);
@@ -92,7 +93,7 @@ router.get('/', requirePermission('VIEW_SETTINGS'), async (req, res) => {
 // GET /api/material-compositions/:id - Get single composition
 router.get('/:id',
   validateParams(Joi.object({ id: Joi.number().integer().positive().required() })),
-  requirePermission('VIEW_SETTINGS'),
+  requirePermission('VIEW_INVENTORY'),
   async (req, res) => {
     try {
       const { companyId } = req.user;
@@ -142,7 +143,7 @@ router.get('/:id',
 // GET /api/material-compositions/by-composite/:materialId - Get all components for a composite material
 router.get('/by-composite/:materialId',
   validateParams(Joi.object({ materialId: Joi.number().integer().positive().required() })),
-  requirePermission('VIEW_SETTINGS'),
+  requirePermission('VIEW_INVENTORY'),
   async (req, res) => {
     try {
       const { companyId } = req.user;

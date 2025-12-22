@@ -266,10 +266,55 @@ router.post('/',
 
       console.log('Transformed supplier data for DB insertion:', JSON.stringify(supplierData, null, 2));
       const [supplierId] = await db('suppliers').insert(supplierData);
-      
+
       const newSupplier = await db('suppliers')
         .where({ id: supplierId })
         .first();
+
+      // Auto-create main supplier location (only for Al Ramrami / oil trading company)
+      if (companyId === 'al-ramrami') {
+        try {
+          const cleanName = (newSupplier.name || 'SUP').replace(/[^a-zA-Z0-9]/g, '').toUpperCase();
+          const prefix = cleanName.substring(0, 3).padEnd(3, 'X');
+          const mainLocationCode = `${prefix}-MAIN-001`;
+
+          // Check if location code already exists
+          const existingLocation = await db('supplier_locations')
+            .where({ locationCode: mainLocationCode })
+            .first();
+
+          if (!existingLocation) {
+            const mainLocationData = {
+              supplierId: supplierId,
+              locationName: `${newSupplier.name} - Main Location`,
+              locationCode: mainLocationCode,
+              address: newSupplier.address || '',
+              contactPerson: newSupplier.contactPerson || '',
+              contactPhone: newSupplier.phone || '',
+              region_id: newSupplier.region_id || null,
+              isActive: true,
+              notes: 'Auto-generated main location',
+              created_at: new Date(),
+              updated_at: new Date()
+            };
+
+            await db('supplier_locations').insert(mainLocationData);
+
+            logger.info('Main supplier location auto-created', {
+              supplierId,
+              supplierName: newSupplier.name,
+              locationCode: mainLocationCode,
+              companyId
+            });
+          }
+        } catch (locationError) {
+          // Log the error but don't fail supplier creation
+          logger.warn('Failed to auto-create main supplier location', {
+            supplierId,
+            error: locationError.message
+          });
+        }
+      }
 
       auditLog('SUPPLIER_CREATED', req.user.userId, {
         supplierId,

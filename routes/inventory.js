@@ -369,8 +369,366 @@ router.get('/material/:materialId/stock',
   }
 );
 
+// GET /api/inventory/movements - Get stock movements timeline
+router.get('/movements', requirePermission('VIEW_INVENTORY'), async (req, res) => {
+  try {
+    const { companyId } = req.user;
+    const db = getDbConnection(companyId);
+
+    logger.info('Stock movements request', { companyId, query: req.query });
+
+    const {
+      page = 1,
+      limit = 50,
+      startDate,
+      endDate,
+      materialId,
+      type, // 'receipt', 'sale', 'adjustment', 'wastage', 'transfer'
+      batchId
+    } = req.query;
+
+    const offset = (page - 1) * limit;
+
+    // Build query for batch movements with full traceability
+    let query = db('batch_movements')
+      .join('inventory_batches', 'batch_movements.batch_id', 'inventory_batches.id')
+      .join('materials', 'inventory_batches.material_id', 'materials.id')
+      .leftJoin('suppliers', 'inventory_batches.supplier_id', 'suppliers.id')
+      .leftJoin('users', 'batch_movements.created_by', 'users.id')
+      .leftJoin('purchase_orders', 'inventory_batches.purchase_order_id', 'purchase_orders.id')
+      .leftJoin('collection_orders', 'purchase_orders.collection_order_id', 'collection_orders.id')
+      .select(
+        'batch_movements.id',
+        'batch_movements.batch_id as batchId',
+        'batch_movements.movement_type as movementType',
+        'batch_movements.quantity',
+        'batch_movements.reference_type as referenceType',
+        'batch_movements.reference_id as referenceId',
+        'batch_movements.movement_date as movementDate',
+        'batch_movements.notes',
+        'batch_movements.created_at as createdAt',
+        'inventory_batches.batch_number as batchNumber',
+        'inventory_batches.material_id as materialId',
+        'inventory_batches.unit_cost as unitCost',
+        'materials.name as materialName',
+        'materials.unit as materialUnit',
+        'materials.category as materialCategory',
+        'suppliers.name as supplierName',
+        'users.firstName as createdByFirstName',
+        'users.lastName as createdByLastName',
+        // Traceability fields
+        'purchase_orders.orderNumber as purchaseOrderNumber',
+        'purchase_orders.source_type as purchaseOrderSourceType',
+        'collection_orders.orderNumber as collectionOrderNumber',
+        'collection_orders.wcn_number as wcnNumber'
+      );
+
+    // Filter by date range
+    if (startDate) {
+      query = query.where('batch_movements.movement_date', '>=', startDate);
+    }
+    if (endDate) {
+      query = query.where('batch_movements.movement_date', '<=', endDate);
+    }
+
+    // Filter by material
+    if (materialId) {
+      query = query.where('inventory_batches.material_id', materialId);
+    }
+
+    // Filter by movement type
+    if (type) {
+      query = query.where('batch_movements.movement_type', type);
+    }
+
+    // Filter by batch
+    if (batchId) {
+      query = query.where('batch_movements.batch_id', batchId);
+    }
+
+    // Get total count
+    const totalQuery = query.clone();
+    const [{ total }] = await totalQuery.count('* as total');
+
+    // Get paginated results (reverse chronological for timeline)
+    const movements = await query
+      .orderBy('batch_movements.movement_date', 'desc')
+      .orderBy('batch_movements.created_at', 'desc')
+      .limit(parseInt(limit))
+      .offset(offset);
+
+    // Format movements with reference numbers
+    const formattedMovements = await Promise.all(
+      movements.map(async (m) => {
+        // Get reference number based on reference type
+        let referenceNumber = null;
+        if (m.referenceType && m.referenceId) {
+          switch (m.referenceType) {
+            case 'sales_order':
+              const so = await db('sales_orders').where({ id: m.referenceId }).select('orderNumber').first();
+              referenceNumber = so?.orderNumber || null;
+              break;
+            case 'purchase_order':
+              referenceNumber = m.purchaseOrderNumber;
+              break;
+            case 'wastage':
+              const w = await db('wastages').where({ id: m.referenceId }).select('id').first();
+              referenceNumber = w ? `WAS-${w.id}` : null;
+              break;
+            case 'manual_adjustment':
+              referenceNumber = `ADJ-${m.referenceId || m.id}`;
+              break;
+            case 'branch_transfer_out':
+            case 'branch_transfer_in':
+              referenceNumber = `TRF-${m.referenceId}`;
+              break;
+          }
+        }
+
+        // Convert Date to ISO string for frontend compatibility
+        const movementDateStr = m.movementDate instanceof Date
+          ? m.movementDate.toISOString()
+          : m.movementDate;
+
+        return {
+          id: m.id,
+          movementDate: movementDateStr,
+          movementType: m.movementType,
+          quantity: parseFloat(m.quantity) || 0,
+          materialId: m.materialId,
+          materialName: m.materialName,
+          materialUnit: m.materialUnit,
+          materialCategory: m.materialCategory,
+          batchId: m.batchId,
+          batchNumber: m.batchNumber,
+          unitCost: parseFloat(m.unitCost) || 0,
+          referenceType: m.referenceType,
+          referenceId: m.referenceId,
+          referenceNumber,
+          notes: m.notes,
+          supplierName: m.supplierName,
+          createdByName: `${m.createdByFirstName || ''} ${m.createdByLastName || ''}`.trim(),
+          createdAt: m.createdAt,
+          // Traceability (for receipt movements)
+          traceability: m.movementType === 'receipt' ? {
+            collectionOrderNumber: m.collectionOrderNumber || null,
+            wcnNumber: m.wcnNumber || null,
+            purchaseOrderNumber: m.purchaseOrderNumber || null,
+            sourceType: m.purchaseOrderSourceType || 'manual',
+            isManualReceipt: !m.collectionOrderNumber
+          } : null
+        };
+      })
+    );
+
+    // Group movements by date for timeline display
+    const groupedByDate = {};
+    formattedMovements.forEach(m => {
+      // Handle both Date objects and ISO strings
+      let dateKey = 'unknown';
+      if (m.movementDate) {
+        if (m.movementDate instanceof Date) {
+          dateKey = m.movementDate.toISOString().split('T')[0];
+        } else if (typeof m.movementDate === 'string') {
+          dateKey = m.movementDate.split('T')[0];
+        }
+      }
+      if (!groupedByDate[dateKey]) {
+        groupedByDate[dateKey] = [];
+      }
+      groupedByDate[dateKey].push(m);
+    });
+
+    logger.info('Sending stock movements response', {
+      movementsCount: formattedMovements.length,
+      total,
+      page,
+      groupCount: Object.keys(groupedByDate).length
+    });
+
+    res.json({
+      success: true,
+      data: {
+        movements: formattedMovements,
+        groupedByDate,
+        pagination: {
+          page: parseInt(page),
+          limit: parseInt(limit),
+          total: parseInt(total),
+          pages: Math.ceil(total / limit),
+          hasMore: offset + movements.length < total
+        }
+      }
+    });
+
+  } catch (error) {
+    logger.error('Error fetching stock movements timeline', {
+      error: error.message,
+      userId: req.user.userId
+    });
+    res.status(500).json({
+      success: false,
+      error: 'Failed to fetch stock movements'
+    });
+  }
+});
+
+// GET /api/inventory/composite-receipts/:materialId - Get composite material receipts with component breakdown
+router.get('/composite-receipts/:materialId',
+  validateParams(Joi.object({ materialId: Joi.number().integer().positive().required() })),
+  requirePermission('VIEW_INVENTORY'),
+  async (req, res) => {
+    try {
+      const { materialId } = req.params;
+      const { companyId } = req.user;
+      const db = getDbConnection(companyId);
+
+      // Verify the material exists and is a composite material
+      const material = await db('materials')
+        .where({ id: materialId, isActive: true })
+        .first();
+
+      if (!material) {
+        return res.status(404).json({
+          success: false,
+          error: 'Material not found'
+        });
+      }
+
+      // Check if this material is a composite (has components)
+      const components = await db('material_compositions')
+        .where({ composite_material_id: materialId, is_active: true })
+        .select('component_material_id', 'component_type', 'ratio');
+
+      if (components.length === 0) {
+        return res.json({
+          success: true,
+          data: {
+            materialId: parseInt(materialId),
+            materialName: material.name,
+            isComposite: false,
+            receipts: []
+          }
+        });
+      }
+
+      // Get component material names
+      const componentMaterialIds = components.map(c => c.component_material_id);
+      const componentMaterials = await db('materials')
+        .whereIn('id', componentMaterialIds)
+        .select('id', 'name', 'unit');
+
+      const componentMaterialMap = {};
+      componentMaterials.forEach(m => {
+        componentMaterialMap[m.id] = { name: m.name, unit: m.unit };
+      });
+
+      // Find collection orders that had this composite material collected
+      const collectionReceipts = await db('collection_items')
+        .join('collection_orders', 'collection_items.collectionOrderId', 'collection_orders.id')
+        .leftJoin('suppliers', 'collection_orders.supplierId', 'suppliers.id')
+        .leftJoin('supplier_locations', 'collection_orders.supplierLocationId', 'supplier_locations.id')
+        .where('collection_items.materialId', materialId)
+        .where('collection_orders.status', 'finalized')
+        .select(
+          'collection_orders.id as collectionOrderId',
+          'collection_orders.orderNumber as collectionOrderNumber',
+          'collection_orders.wcn_number as wcnNumber',
+          'collection_orders.finalized_at as receiptDate',
+          'collection_items.collectedQuantity',
+          'suppliers.name as supplierName',
+          'supplier_locations.name as locationName'
+        )
+        .orderBy('collection_orders.finalized_at', 'desc');
+
+      // For each collection order, find the component batches created
+      const receiptsWithComponents = await Promise.all(
+        collectionReceipts.map(async (receipt) => {
+          // Find the purchase order linked to this collection order
+          const purchaseOrder = await db('purchase_orders')
+            .where({ collection_order_id: receipt.collectionOrderId, source_type: 'wcn_auto' })
+            .select('id', 'orderNumber')
+            .first();
+
+          // Find component batches created from this collection
+          let componentBatches = [];
+          if (purchaseOrder) {
+            componentBatches = await db('inventory_batches')
+              .join('materials', 'inventory_batches.material_id', 'materials.id')
+              .where('inventory_batches.purchase_order_id', purchaseOrder.id)
+              .whereIn('inventory_batches.material_id', componentMaterialIds)
+              .select(
+                'inventory_batches.id as batchId',
+                'inventory_batches.batch_number as batchNumber',
+                'inventory_batches.material_id as materialId',
+                'materials.name as materialName',
+                'materials.unit as unit',
+                'inventory_batches.quantity_received as quantityReceived',
+                'inventory_batches.remaining_quantity as remainingQuantity',
+                'inventory_batches.unit_cost as unitCost'
+              );
+          }
+
+          // Add component type to each batch
+          const componentsWithType = componentBatches.map(batch => {
+            const componentDef = components.find(c => c.component_material_id === batch.materialId);
+            return {
+              ...batch,
+              quantityReceived: parseFloat(batch.quantityReceived) || 0,
+              remainingQuantity: parseFloat(batch.remainingQuantity) || 0,
+              unitCost: parseFloat(batch.unitCost) || 0,
+              componentType: componentDef?.component_type || 'unknown'
+            };
+          });
+
+          return {
+            collectionOrderId: receipt.collectionOrderId,
+            collectionOrderNumber: receipt.collectionOrderNumber,
+            wcnNumber: receipt.wcnNumber,
+            receiptDate: receipt.receiptDate,
+            collectedQuantity: parseFloat(receipt.collectedQuantity) || 0,
+            supplierName: receipt.supplierName,
+            locationName: receipt.locationName,
+            purchaseOrderId: purchaseOrder?.id || null,
+            purchaseOrderNumber: purchaseOrder?.orderNumber || null,
+            components: componentsWithType
+          };
+        })
+      );
+
+      res.json({
+        success: true,
+        data: {
+          materialId: parseInt(materialId),
+          materialName: material.name,
+          isComposite: true,
+          componentDefinitions: components.map(c => ({
+            materialId: c.component_material_id,
+            materialName: componentMaterialMap[c.component_material_id]?.name || 'Unknown',
+            unit: componentMaterialMap[c.component_material_id]?.unit || 'units',
+            componentType: c.component_type,
+            ratio: parseFloat(c.ratio) || 1
+          })),
+          receipts: receiptsWithComponents
+        }
+      });
+
+    } catch (error) {
+      logger.error('Error fetching composite receipts', {
+        error: error.message,
+        materialId: req.params.materialId,
+        userId: req.user.userId
+      });
+      res.status(500).json({
+        success: false,
+        error: 'Failed to fetch composite receipts'
+      });
+    }
+  }
+);
+
 // GET /api/inventory/:id - Get specific inventory item
-router.get('/:id', 
+router.get('/:id',
   validateParams(Joi.object({ id: Joi.number().integer().positive().required() })),
   requirePermission('VIEW_INVENTORY'),
   async (req, res) => {

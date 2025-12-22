@@ -1719,9 +1719,18 @@ const getUserPermissions = async (roleOrRoleId, companyId, db = null) => {
         .first();
 
       if (role && role.permissions) {
-        const permissions = typeof role.permissions === 'string'
-          ? JSON.parse(role.permissions)
-          : role.permissions;
+        let permissions;
+        if (typeof role.permissions === 'string') {
+          // Check if it's JSON array or comma-separated string
+          if (role.permissions.startsWith('[')) {
+            permissions = JSON.parse(role.permissions);
+          } else {
+            // Comma-separated string format
+            permissions = role.permissions.split(',').map(p => p.trim()).filter(p => p);
+          }
+        } else {
+          permissions = role.permissions;
+        }
         logger.debug('Loaded permissions from DB role', { roleId: roleOrRoleId, roleName: role.name, count: permissions.length });
         return permissions;
       }
@@ -1732,6 +1741,14 @@ const getUserPermissions = async (roleOrRoleId, companyId, db = null) => {
 
   // Legacy fallback: Use hardcoded permissions based on role string
   // This ensures backward compatibility for users without role_id
+
+  // Normalize role string: convert 'company-admin' → 'COMPANY_ADMIN'
+  const normalizeRole = (role) => {
+    if (typeof role !== 'string') return role;
+    return role.toUpperCase().replace(/-/g, '_');
+  };
+  const normalizedRole = normalizeRole(roleOrRoleId);
+
   const rolePermissions = {
     'SUPER_ADMIN': [
       'VIEW_CUSTOMERS', 'CREATE_CUSTOMERS', 'EDIT_CUSTOMERS', 'DELETE_CUSTOMERS', 'MANAGE_CUSTOMERS',
@@ -1829,7 +1846,7 @@ const getUserPermissions = async (roleOrRoleId, companyId, db = null) => {
     ]
   };
 
-  return rolePermissions[roleOrRoleId] || [];
+  return rolePermissions[normalizedRole] || [];
 };
 
 // Debug endpoint to check token permissions

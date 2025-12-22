@@ -1,7 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const { getDbConnection } = require('../config/database');
-const { requirePermission } = require('../middleware/auth');
+const { requirePermission, requireAnyPermission } = require('../middleware/auth');
 const { validate } = require('../middleware/validation');
 const Joi = require('joi');
 const winston = require('winston');
@@ -46,7 +46,8 @@ function generateTransactionNumber(companyId, transactionType) {
 }
 
 // GET /transactions - List all transactions with comprehensive filtering
-router.get('/', requirePermission(['VIEW_FINANCIALS']), async (req, res) => {
+// Allow VIEW_INVENTORY for stock movements display on Inventory page
+router.get('/', requireAnyPermission(['VIEW_FINANCIALS', 'VIEW_INVENTORY']), async (req, res) => {
   try {
     const db = getDbConnection(req.user.companyId);
     

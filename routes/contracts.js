@@ -242,7 +242,7 @@ router.get('/:id',
         });
       }
 
-      // Get contract location rates
+      // Get contract location rates (include isActive status for frontend filtering)
       const rates = await db('contract_location_rates')
         .leftJoin('materials', 'contract_location_rates.materialId', 'materials.id')
         .leftJoin('supplier_locations', 'contract_location_rates.locationId', 'supplier_locations.id')
@@ -264,7 +264,8 @@ router.get('/:id',
           'materials.code as materialCode',
           'materials.standardPrice',
           'supplier_locations.locationName as locationName',
-          'supplier_locations.locationCode as locationCode'
+          'supplier_locations.locationCode as locationCode',
+          'supplier_locations.isActive as locationIsActive'
         )
         .where('contract_location_rates.contractId', id);
 
