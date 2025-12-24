@@ -27,11 +27,15 @@ class WastageRepository extends BaseRepository {
           'reportedUser.firstName as reportedByName',
           'reportedUser.lastName as reportedByLastName',
           'approvedUser.firstName as approvedByName',
-          'approvedUser.lastName as approvedByLastName'
+          'approvedUser.lastName as approvedByLastName',
+          // Collection order reference for linking display
+          'collection_orders.wcn_number as collectionWcnNumber',
+          'collection_orders.orderNumber as collectionOrderNumber'
         )
         .leftJoin('materials', 'wastages.materialId', 'materials.id')
         .leftJoin('users as reportedUser', 'wastages.reportedBy', 'reportedUser.id')
         .leftJoin('users as approvedUser', 'wastages.approvedBy', 'approvedUser.id')
+        .leftJoin('collection_orders', 'wastages.collectionOrderId', 'collection_orders.id')
         .orderBy('wastages.created_at', 'desc');
 
       // Apply filters
@@ -58,10 +62,14 @@ class WastageRepository extends BaseRepository {
       // Get paginated results
       const wastages = await query.limit(limit).offset(offset);
 
-      // Process attachments JSON
+      // Process attachments JSON and add collection reference
       const processedWastages = wastages.map(wastage => ({
         ...wastage,
-        attachments: wastage.attachments ? JSON.parse(wastage.attachments) : []
+        attachments: wastage.attachments ? JSON.parse(wastage.attachments) : [],
+        // Set collection reference display name
+        collectionReference: wastage.collectionOrderId
+          ? (wastage.collectionWcnNumber || wastage.collectionOrderNumber || `#${wastage.collectionOrderId}`)
+          : null
       }));
 
       return {
@@ -161,6 +169,30 @@ class WastageRepository extends BaseRepository {
         topMaterials,
         monthlyTrends
       };
+    } catch (error) {
+      throw error;
+    }
+  }
+
+  /**
+   * Find wastages linked to a collection order
+   * @param {number} collectionOrderId - Collection order ID
+   */
+  async findByCollectionOrder(collectionOrderId) {
+    try {
+      return await this.db(this.tableName)
+        .select(
+          'wastages.*',
+          'materials.name as materialName',
+          'materials.code as materialCode',
+          'materials.unit as materialUnit',
+          'reportedUser.firstName as reportedByName',
+          'reportedUser.lastName as reportedByLastName'
+        )
+        .leftJoin('materials', 'wastages.materialId', 'materials.id')
+        .leftJoin('users as reportedUser', 'wastages.reportedBy', 'reportedUser.id')
+        .where('wastages.collectionOrderId', collectionOrderId)
+        .orderBy('wastages.created_at', 'desc');
     } catch (error) {
       throw error;
     }

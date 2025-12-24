@@ -3,6 +3,7 @@ const { validate, validateParams, sanitize } = require('../middleware/validation
 const { requirePermission } = require('../middleware/auth');
 const { logger, auditLog } = require('../utils/logger');
 const { getDbConnection } = require('../config/database');
+const { getRepositoryFactory } = require('../repositories/RepositoryFactory');
 const Joi = require('joi');
 
 const router = express.Router();
@@ -653,14 +654,15 @@ router.get('/', requirePermission('VIEW_PURCHASE'), async (req, res) => {
     const { companyId } = req.user;
     const db = getDbConnection(companyId);
     
-    const { 
-      page = 1, 
-      limit = 50, 
+    const {
+      page = 1,
+      limit = 50,
       status = '',
       fromDate = '',
       toDate = '',
       supplierId = '',
-      contractId = ''
+      contractId = '',
+      isFinalized = ''
     } = req.query;
 
     const offset = (page - 1) * limit;
@@ -718,6 +720,12 @@ router.get('/', requirePermission('VIEW_PURCHASE'), async (req, res) => {
       query = query.where('collection_orders.scheduledDate', '<=', toDate);
     }
 
+    // Finalized filter - useful for getting finalized collections to link to wastages
+    if (isFinalized !== '') {
+      const finalizedValue = isFinalized === 'true' || isFinalized === '1' ? 1 : 0;
+      query = query.where('collection_orders.is_finalized', finalizedValue);
+    }
+
     // Get total count for pagination
     const totalQuery = query.clone();
     const [{ total }] = await totalQuery.count('* as total');
@@ -728,6 +736,37 @@ router.get('/', requirePermission('VIEW_PURCHASE'), async (req, res) => {
       .orderBy('collection_orders.created_at', 'desc')
       .limit(limit)
       .offset(offset);
+
+    // Fetch items for all orders to include materialIds for filtering and contract rates
+    if (orders.length > 0) {
+      const orderIds = orders.map(o => o.id);
+      const allItems = await db('collection_items')
+        .leftJoin('materials', 'collection_items.materialId', 'materials.id')
+        .select(
+          'collection_items.collectionOrderId',
+          'collection_items.materialId',
+          'collection_items.contractRate',
+          'collection_items.unit',
+          'materials.name as materialName',
+          'materials.code as materialCode'
+        )
+        .whereIn('collection_items.collectionOrderId', orderIds);
+
+      // Group items by collectionOrderId
+      const itemsByOrder = {};
+      allItems.forEach(item => {
+        if (!itemsByOrder[item.collectionOrderId]) {
+          itemsByOrder[item.collectionOrderId] = [];
+        }
+        itemsByOrder[item.collectionOrderId].push(item);
+      });
+
+      // Attach items to each order
+      orders.forEach(order => {
+        order.items = itemsByOrder[order.id] || [];
+        order.materialIds = order.items.map(i => i.materialId);
+      });
+    }
 
     auditLog('COLLECTION_ORDERS_VIEWED', req.user.userId, {
       companyId,
@@ -1298,9 +1337,10 @@ router.post('/:id/complete',
           });
 
           // Create transaction record
+          // Use 'purchase' type since 'collection' is not in the enum
           await trx('transactions').insert({
             transactionNumber: `COLLECTION-${Date.now()}-${item.id}`,
-            transactionType: 'collection',
+            transactionType: 'purchase',  // Fixed: was 'collection' which is not valid enum
             referenceId: id,
             referenceType: 'collection_order',
             materialId: item.materialId,
@@ -1387,6 +1427,9 @@ router.post('/:id/finalize-wcn',
       verifiedQualityGrade: Joi.string().valid('A', 'B', 'C', 'Reject').optional(),
       qualityVerified: Joi.boolean().default(false),
       actualCondition: Joi.string().valid('excellent', 'good', 'fair', 'poor', 'mixed').optional()
+      // NOTE: Wastage is NOT recorded during WCN finalization.
+      // Wastage should be recorded separately via the Wastage module after collection is finalized.
+      // This ensures inventory gets FULL verified qty, and wastage only affects inventory upon approval.
     })).optional()
   })),
   requirePermission('EDIT_PURCHASE'),
@@ -1742,7 +1785,14 @@ router.post('/:id/finalize-wcn',
             });
         }
 
-        // 2. Update inventory for each collected item
+        // NOTE: Wastage is NOT processed during WCN finalization.
+        // Wastage should be recorded separately via the Wastage module after collection is finalized.
+        // This ensures:
+        // 1. Inventory receives FULL verified quantity (not net)
+        // 2. Wastage only affects inventory when APPROVED
+        // 3. Rejected wastage doesn't leave inventory in wrong state
+
+        // 2. Update inventory for each collected item (using FULL verified quantities)
         for (const item of items) {
           // Check if material is composite
           const material = await trx('materials').where({ id: item.materialId }).first();
@@ -1796,9 +1846,10 @@ router.post('/:id/finalize-wcn',
               }
 
               // Create transaction for component
+              // Use 'purchase' type since 'collection' is not in the enum
               await trx('transactions').insert({
                 transactionNumber: `${wcnNumber}-COMP-${comp.component_material_id}`,
-                transactionType: 'collection',
+                transactionType: 'purchase',  // Fixed: was 'collection' which is not valid enum
                 referenceId: id,
                 referenceType: 'collection_order',
                 materialId: comp.component_material_id,
@@ -1862,9 +1913,10 @@ router.post('/:id/finalize-wcn',
             }
 
             // Create transaction record
+            // Use 'purchase' type since 'collection' is not in the enum
             await trx('transactions').insert({
               transactionNumber: `${wcnNumber}-${item.materialId}`,
-              transactionType: 'collection',
+              transactionType: 'purchase',  // Fixed: was 'collection' which is not valid enum
               referenceId: id,
               referenceType: 'collection_order',
               materialId: item.materialId,
@@ -1965,6 +2017,163 @@ router.post('/:id/finalize-wcn',
 
         await trx('purchase_order_items').insert(poItems);
 
+        // 4b. Create inventory_batches and batch_movements for FIFO tracking
+        // This ensures both the legacy inventory table AND the modern FIFO system are in sync
+        for (const item of items) {
+          const material = await trx('materials').where({ id: item.materialId }).first();
+
+          if (material && material.is_composite) {
+            // Handle composite material components
+            const compositions = await trx('material_compositions')
+              .where('composite_material_id', item.materialId)
+              .where('is_active', 1);
+
+            for (const comp of compositions) {
+              const componentQuantity = item.collectedQuantity;
+              const batchNumber = `${wcnNumber}-${comp.component_material_id}`;
+
+              // Check if batch already exists in inventory_batches
+              const existingBatch = await trx('inventory_batches')
+                .where('batch_number', batchNumber)
+                .first();
+
+              if (existingBatch) {
+                // Update existing batch
+                const newRemaining = parseFloat(existingBatch.remaining_quantity) + componentQuantity;
+                await trx('inventory_batches')
+                  .where('id', existingBatch.id)
+                  .update({
+                    remaining_quantity: newRemaining,
+                    quantity_received: parseFloat(existingBatch.quantity_received) + componentQuantity,
+                    purchase_order_id: purchaseOrderId,
+                    updated_at: new Date()
+                  });
+
+                // Create adjustment movement for the addition
+                await trx('batch_movements').insert({
+                  batch_id: existingBatch.id,
+                  movement_type: 'receipt',
+                  quantity: componentQuantity,
+                  reference_type: 'collection_order',
+                  reference_id: id,
+                  movement_date: new Date(),
+                  notes: `Additional receipt via ${wcnNumber} (component)`,
+                  created_by: userId,
+                  created_at: new Date()
+                });
+              } else {
+                // Create new batch
+                const [batchId] = await trx('inventory_batches').insert({
+                  material_id: comp.component_material_id,
+                  batch_number: batchNumber,
+                  supplier_id: order.supplierId,
+                  purchase_order_id: purchaseOrderId,
+                  branch_id: null,
+                  purchase_date: new Date(),
+                  quantity_received: componentQuantity,
+                  remaining_quantity: componentQuantity,
+                  unit_cost: 0, // Component cost calculated separately
+                  expiry_date: null,
+                  location: 'Collection Warehouse',
+                  condition: item.condition || 'new',
+                  is_depleted: false,
+                  notes: `Component from ${wcnNumber}`,
+                  created_at: new Date(),
+                  updated_at: new Date()
+                });
+
+                // Create initial receipt movement
+                await trx('batch_movements').insert({
+                  batch_id: batchId,
+                  movement_type: 'receipt',
+                  quantity: componentQuantity,
+                  reference_type: 'collection_order',
+                  reference_id: id,
+                  movement_date: new Date(),
+                  notes: `Receipt via ${wcnNumber} (component)`,
+                  created_by: userId,
+                  created_at: new Date()
+                });
+              }
+            }
+          } else {
+            // Handle regular material
+            const batchNumber = `${wcnNumber}-${item.materialId}`;
+
+            // Check if batch already exists in inventory_batches
+            const existingBatch = await trx('inventory_batches')
+              .where('batch_number', batchNumber)
+              .first();
+
+            if (existingBatch) {
+              // Update existing batch
+              const newRemaining = parseFloat(existingBatch.remaining_quantity) + item.collectedQuantity;
+              await trx('inventory_batches')
+                .where('id', existingBatch.id)
+                .update({
+                  remaining_quantity: newRemaining,
+                  quantity_received: parseFloat(existingBatch.quantity_received) + item.collectedQuantity,
+                  purchase_order_id: purchaseOrderId,
+                  unit_cost: item.contractRate || existingBatch.unit_cost,
+                  updated_at: new Date()
+                });
+
+              // Create receipt movement for the addition
+              await trx('batch_movements').insert({
+                batch_id: existingBatch.id,
+                movement_type: 'receipt',
+                quantity: item.collectedQuantity,
+                reference_type: 'collection_order',
+                reference_id: id,
+                movement_date: new Date(),
+                notes: `Additional receipt via ${wcnNumber}`,
+                created_by: userId,
+                created_at: new Date()
+              });
+            } else {
+              // Create new batch
+              const [batchId] = await trx('inventory_batches').insert({
+                material_id: item.materialId,
+                batch_number: batchNumber,
+                supplier_id: order.supplierId,
+                purchase_order_id: purchaseOrderId,
+                branch_id: null,
+                purchase_date: new Date(),
+                quantity_received: item.collectedQuantity,
+                remaining_quantity: item.collectedQuantity,
+                unit_cost: item.contractRate || 0,
+                expiry_date: null,
+                location: 'Collection Warehouse',
+                condition: item.condition || 'new',
+                is_depleted: false,
+                notes: `Created from ${wcnNumber}`,
+                created_at: new Date(),
+                updated_at: new Date()
+              });
+
+              // Create initial receipt movement
+              await trx('batch_movements').insert({
+                batch_id: batchId,
+                movement_type: 'receipt',
+                quantity: item.collectedQuantity,
+                reference_type: 'collection_order',
+                reference_id: id,
+                movement_date: new Date(),
+                notes: `Receipt via ${wcnNumber}`,
+                created_by: userId,
+                created_at: new Date()
+              });
+            }
+          }
+        }
+
+        logger.info('Created inventory_batches and batch_movements for FIFO tracking', {
+          wcnNumber,
+          collectionOrderId: id,
+          purchaseOrderId,
+          itemCount: items.length
+        });
+
         // 5. Update collection order with WCN details
         // Note: is_finalized=1 + purchase_order_id indicates successful finalization
         await trx('collection_orders')
@@ -2015,6 +2224,8 @@ router.post('/:id/finalize-wcn',
       if (newItemsAdded > 0) {
         message += ` ${newItemsAdded} new material(s) were added to the collection order.`;
       }
+      // NOTE: Wastage is now recorded separately via the Wastage module.
+      // Users can record wastage from the Collection Details modal after finalization.
 
       res.json({
         success: true,
@@ -2027,6 +2238,7 @@ router.post('/:id/finalize-wcn',
           newItemsAdded,
           inventoryUpdated: true,
           poCreated: true
+          // Wastage is recorded separately - see GET /collection-orders/:id/wastages
         }
       });
 
@@ -2152,6 +2364,45 @@ router.post('/:id/rectify-wcn',
                 updated_at: new Date()
               });
 
+            // Also update inventory_batches for FIFO consistency
+            const batchRecord = await trx('inventory_batches')
+              .where('batch_number', inventory.batchNumber)
+              .first();
+
+            if (batchRecord) {
+              const newBatchRemaining = parseFloat(batchRecord.remaining_quantity) + quantityDiff;
+              await trx('inventory_batches')
+                .where('id', batchRecord.id)
+                .update({
+                  remaining_quantity: Math.max(0, newBatchRemaining),
+                  quantity_received: quantityDiff > 0
+                    ? parseFloat(batchRecord.quantity_received) + quantityDiff
+                    : batchRecord.quantity_received,
+                  is_depleted: newBatchRemaining <= 0,
+                  updated_at: new Date()
+                });
+
+              // Create adjustment batch_movement
+              await trx('batch_movements').insert({
+                batch_id: batchRecord.id,
+                movement_type: 'adjustment',
+                quantity: quantityDiff,
+                reference_type: 'wcn_rectification',
+                reference_id: id,
+                movement_date: new Date(),
+                notes: `WCN rectification: ${adjustment.reason}`,
+                created_by: userId,
+                created_at: new Date()
+              });
+
+              logger.info('Updated inventory_batches for rectification', {
+                batchId: batchRecord.id,
+                batchNumber: batchRecord.batch_number,
+                quantityDiff,
+                newRemaining: newBatchRemaining
+              });
+            }
+
             // Create adjustment transaction
             await trx('transactions').insert({
               transactionNumber: `WCN-RECTIFY-${Date.now()}-${item.id}`,
@@ -2192,6 +2443,46 @@ router.post('/:id/rectify-wcn',
                 isActive: 1,
                 created_at: new Date(),
                 updated_at: new Date()
+              });
+
+              // Also create inventory_batches for FIFO tracking
+              const [batchId] = await trx('inventory_batches').insert({
+                material_id: item.materialId,
+                batch_number: expectedBatchNumber,
+                supplier_id: order.supplierId,
+                purchase_order_id: order.purchase_order_id || null,
+                branch_id: null,
+                purchase_date: new Date(),
+                quantity_received: newQty,
+                remaining_quantity: newQty,
+                unit_cost: parseFloat(item.contractRate) || 0,
+                expiry_date: null,
+                location: 'Collection Warehouse',
+                condition: 'new',
+                is_depleted: false,
+                notes: `Created via WCN rectification (${order.wcn_number})`,
+                created_at: new Date(),
+                updated_at: new Date()
+              });
+
+              // Create receipt batch_movement
+              await trx('batch_movements').insert({
+                batch_id: batchId,
+                movement_type: 'receipt',
+                quantity: newQty,
+                reference_type: 'wcn_rectification',
+                reference_id: id,
+                movement_date: new Date(),
+                notes: `Created via WCN rectification: ${adjustment.reason}`,
+                created_by: userId,
+                created_at: new Date()
+              });
+
+              logger.info('Created inventory_batches for rectification', {
+                batchId,
+                batchNumber: expectedBatchNumber,
+                materialId: item.materialId,
+                quantity: newQty
               });
 
               impacts.push({
@@ -2390,6 +2681,69 @@ router.post('/:id/rectify-wcn',
       res.status(500).json({
         success: false,
         error: 'Failed to rectify WCN: ' + error.message
+      });
+    }
+  }
+);
+
+// GET /api/collection-orders/:id/wastages - Get wastages linked to a collection order
+router.get('/:id/wastages',
+  validateParams(Joi.object({ id: Joi.number().integer().positive().required() })),
+  requirePermission('VIEW_WASTAGE'),
+  async (req, res) => {
+    try {
+      const { id } = req.params;
+      const { companyId } = req.user;
+      const repositoryFactory = getRepositoryFactory(companyId);
+      const wastageRepository = repositoryFactory.getWastagesRepository();
+
+      // Verify collection order exists
+      const db = getDbConnection(companyId);
+      const order = await db('collection_orders').where({ id }).first();
+      if (!order) {
+        return res.status(404).json({
+          success: false,
+          error: 'Collection order not found'
+        });
+      }
+
+      // Get wastages linked to this collection order
+      const wastages = await wastageRepository.findByCollectionOrder(id);
+
+      // Calculate summary
+      const summary = {
+        totalRecords: wastages.length,
+        pendingCount: wastages.filter(w => w.status === 'pending').length,
+        approvedCount: wastages.filter(w => w.status === 'approved').length,
+        rejectedCount: wastages.filter(w => w.status === 'rejected').length,
+        totalQuantity: wastages.reduce((sum, w) => sum + (parseFloat(w.quantity) || 0), 0),
+        totalCost: wastages.reduce((sum, w) => sum + (parseFloat(w.totalCost) || 0), 0)
+      };
+
+      logger.info('Retrieved wastages for collection order', {
+        collectionOrderId: id,
+        wcnNumber: order.wcn_number,
+        wastageCount: wastages.length
+      });
+
+      res.json({
+        success: true,
+        data: {
+          collectionOrderId: id,
+          wcnNumber: order.wcn_number,
+          wastages,
+          summary
+        }
+      });
+
+    } catch (error) {
+      logger.error('Error fetching wastages for collection order', {
+        error: error.message,
+        collectionOrderId: req.params.id
+      });
+      res.status(500).json({
+        success: false,
+        error: 'Failed to fetch wastages'
       });
     }
   }

@@ -573,6 +573,407 @@ router.get('/movements', requirePermission('VIEW_INVENTORY'), async (req, res) =
   }
 });
 
+// GET /api/inventory/batch-movements - Get stock movements history for View History modal
+// This endpoint provides a simplified view of batch movements for material history display
+router.get('/batch-movements', requirePermission('VIEW_INVENTORY'), async (req, res) => {
+  try {
+    const { companyId } = req.user;
+    const db = getDbConnection(companyId);
+
+    const {
+      materialId,
+      limit = 50,
+      page = 1,
+      startDate,
+      endDate
+    } = req.query;
+
+    if (!materialId) {
+      return res.status(400).json({
+        success: false,
+        error: 'materialId is required'
+      });
+    }
+
+    const offset = (parseInt(page) - 1) * parseInt(limit);
+
+    // Build query for batch movements
+    let query = db('batch_movements')
+      .join('inventory_batches', 'batch_movements.batch_id', 'inventory_batches.id')
+      .join('materials', 'inventory_batches.material_id', 'materials.id')
+      .leftJoin('suppliers', 'inventory_batches.supplier_id', 'suppliers.id')
+      .leftJoin('users', 'batch_movements.created_by', 'users.id')
+      .select(
+        'batch_movements.id',
+        'batch_movements.batch_id as batchId',
+        'batch_movements.movement_type as movementType',
+        'batch_movements.quantity',
+        'batch_movements.reference_type as referenceType',
+        'batch_movements.reference_id as referenceId',
+        'batch_movements.movement_date as movementDate',
+        'batch_movements.notes',
+        'batch_movements.created_at as createdAt',
+        'inventory_batches.batch_number as batchNumber',
+        'inventory_batches.unit_cost as unitCost',
+        'materials.name as materialName',
+        'materials.code as materialCode',
+        'materials.unit as materialUnit',
+        'suppliers.name as supplierName',
+        db.raw("CONCAT(users.firstName, ' ', users.lastName) as createdByName")
+      )
+      .where('inventory_batches.material_id', materialId);
+
+    // Filter by date range
+    if (startDate) {
+      query = query.where('batch_movements.movement_date', '>=', startDate);
+    }
+    if (endDate) {
+      query = query.where('batch_movements.movement_date', '<=', endDate);
+    }
+
+    // Get total count
+    const totalQuery = query.clone();
+    const [{ total }] = await totalQuery.count('* as total');
+
+    // Get paginated results
+    const movements = await query
+      .orderBy('batch_movements.movement_date', 'desc')
+      .orderBy('batch_movements.created_at', 'desc')
+      .limit(parseInt(limit))
+      .offset(offset);
+
+    // Calculate running balance
+    // Get all movements for this material (for calculating running balance)
+    const allMovements = await db('batch_movements')
+      .join('inventory_batches', 'batch_movements.batch_id', 'inventory_batches.id')
+      .select('batch_movements.quantity', 'batch_movements.movement_date', 'batch_movements.id')
+      .where('inventory_batches.material_id', materialId)
+      .orderBy('batch_movements.movement_date', 'asc')
+      .orderBy('batch_movements.id', 'asc');
+
+    // Calculate cumulative balance at each movement
+    let cumulativeBalance = 0;
+    const balanceMap = {};
+    allMovements.forEach(m => {
+      cumulativeBalance += parseFloat(m.quantity) || 0;
+      balanceMap[m.id] = cumulativeBalance;
+    });
+
+    // Format response with running balance
+    const formattedMovements = movements.map(m => {
+      const movementDateStr = m.movementDate instanceof Date
+        ? m.movementDate.toISOString()
+        : m.movementDate;
+
+      return {
+        id: m.id,
+        movementDate: movementDateStr,
+        movementType: m.movementType,
+        quantity: parseFloat(m.quantity) || 0,
+        runningBalance: balanceMap[m.id] || 0,
+        batchId: m.batchId,
+        batchNumber: m.batchNumber,
+        unitCost: parseFloat(m.unitCost) || 0,
+        totalValue: Math.abs(parseFloat(m.quantity) || 0) * (parseFloat(m.unitCost) || 0),
+        referenceType: m.referenceType,
+        referenceId: m.referenceId,
+        notes: m.notes,
+        materialName: m.materialName,
+        materialCode: m.materialCode,
+        materialUnit: m.materialUnit,
+        supplierName: m.supplierName,
+        createdByName: m.createdByName,
+        createdAt: m.createdAt
+      };
+    });
+
+    // Get current stock level
+    const currentStock = await db('inventory_batches')
+      .sum('remaining_quantity as total')
+      .where('material_id', materialId)
+      .where('is_depleted', false)
+      .first();
+
+    res.json({
+      success: true,
+      data: {
+        movements: formattedMovements,
+        currentStock: parseFloat(currentStock?.total) || 0,
+        pagination: {
+          page: parseInt(page),
+          limit: parseInt(limit),
+          total: parseInt(total),
+          pages: Math.ceil(total / limit)
+        }
+      }
+    });
+
+  } catch (error) {
+    logger.error('Error fetching batch movements history', {
+      error: error.message,
+      materialId: req.query.materialId,
+      userId: req.user.userId
+    });
+    res.status(500).json({
+      success: false,
+      error: 'Failed to fetch batch movements history'
+    });
+  }
+});
+
+// GET /api/inventory/chart-data - Get aggregated data for inventory charts
+router.get('/chart-data', requirePermission('VIEW_INVENTORY'), async (req, res) => {
+  try {
+    const { companyId } = req.user;
+    const db = getDbConnection(companyId);
+
+    const {
+      startDate,
+      endDate,
+      materialIds, // comma-separated list of material IDs
+      groupBy = 'day' // 'day', 'week', 'month'
+    } = req.query;
+
+    // Parse material IDs
+    const materialIdList = materialIds
+      ? materialIds.split(',').map(id => parseInt(id.trim())).filter(id => !isNaN(id))
+      : [];
+
+    // Default date range: last 30 days
+    const endDateParsed = endDate ? new Date(endDate) : new Date();
+    const startDateParsed = startDate
+      ? new Date(startDate)
+      : new Date(endDateParsed.getTime() - 30 * 24 * 60 * 60 * 1000);
+
+    // Get all materials for selection dropdown and chart legends
+    const materials = await db('materials')
+      .select('id', 'name', 'code', 'unit', 'category')
+      .where('isActive', true)
+      .orderBy('name');
+
+    // Assign colors to materials
+    const CHART_COLORS = [
+      '#3B82F6', '#22C55E', '#F59E0B', '#EF4444', '#8B5CF6',
+      '#06B6D4', '#EC4899', '#6366F1', '#14B8A6', '#F97316'
+    ];
+    const materialInfo = materials.map((m, index) => ({
+      id: m.id,
+      name: m.name,
+      code: m.code,
+      unit: m.unit,
+      category: m.category,
+      color: CHART_COLORS[index % CHART_COLORS.length]
+    }));
+
+    // Filter materials if specific IDs provided
+    const targetMaterialIds = materialIdList.length > 0
+      ? materialIdList
+      : materials.slice(0, 5).map(m => m.id); // Default to first 5 materials
+
+    // Determine date grouping format for SQL
+    let dateGroupFormat;
+    switch (groupBy) {
+      case 'week':
+        dateGroupFormat = db.raw("DATE_FORMAT(movement_date, '%Y-%u')"); // Year-Week
+        break;
+      case 'month':
+        dateGroupFormat = db.raw("DATE_FORMAT(movement_date, '%Y-%m')"); // Year-Month
+        break;
+      default:
+        dateGroupFormat = db.raw("DATE(movement_date)"); // Day
+    }
+
+    // === QUERY 1: Movement breakdown by type (using batch_movements table) ===
+    // This is the primary source for FIFO-accurate stock tracking
+    const movementsRaw = await db('batch_movements')
+      .join('inventory_batches', 'batch_movements.batch_id', 'inventory_batches.id')
+      .select(
+        db.raw("DATE(batch_movements.movement_date) as date"),
+        'batch_movements.movement_type',
+        db.raw('SUM(ABS(batch_movements.quantity)) as total_quantity')
+      )
+      .whereBetween('batch_movements.movement_date', [startDateParsed, endDateParsed])
+      .whereIn('inventory_batches.material_id', targetMaterialIds)
+      .groupBy(db.raw('DATE(batch_movements.movement_date)'), 'batch_movements.movement_type')
+      .orderBy('date');
+
+    // Map movement types to chart categories
+    const typeMapping = {
+      'receipt': 'receipts',
+      'purchase': 'receipts',
+      'sale': 'sales',
+      'wastage': 'wastage',
+      'adjustment': 'adjustments',
+      'transfer': 'adjustments',
+      'return': 'adjustments'
+    };
+
+    // Transform movements into chart-ready format
+    const movementsByDate = {};
+    movementsRaw.forEach(row => {
+      const dateStr = row.date instanceof Date
+        ? row.date.toISOString().split('T')[0]
+        : String(row.date).split('T')[0];
+
+      if (!movementsByDate[dateStr]) {
+        movementsByDate[dateStr] = {
+          date: dateStr,
+          receipts: 0,
+          sales: 0,
+          wastage: 0,
+          adjustments: 0
+        };
+      }
+
+      const qty = Math.abs(parseFloat(row.total_quantity) || 0);
+      const category = typeMapping[row.movement_type] || 'adjustments';
+      movementsByDate[dateStr][category] += qty;
+    });
+
+    const movements = Object.values(movementsByDate).sort((a, b) =>
+      new Date(a.date) - new Date(b.date)
+    );
+
+    // === QUERY 2: Stock levels over time per material (using batch_movements table) ===
+    // Get current stock levels from inventory_batches (sum of remaining_quantity)
+    // This is more accurate than inventory table as it reflects FIFO tracking
+    const currentStocks = await db('inventory_batches')
+      .select('material_id')
+      .sum('remaining_quantity as current_stock')
+      .whereIn('material_id', targetMaterialIds)
+      .where('is_depleted', false)
+      .groupBy('material_id');
+
+    const currentStockMap = {};
+    currentStocks.forEach(row => {
+      currentStockMap[row.material_id] = parseFloat(row.current_stock) || 0;
+    });
+
+    // Get daily net changes from batch_movements table
+    // The quantity in batch_movements is already signed correctly:
+    // - Positive for receipts/purchases
+    // - Negative for sales/wastage/outflows
+    const dailyChanges = await db('batch_movements')
+      .join('inventory_batches', 'batch_movements.batch_id', 'inventory_batches.id')
+      .select(
+        db.raw("DATE(batch_movements.movement_date) as date"),
+        'inventory_batches.material_id',
+        db.raw('SUM(batch_movements.quantity) as net_change')
+      )
+      .whereBetween('batch_movements.movement_date', [startDateParsed, endDateParsed])
+      .whereIn('inventory_batches.material_id', targetMaterialIds)
+      .groupBy(db.raw('DATE(batch_movements.movement_date)'), 'inventory_batches.material_id')
+      .orderBy('date', 'desc');
+
+    // Generate all dates in the range for complete timeline
+    const generateDateRange = (start, end) => {
+      const dates = [];
+      const current = new Date(start);
+      const endDate = new Date(end);
+      while (current <= endDate) {
+        dates.push(current.toISOString().split('T')[0]);
+        current.setDate(current.getDate() + 1);
+      }
+      return dates;
+    };
+
+    const allDatesInRange = generateDateRange(startDateParsed, endDateParsed);
+
+    // Build daily change map for quick lookup
+    const dailyChangeMap = {};
+    dailyChanges.forEach(row => {
+      const dateStr = row.date instanceof Date
+        ? row.date.toISOString().split('T')[0]
+        : String(row.date).split('T')[0];
+      const materialId = row.material_id;
+
+      if (!dailyChangeMap[dateStr]) {
+        dailyChangeMap[dateStr] = {};
+      }
+      dailyChangeMap[dateStr][materialId] = parseFloat(row.net_change) || 0;
+    });
+
+    // Work backwards from current stock to calculate historical levels
+    // Key fix: When working backwards, we ADD the net change (reverse the transaction)
+    // If today's stock is 100 and we sold 20 today, yesterday's stock was 100 + 20 = 120
+    const stockLevels = [];
+    const runningStocks = { ...currentStockMap };
+
+    // Process dates in reverse order (most recent first)
+    for (let i = allDatesInRange.length - 1; i >= 0; i--) {
+      const date = allDatesInRange[i];
+      const dataPoint = { date };
+
+      targetMaterialIds.forEach(materialId => {
+        const material = materialInfo.find(m => m.id === materialId);
+        const key = material?.code || `material_${materialId}`;
+
+        // Current running stock for this date (stock at END of day)
+        dataPoint[key] = Math.max(0, runningStocks[materialId] || 0);
+
+        // Get the net change for this date (if any)
+        const netChange = dailyChangeMap[date]?.[materialId] || 0;
+
+        // To find previous day's stock: SUBTRACT the net change (reverse the transaction)
+        // netChange is positive for receipts (stock increased), negative for sales (stock decreased)
+        // If we received 50 today (netChange = +50), yesterday was current - 50
+        // If we sold 20 today (netChange = -20), yesterday was current - (-20) = current + 20
+        runningStocks[materialId] = (runningStocks[materialId] || 0) - netChange;
+      });
+
+      stockLevels.unshift(dataPoint); // Add to beginning (building array in chronological order)
+    }
+
+    // Get summary statistics
+    const totalReceipts = movements.reduce((sum, m) => sum + m.receipts, 0);
+    const totalSales = movements.reduce((sum, m) => sum + m.sales, 0);
+    const totalWastage = movements.reduce((sum, m) => sum + m.wastage, 0);
+    const netChange = totalReceipts - totalSales - totalWastage;
+
+    logger.info('Chart data generated', {
+      companyId,
+      dateRange: { start: startDateParsed, end: endDateParsed },
+      materialCount: targetMaterialIds.length,
+      movementDays: movements.length,
+      stockLevelDays: stockLevels.length,
+      currentStocks: currentStockMap,
+      summary: { totalReceipts, totalSales, totalWastage, netChange },
+      sampleStockLevels: stockLevels.slice(-3) // Last 3 days for debugging
+    });
+
+    res.json({
+      success: true,
+      data: {
+        stockLevels,
+        movements,
+        materialInfo: materialInfo.filter(m => targetMaterialIds.includes(m.id)),
+        allMaterials: materialInfo,
+        dateRange: {
+          start: startDateParsed.toISOString().split('T')[0],
+          end: endDateParsed.toISOString().split('T')[0]
+        },
+        summary: {
+          totalReceipts,
+          totalSales,
+          totalWastage,
+          netChange
+        }
+      }
+    });
+
+  } catch (error) {
+    logger.error('Error generating chart data', {
+      error: error.message,
+      stack: error.stack,
+      userId: req.user.userId
+    });
+    res.status(500).json({
+      success: false,
+      error: 'Failed to generate chart data'
+    });
+  }
+});
+
 // GET /api/inventory/composite-receipts/:materialId - Get composite material receipts with component breakdown
 router.get('/composite-receipts/:materialId',
   validateParams(Joi.object({ materialId: Joi.number().integer().positive().required() })),

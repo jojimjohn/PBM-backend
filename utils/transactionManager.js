@@ -1,6 +1,6 @@
 const winston = require('winston');
 const { getDbConnection } = require('../config/database');
-const { allocateFIFO } = require('./fifoAllocator');
+const { allocateFIFO, reverseFIFOAllocation } = require('./fifoAllocator');
 
 /**
  * Advanced Transaction Manager for ACID Operations
@@ -281,11 +281,32 @@ class TransactionManager {
           }
         }
 
-        // Also update legacy inventory if inventory record exists
-        if (wastage.inventoryId) {
+        // Also update legacy inventory table for display consistency
+        // Find inventory record by materialId instead of relying on inventoryId
+        const inventoryRecord = await trx('inventory')
+          .where('materialId', wastage.materialId)
+          .where('quantity', '>', 0)
+          .orderBy('id', 'asc')
+          .first();
+
+        if (inventoryRecord) {
+          const deductAmount = Math.min(wastage.quantity, inventoryRecord.quantity);
           await trx('inventory')
-            .where('id', wastage.inventoryId)
-            .decrement('currentStock', wastage.quantity);
+            .where('id', inventoryRecord.id)
+            .decrement('quantity', deductAmount);
+
+          winston.info('Updated legacy inventory for wastage', {
+            wastageId,
+            materialId: wastage.materialId,
+            inventoryId: inventoryRecord.id,
+            deductedQuantity: deductAmount,
+            previousQuantity: inventoryRecord.quantity
+          });
+        } else {
+          winston.warn('No legacy inventory record found for wastage', {
+            wastageId,
+            materialId: wastage.materialId
+          });
         }
 
         // Record financial transaction with actual COGS
@@ -488,6 +509,215 @@ class TransactionManager {
         this.db.raw('SUM(amount) as netAmount')
       )
       .first();
+  }
+
+  /**
+   * Process wastage amendment for approved wastages with differential inventory adjustment
+   *
+   * When amending an approved wastage:
+   * - If new quantity > old quantity: reduce inventory by the difference
+   * - If new quantity < old quantity: increase inventory by the difference
+   *
+   * @param {number} wastageId - Wastage ID
+   * @param {Object} updateData - New wastage data { quantity, unitCost, reason, description, etc. }
+   * @param {number} userId - User ID performing the amendment
+   * @param {string} amendmentNotes - Notes explaining the amendment
+   * @returns {Object} Amendment result
+   */
+  async processWastageAmendment(wastageId, updateData, userId, amendmentNotes = null) {
+    return await this.executeTransaction(async (trx) => {
+      // Get existing wastage
+      const existingWastage = await trx('wastages').where('id', wastageId).first();
+
+      if (!existingWastage) {
+        throw new Error('Wastage record not found');
+      }
+
+      if (existingWastage.status !== 'approved') {
+        throw new Error('Only approved wastages can be amended. Pending/rejected wastages can be updated normally.');
+      }
+
+      const oldQuantity = parseFloat(existingWastage.quantity);
+      const newQuantity = parseFloat(updateData.quantity);
+      const quantityDelta = newQuantity - oldQuantity;
+
+      // Build amendment history note
+      const amendmentTimestamp = new Date().toISOString();
+      const amendmentHistory = existingWastage.amendmentHistory
+        ? JSON.parse(existingWastage.amendmentHistory)
+        : [];
+
+      amendmentHistory.push({
+        timestamp: amendmentTimestamp,
+        previousQuantity: oldQuantity,
+        newQuantity: newQuantity,
+        previousUnitCost: parseFloat(existingWastage.unitCost),
+        newUnitCost: parseFloat(updateData.unitCost || existingWastage.unitCost),
+        amendedBy: userId,
+        notes: amendmentNotes
+      });
+
+      // Calculate new total cost
+      const unitCost = parseFloat(updateData.unitCost || existingWastage.unitCost);
+      const newTotalCost = newQuantity * unitCost;
+
+      // Prepare update data
+      const updateFields = {
+        quantity: newQuantity,
+        unitCost: unitCost,
+        totalCost: newTotalCost,
+        reason: updateData.reason || existingWastage.reason,
+        description: updateData.description || existingWastage.description,
+        location: updateData.location !== undefined ? updateData.location : existingWastage.location,
+        amendmentHistory: JSON.stringify(amendmentHistory),
+        amendmentCount: (existingWastage.amendmentCount || 0) + 1,
+        lastAmendedAt: new Date(),
+        lastAmendedBy: userId,
+        updated_at: new Date()
+      };
+
+      // Handle inventory adjustment if quantity changed
+      let inventoryAdjustment = null;
+
+      if (quantityDelta !== 0 && existingWastage.materialId) {
+        if (quantityDelta > 0) {
+          // New quantity is MORE - need to reduce additional inventory via FIFO
+          const fifoResult = await allocateFIFO(
+            trx,
+            existingWastage.materialId,
+            quantityDelta,
+            'wastage_amendment',
+            'wastage',
+            wastageId,
+            userId,
+            {}
+          );
+
+          if (fifoResult.success) {
+            inventoryAdjustment = {
+              type: 'reduction',
+              quantity: quantityDelta,
+              cogs: fifoResult.totalCOGS,
+              batchesUsed: fifoResult.batchesUsed
+            };
+
+            winston.info('Wastage amendment: additional inventory reduction via FIFO', {
+              wastageId,
+              materialId: existingWastage.materialId,
+              additionalQty: quantityDelta,
+              cogs: fifoResult.totalCOGS
+            });
+          } else {
+            throw new Error(`Insufficient inventory for amendment: ${fifoResult.error}`);
+          }
+
+        } else {
+          // New quantity is LESS - need to restore inventory
+          // We add back the difference using adjustment movement
+          const restorationQty = Math.abs(quantityDelta);
+          const movementDate = new Date().toISOString().split('T')[0];
+
+          // Find the most recent batch for this material to restore to
+          const latestBatch = await trx('inventory_batches')
+            .where('material_id', existingWastage.materialId)
+            .orderBy('purchase_date', 'desc')
+            .orderBy('id', 'desc')
+            .first();
+
+          if (latestBatch) {
+            // Restore to the latest batch
+            await trx('inventory_batches')
+              .where('id', latestBatch.id)
+              .increment('remaining_quantity', restorationQty)
+              .update({
+                is_depleted: false,
+                updated_at: new Date()
+              });
+
+            // Create restoration movement record
+            await trx('batch_movements').insert({
+              batch_id: latestBatch.id,
+              movement_type: 'adjustment',
+              quantity: restorationQty, // Positive for restoration
+              reference_type: 'wastage_amendment_restoration',
+              reference_id: wastageId,
+              movement_date: movementDate,
+              notes: `Wastage amendment restoration: ${restorationQty} units restored (original wastage qty reduced)`,
+              created_by: userId,
+              created_at: new Date()
+            });
+
+            inventoryAdjustment = {
+              type: 'restoration',
+              quantity: restorationQty,
+              batchId: latestBatch.id,
+              batchNumber: latestBatch.batch_number
+            };
+
+            winston.info('Wastage amendment: inventory restoration', {
+              wastageId,
+              materialId: existingWastage.materialId,
+              restoredQty: restorationQty,
+              toBatchId: latestBatch.id
+            });
+          } else {
+            // No existing batches - create an adjustment entry in legacy inventory if exists
+            if (existingWastage.inventoryId) {
+              await trx('inventory')
+                .where('id', existingWastage.inventoryId)
+                .increment('currentStock', restorationQty);
+
+              inventoryAdjustment = {
+                type: 'restoration_legacy',
+                quantity: restorationQty,
+                inventoryId: existingWastage.inventoryId
+              };
+            }
+          }
+        }
+      }
+
+      // Update wastage record
+      await trx('wastages').where('id', wastageId).update(updateFields);
+
+      // Record financial transaction for the amendment (difference only)
+      if (quantityDelta !== 0) {
+        const transactionAmount = quantityDelta * unitCost;
+
+        await trx('transactions').insert({
+          transactionNumber: this.generateTransactionNumber('adjustment'),
+          transactionType: 'wastage_amendment',
+          referenceId: wastageId,
+          referenceType: 'wastage',
+          materialId: existingWastage.materialId,
+          quantity: quantityDelta,
+          unitPrice: unitCost,
+          amount: transactionAmount > 0 ? -transactionAmount : Math.abs(transactionAmount), // Negative for additional loss, positive for recovery
+          transactionDate: existingWastage.wastageDate,
+          description: `Wastage Amendment - ${amendmentNotes || 'Quantity adjusted'}: ${oldQuantity} → ${newQuantity}`,
+          createdBy: userId
+        });
+      }
+
+      winston.info('Wastage amended successfully', {
+        wastageId,
+        oldQuantity,
+        newQuantity,
+        quantityDelta,
+        inventoryAdjustment,
+        amendedBy: userId
+      });
+
+      return {
+        wastageId,
+        oldQuantity,
+        newQuantity,
+        quantityDelta,
+        newTotalCost,
+        inventoryAdjustment,
+        amendmentCount: updateFields.amendmentCount
+      };
+    });
   }
 
   /**

@@ -27,7 +27,7 @@ router.get('/', requirePermission(['system:admin']), async (req, res) => {
     const backups = await backupManager.listBackups(companyId);
     
     winston.info('Backups retrieved', {
-      userId: req.user.id,
+      userId: req.user.userId,
       companyFilter: companyId,
       count: backups.length
     });
@@ -40,7 +40,7 @@ router.get('/', requirePermission(['system:admin']), async (req, res) => {
   } catch (error) {
     winston.error('Error retrieving backups', {
       error: error.message,
-      userId: req.user.id
+      userId: req.user.userId
     });
     
     res.status(500).json({
@@ -56,7 +56,7 @@ router.get('/stats', requirePermission(['system:admin']), async (req, res) => {
     const stats = await backupManager.getBackupStats();
     
     winston.info('Backup statistics retrieved', {
-      userId: req.user.id,
+      userId: req.user.userId,
       totalBackups: stats.totalBackups,
       totalSize: stats.totalSizeFormatted
     });
@@ -69,7 +69,7 @@ router.get('/stats', requirePermission(['system:admin']), async (req, res) => {
   } catch (error) {
     winston.error('Error retrieving backup statistics', {
       error: error.message,
-      userId: req.user.id
+      userId: req.user.userId
     });
     
     res.status(500).json({
@@ -100,7 +100,7 @@ router.post('/',
       const failed = Object.values(result).filter(r => !r.success).length;
       
       winston.info('Backup creation completed', {
-        userId: req.user.id,
+        userId: req.user.userId,
         companyId: companyId || 'all',
         successful,
         failed,
@@ -123,7 +123,7 @@ router.post('/',
     } catch (error) {
       winston.error('Error creating backup', {
         error: error.message,
-        userId: req.user.id,
+        userId: req.user.userId,
         companyId: req.body.companyId
       });
       
@@ -145,7 +145,7 @@ router.post('/restore',
       
       // Warning: This is a destructive operation
       winston.warn('Database restore initiated', {
-        userId: req.user.id,
+        userId: req.user.userId,
         companyId,
         backupFilename,
         userEmail: req.user.email
@@ -154,7 +154,7 @@ router.post('/restore',
       const result = await backupManager.restoreBackup(companyId, backupFilename);
       
       winston.info('Database restore completed', {
-        userId: req.user.id,
+        userId: req.user.userId,
         companyId,
         backupFilename,
         restoredAt: result.restoredAt
@@ -169,7 +169,7 @@ router.post('/restore',
     } catch (error) {
       winston.error('Error restoring database', {
         error: error.message,
-        userId: req.user.id,
+        userId: req.user.userId,
         companyId: req.body.companyId,
         backupFilename: req.body.backupFilename
       });
@@ -204,7 +204,7 @@ router.delete('/:filename', requirePermission(['system:admin']), async (req, res
     await fs.unlink(backupPath);
     
     winston.info('Backup file deleted', {
-      userId: req.user.id,
+      userId: req.user.userId,
       filename,
       path: backupPath
     });
@@ -217,7 +217,7 @@ router.delete('/:filename', requirePermission(['system:admin']), async (req, res
   } catch (error) {
     winston.error('Error deleting backup', {
       error: error.message,
-      userId: req.user.id,
+      userId: req.user.userId,
       filename: req.params.filename
     });
     
@@ -241,7 +241,7 @@ router.post('/cleanup', requirePermission(['system:admin']), async (req, res) =>
     const result = await backupManager.cleanupOldBackups();
     
     winston.info('Backup cleanup completed', {
-      userId: req.user.id,
+      userId: req.user.userId,
       deletedCount: result.deleted
     });
     
@@ -254,7 +254,7 @@ router.post('/cleanup', requirePermission(['system:admin']), async (req, res) =>
   } catch (error) {
     winston.error('Error during backup cleanup', {
       error: error.message,
-      userId: req.user.id
+      userId: req.user.userId
     });
     
     res.status(500).json({
@@ -270,7 +270,7 @@ router.get('/test', requirePermission(['system:admin']), async (req, res) => {
     const result = await backupManager.testBackupSystem();
     
     winston.info('Backup system test completed', {
-      userId: req.user.id,
+      userId: req.user.userId,
       success: result.success
     });
     
@@ -291,7 +291,7 @@ router.get('/test', requirePermission(['system:admin']), async (req, res) => {
   } catch (error) {
     winston.error('Error testing backup system', {
       error: error.message,
-      userId: req.user.id
+      userId: req.user.userId
     });
     
     res.status(500).json({

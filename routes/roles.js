@@ -364,7 +364,7 @@ router.post('/', requirePermission('MANAGE_ROLES'), async (req, res) => {
       is_system: false,
       is_active: true,
       color,
-      created_by: req.user.id,
+      created_by: req.user.userId,
       created_at: new Date(),
       updated_at: new Date()
     });
@@ -374,7 +374,7 @@ router.post('/', requirePermission('MANAGE_ROLES'), async (req, res) => {
 
     // Audit log
     await logAudit(db, {
-      actorId: req.user.id,
+      actorId: req.user.userId,
       actorEmail: req.user.email,
       action: 'role.created',
       resourceType: 'role',
@@ -536,7 +536,7 @@ router.put('/:id', requirePermission('MANAGE_ROLES'), async (req, res) => {
     };
 
     await logAudit(db, {
-      actorId: req.user.id,
+      actorId: req.user.userId,
       actorEmail: req.user.email,
       action: 'role.updated',
       resourceType: 'role',
@@ -628,7 +628,7 @@ router.delete('/:id', requirePermission('MANAGE_ROLES'), async (req, res) => {
 
     // Audit log
     await logAudit(db, {
-      actorId: req.user.id,
+      actorId: req.user.userId,
       actorEmail: req.user.email,
       action: 'role.deleted',
       resourceType: 'role',
@@ -713,7 +713,7 @@ router.post('/:id/clone', requirePermission('MANAGE_ROLES'), async (req, res) =>
       is_system: false,
       is_active: true,
       color: sourceRole.color,
-      created_by: req.user.id,
+      created_by: req.user.userId,
       created_at: new Date(),
       updated_at: new Date()
     });
@@ -723,7 +723,7 @@ router.post('/:id/clone', requirePermission('MANAGE_ROLES'), async (req, res) =>
 
     // Audit log
     await logAudit(db, {
-      actorId: req.user.id,
+      actorId: req.user.userId,
       actorEmail: req.user.email,
       action: 'role.cloned',
       resourceType: 'role',

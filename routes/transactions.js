@@ -129,7 +129,7 @@ router.get('/', requireAnyPermission(['VIEW_FINANCIALS', 'VIEW_INVENTORY']), asy
     
     winston.info('Transactions retrieved', {
       companyId: req.user.companyId,
-      userId: req.user.id,
+      userId: req.user.userId,
       count: transactions.length,
       totalCount: count
     });
@@ -149,7 +149,7 @@ router.get('/', requireAnyPermission(['VIEW_FINANCIALS', 'VIEW_INVENTORY']), asy
     winston.error('Error fetching transactions', {
       error: error.message,
       companyId: req.user.companyId,
-      userId: req.user.id
+      userId: req.user.userId
     });
     
     res.status(500).json({
@@ -231,7 +231,7 @@ router.get('/:id', requirePermission(['VIEW_FINANCIALS']), async (req, res) => {
     winston.info('Transaction retrieved', {
       transactionId: id,
       companyId: req.user.companyId,
-      userId: req.user.id
+      userId: req.user.userId
     });
     
     res.json({
@@ -244,7 +244,7 @@ router.get('/:id', requirePermission(['VIEW_FINANCIALS']), async (req, res) => {
       error: error.message,
       transactionId: req.params.id,
       companyId: req.user.companyId,
-      userId: req.user.id
+      userId: req.user.userId
     });
     
     res.status(500).json({
@@ -310,7 +310,7 @@ router.post('/',
         transactionDate: transactionData.transactionDate,
         description: transactionData.description || null,
         notes: transactionData.notes || null,
-        createdBy: req.user.id
+        createdBy: req.user.userId
       };
       
       const [id] = await db('transactions').insert(newTransaction);
@@ -321,7 +321,7 @@ router.post('/',
         type: transactionData.transactionType,
         amount: transactionData.amount,
         companyId: req.user.companyId,
-        userId: req.user.id
+        userId: req.user.userId
       });
       
       res.status(201).json({
@@ -334,7 +334,7 @@ router.post('/',
       winston.error('Error creating transaction', {
         error: error.message,
         companyId: req.user.companyId,
-        userId: req.user.id
+        userId: req.user.userId
       });
       
       if (error.code === 'ER_DUP_ENTRY') {
@@ -381,7 +381,7 @@ router.post('/bulk',
             transactionDate: transactionData.transactionDate,
             description: transactionData.description || null,
             notes: transactionData.notes || null,
-            createdBy: req.user.id
+            createdBy: req.user.userId
           };
           
           const [id] = await trx('transactions').insert(newTransaction);
@@ -394,7 +394,7 @@ router.post('/bulk',
       winston.info('Bulk transactions created', {
         count: results.length,
         companyId: req.user.companyId,
-        userId: req.user.id
+        userId: req.user.userId
       });
       
       res.status(201).json({
@@ -407,7 +407,7 @@ router.post('/bulk',
       winston.error('Error creating bulk transactions', {
         error: error.message,
         companyId: req.user.companyId,
-        userId: req.user.id
+        userId: req.user.userId
       });
       
       res.status(500).json({
@@ -496,7 +496,7 @@ router.get('/analytics/summary', requirePermission(['VIEW_FINANCIALS']), async (
     
     winston.info('Transaction analytics retrieved', {
       companyId: req.user.companyId,
-      userId: req.user.id
+      userId: req.user.userId
     });
     
     res.json({
@@ -514,7 +514,7 @@ router.get('/analytics/summary', requirePermission(['VIEW_FINANCIALS']), async (
     winston.error('Error fetching transaction analytics', {
       error: error.message,
       companyId: req.user.companyId,
-      userId: req.user.id
+      userId: req.user.userId
     });
     
     res.status(500).json({
@@ -573,7 +573,7 @@ router.get('/balance-sheet', requirePermission(['VIEW_FINANCIALS']), async (req,
     
     winston.info('Balance sheet retrieved', {
       companyId: req.user.companyId,
-      userId: req.user.id,
+      userId: req.user.userId,
       totalIncome,
       totalExpenses,
       netProfit
@@ -603,7 +603,7 @@ router.get('/balance-sheet', requirePermission(['VIEW_FINANCIALS']), async (req,
     winston.error('Error fetching balance sheet', {
       error: error.message,
       companyId: req.user.companyId,
-      userId: req.user.id
+      userId: req.user.userId
     });
     
     res.status(500).json({
