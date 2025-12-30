@@ -278,6 +278,7 @@ module.exports = {
   validateQrToken,
   recordFailedAttempt,
   clearFailedAttempts,
+  getDbConnectionByCompanyId, // Re-export for convenience
   PC_JWT_SECRET,
   PC_JWT_EXPIRES_IN,
   MAX_FAILED_ATTEMPTS,

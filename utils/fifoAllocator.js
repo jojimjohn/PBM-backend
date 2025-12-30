@@ -33,9 +33,25 @@ async function allocateFIFO(trx, materialId, quantity, movementType, referenceTy
       .orderBy('purchase_date', 'asc')
       .orderBy('id', 'asc'); // Secondary sort by ID for consistency
 
-    // Optionally filter by branch
+    // Apply branch filter only if branchId is specified AND branch-specific batches exist
+    // Note: Many existing batches may have NULL branch_id, so we need to handle this carefully
     if (branchId) {
-      batchQuery = batchQuery.where('branch_id', branchId);
+      // Check if any batches exist for this branch
+      const branchBatches = await trx('inventory_batches')
+        .where('material_id', materialId)
+        .where('branch_id', branchId)
+        .where('is_depleted', 0)
+        .where('remaining_quantity', '>', 0)
+        .first();
+
+      // Only filter by branch if there are branch-specific batches
+      // Otherwise, fall back to all available batches (for backwards compatibility)
+      if (branchBatches) {
+        batchQuery = batchQuery.where('branch_id', branchId);
+        logger.debug('allocateFIFO: filtering by branch_id', { branchId });
+      } else {
+        logger.debug('allocateFIFO: no branch-specific batches found, using all available batches', { branchId });
+      }
     }
 
     const batches = await batchQuery;
@@ -168,17 +184,50 @@ async function allocateFIFO(trx, materialId, quantity, movementType, referenceTy
 async function previewFIFO(db, materialId, quantity, options = {}) {
   const { branchId } = options;
 
+  // Log the query parameters for debugging
+  logger.debug('previewFIFO called', {
+    materialId,
+    materialIdType: typeof materialId,
+    quantity,
+    branchId: branchId || 'none'
+  });
+
+  // Build base query
   let batchQuery = db('inventory_batches')
-    .where({ material_id: materialId, is_depleted: 0 })
+    .where('material_id', materialId)
+    .where('is_depleted', 0)
     .where('remaining_quantity', '>', 0)
     .orderBy('purchase_date', 'asc')
     .orderBy('id', 'asc');
 
+  // Apply branch filter only if branchId is specified
+  // Note: Many existing batches may have NULL branch_id, so we need to handle this carefully
   if (branchId) {
-    batchQuery = batchQuery.where('branch_id', branchId);
+    // Check if any batches exist for this branch
+    const branchBatches = await db('inventory_batches')
+      .where('material_id', materialId)
+      .where('branch_id', branchId)
+      .where('is_depleted', 0)
+      .where('remaining_quantity', '>', 0)
+      .first();
+
+    // Only filter by branch if there are branch-specific batches
+    // Otherwise, fall back to all available batches (for backwards compatibility)
+    if (branchBatches) {
+      batchQuery = batchQuery.where('branch_id', branchId);
+      logger.debug('previewFIFO: filtering by branch_id', { branchId });
+    } else {
+      logger.debug('previewFIFO: no branch-specific batches found, using all available batches', { branchId });
+    }
   }
 
   const batches = await batchQuery;
+
+  logger.debug('previewFIFO batches found', {
+    materialId,
+    batchCount: batches.length,
+    batches: batches.map(b => ({ id: b.id, remaining: b.remaining_quantity }))
+  });
 
   let remaining = parseFloat(quantity);
   const allocations = [];

@@ -5,6 +5,19 @@ const { requirePermission } = require('../middleware/auth');
 const { validate } = require('../middleware/validation');
 const Joi = require('joi');
 const winston = require('winston');
+const {
+  logInitialBalance,
+  logReload,
+  logAdjustment,
+  logDeduction,
+  getCardTransactionHistory,
+} = require('../utils/pettyCashTransactions');
+const {
+  verifyCardBalance,
+  verifyAllCardBalances,
+  recalculateAndFixBalance,
+  getCardAuditTrail
+} = require('../utils/pettyCashBalanceVerifier');
 
 // Validation schemas
 // Note: assignedTo/staffName are now optional - petty cash users are managed separately via /petty-cash-users
@@ -28,6 +41,13 @@ const updateCardSchema = pettyCashCardSchema.fork(
 const statusUpdateSchema = Joi.object({
   status: Joi.string().valid('active', 'suspended', 'expired', 'closed').required(),
   notes: Joi.string().max(1000).optional()
+});
+
+const deactivateCardSchema = Joi.object({
+  reason: Joi.string().min(5).max(500).required().messages({
+    'string.min': 'Deactivation reason must be at least 5 characters',
+    'any.required': 'Deactivation reason is required'
+  })
 });
 
 const balanceUpdateSchema = Joi.object({
@@ -282,7 +302,18 @@ router.post('/',
       };
 
       const [id] = await db('petty_cash_cards').insert(newCard);
-      
+
+      // Log initial balance transaction (if balance > 0)
+      if (cardData.initialBalance > 0) {
+        await logInitialBalance(
+          db,
+          id,
+          cardData.initialBalance,
+          req.user.userId,
+          req.user.companyId
+        );
+      }
+
       winston.info('Petty cash card created', {
         cardId: id,
         cardNumber,
@@ -291,7 +322,7 @@ router.post('/',
         companyId: req.user.companyId,
         userId: req.user.userId
       });
-      
+
       res.status(201).json({
         success: true,
         data: { id, ...newCard },
@@ -500,7 +531,32 @@ router.post('/:id/balance',
         currentBalance: newBalance,
         updated_at: new Date()
       });
-      
+
+      // Log the transaction
+      if (type === 'add') {
+        await logAdjustment(
+          db,
+          id,
+          parseFloat(amount),
+          currentBalance,
+          newBalance,
+          req.user.userId,
+          req.user.companyId,
+          notes
+        );
+      } else {
+        await logDeduction(
+          db,
+          id,
+          parseFloat(amount),
+          currentBalance,
+          newBalance,
+          req.user.userId,
+          req.user.companyId,
+          notes
+        );
+      }
+
       winston.info('Petty cash card balance updated', {
         cardId: id,
         type,
@@ -576,6 +632,18 @@ router.post('/:id/reload',
         currentBalance: newBalance,
         updated_at: new Date()
       });
+
+      // Log the reload transaction
+      await logReload(
+        db,
+        parseInt(id),
+        parseFloat(amount),
+        oldBalance,
+        newBalance,
+        req.user.userId,
+        req.user.companyId,
+        notes
+      );
 
       // If bank account is specified, create a bank transaction (withdrawal for petty cash reload)
       if (bankAccountId) {
@@ -811,6 +879,357 @@ router.delete('/:id', requirePermission('MANAGE_PETTY_CASH'), async (req, res) =
       userId: req.user.userId
     });
     
+    res.status(500).json({
+      success: false,
+      error: 'Internal server error'
+    });
+  }
+});
+
+// GET /petty-cash-cards/:id/transactions - Get card transaction history
+router.get('/:id/transactions', requirePermission('VIEW_PETTY_CASH'), async (req, res) => {
+  try {
+    const db = getDbConnection(req.user.companyId);
+    const { id } = req.params;
+    const { page = 1, limit = 50, type, dateFrom, dateTo } = req.query;
+
+    // Check if card exists
+    const existingCard = await db('petty_cash_cards').where('id', id).first();
+
+    if (!existingCard) {
+      return res.status(404).json({
+        success: false,
+        error: 'Petty cash card not found'
+      });
+    }
+
+    // Get transaction history
+    const result = await getCardTransactionHistory(db, id, {
+      page: parseInt(page),
+      limit: parseInt(limit),
+      transactionType: type,
+      dateFrom,
+      dateTo,
+    });
+
+    winston.info('Petty cash card transactions retrieved', {
+      cardId: id,
+      transactionCount: result.transactions.length,
+      companyId: req.user.companyId,
+      userId: req.user.userId
+    });
+
+    res.json({
+      success: true,
+      data: result.transactions,
+      pagination: result.pagination
+    });
+
+  } catch (error) {
+    winston.error('Error fetching card transactions', {
+      error: error.message,
+      cardId: req.params.id,
+      companyId: req.user.companyId
+    });
+
+    res.status(500).json({
+      success: false,
+      error: 'Internal server error'
+    });
+  }
+});
+
+// POST /petty-cash-cards/:id/deactivate - Deactivate card with reason
+router.post('/:id/deactivate',
+  requirePermission('MANAGE_PETTY_CASH'),
+  validate(deactivateCardSchema),
+  async (req, res) => {
+    try {
+      const db = getDbConnection(req.user.companyId);
+      const { id } = req.params;
+      const { reason } = req.body;
+
+      // Check if card exists
+      const existingCard = await db('petty_cash_cards').where('id', id).first();
+
+      if (!existingCard) {
+        return res.status(404).json({
+          success: false,
+          error: 'Petty cash card not found'
+        });
+      }
+
+      if (existingCard.status === 'closed') {
+        return res.status(400).json({
+          success: false,
+          error: 'Card is already closed'
+        });
+      }
+
+      // Update card status with deactivation details
+      await db('petty_cash_cards').where('id', id).update({
+        status: 'suspended',
+        deactivation_reason: reason,
+        deactivated_at: new Date(),
+        deactivated_by: req.user.userId,
+        updated_at: new Date()
+      });
+
+      // Also deactivate any linked petty cash user
+      await db('petty_cash_users')
+        .where('card_id', id)
+        .update({
+          is_active: false,
+          deactivation_reason: `Card deactivated: ${reason}`,
+          deactivated_at: new Date(),
+          deactivated_by: req.user.userId,
+          updated_at: new Date()
+        });
+
+      winston.info('Petty cash card deactivated with reason', {
+        cardId: id,
+        reason,
+        previousStatus: existingCard.status,
+        companyId: req.user.companyId,
+        userId: req.user.userId
+      });
+
+      res.json({
+        success: true,
+        message: 'Card deactivated successfully',
+        data: {
+          cardId: id,
+          status: 'suspended',
+          reason,
+          deactivatedAt: new Date()
+        }
+      });
+
+    } catch (error) {
+      winston.error('Error deactivating card', {
+        error: error.message,
+        cardId: req.params.id,
+        companyId: req.user.companyId
+      });
+
+      res.status(500).json({
+        success: false,
+        error: 'Internal server error'
+      });
+    }
+  }
+);
+
+// POST /petty-cash-cards/:id/reactivate - Reactivate a deactivated card
+router.post('/:id/reactivate', requirePermission('MANAGE_PETTY_CASH'), async (req, res) => {
+  try {
+    const db = getDbConnection(req.user.companyId);
+    const { id } = req.params;
+
+    // Check if card exists
+    const existingCard = await db('petty_cash_cards').where('id', id).first();
+
+    if (!existingCard) {
+      return res.status(404).json({
+        success: false,
+        error: 'Petty cash card not found'
+      });
+    }
+
+    if (existingCard.status === 'active') {
+      return res.status(400).json({
+        success: false,
+        error: 'Card is already active'
+      });
+    }
+
+    if (existingCard.status === 'closed') {
+      return res.status(400).json({
+        success: false,
+        error: 'Closed cards cannot be reactivated. Create a new card instead.'
+      });
+    }
+
+    // Reactivate the card
+    await db('petty_cash_cards').where('id', id).update({
+      status: 'active',
+      deactivation_reason: null,
+      deactivated_at: null,
+      deactivated_by: null,
+      updated_at: new Date()
+    });
+
+    // Also reactivate any linked petty cash user
+    await db('petty_cash_users')
+      .where('card_id', id)
+      .update({
+        is_active: true,
+        deactivation_reason: null,
+        deactivated_at: null,
+        deactivated_by: null,
+        failed_attempts: 0,
+        locked_until: null,
+        updated_at: new Date()
+      });
+
+    winston.info('Petty cash card reactivated', {
+      cardId: id,
+      previousStatus: existingCard.status,
+      companyId: req.user.companyId,
+      userId: req.user.userId
+    });
+
+    res.json({
+      success: true,
+      message: 'Card reactivated successfully'
+    });
+
+  } catch (error) {
+    winston.error('Error reactivating card', {
+      error: error.message,
+      cardId: req.params.id,
+      companyId: req.user.companyId
+    });
+
+    res.status(500).json({
+      success: false,
+      error: 'Internal server error'
+    });
+  }
+});
+
+// ============================================
+// BALANCE VERIFICATION ENDPOINTS
+// ============================================
+
+// GET /petty-cash-cards/:id/verify-balance - Verify single card balance
+router.get('/:id/verify-balance', requirePermission('MANAGE_PETTY_CASH'), async (req, res) => {
+  try {
+    const db = getDbConnection(req.user.companyId);
+    const { id } = req.params;
+
+    const result = await verifyCardBalance(db, id);
+
+    if (!result.success) {
+      return res.status(404).json({
+        success: false,
+        error: result.error
+      });
+    }
+
+    res.json({
+      success: true,
+      data: result
+    });
+
+  } catch (error) {
+    winston.error('Error verifying card balance', {
+      error: error.message,
+      cardId: req.params.id,
+      companyId: req.user.companyId
+    });
+
+    res.status(500).json({
+      success: false,
+      error: 'Internal server error'
+    });
+  }
+});
+
+// GET /petty-cash-cards/verify-all-balances - Verify all card balances
+router.get('/verify-all-balances', requirePermission('MANAGE_PETTY_CASH'), async (req, res) => {
+  try {
+    const db = getDbConnection(req.user.companyId);
+
+    const result = await verifyAllCardBalances(db);
+
+    winston.info('All card balances verified', {
+      companyId: req.user.companyId,
+      userId: req.user.userId,
+      totalCards: result.totalCards,
+      validCards: result.validCards,
+      invalidCards: result.invalidCards
+    });
+
+    res.json({
+      success: true,
+      data: result
+    });
+
+  } catch (error) {
+    winston.error('Error verifying all card balances', {
+      error: error.message,
+      companyId: req.user.companyId
+    });
+
+    res.status(500).json({
+      success: false,
+      error: 'Internal server error'
+    });
+  }
+});
+
+// POST /petty-cash-cards/:id/fix-balance - Recalculate and fix card balance
+router.post('/:id/fix-balance', requirePermission('MANAGE_PETTY_CASH'), async (req, res) => {
+  try {
+    const db = getDbConnection(req.user.companyId);
+    const { id } = req.params;
+
+    const result = await recalculateAndFixBalance(db, id, req.user.userId);
+
+    winston.info('Card balance fixed', {
+      cardId: id,
+      companyId: req.user.companyId,
+      userId: req.user.userId,
+      result
+    });
+
+    res.json({
+      success: true,
+      data: result
+    });
+
+  } catch (error) {
+    winston.error('Error fixing card balance', {
+      error: error.message,
+      cardId: req.params.id,
+      companyId: req.user.companyId
+    });
+
+    res.status(500).json({
+      success: false,
+      error: error.message || 'Internal server error'
+    });
+  }
+});
+
+// GET /petty-cash-cards/:id/audit-trail - Get detailed audit trail for a card
+router.get('/:id/audit-trail', requirePermission('MANAGE_PETTY_CASH'), async (req, res) => {
+  try {
+    const db = getDbConnection(req.user.companyId);
+    const { id } = req.params;
+
+    const result = await getCardAuditTrail(db, id);
+
+    if (!result.success) {
+      return res.status(404).json({
+        success: false,
+        error: result.error
+      });
+    }
+
+    res.json({
+      success: true,
+      data: result
+    });
+
+  } catch (error) {
+    winston.error('Error getting card audit trail', {
+      error: error.message,
+      cardId: req.params.id,
+      companyId: req.user.companyId
+    });
+
     res.status(500).json({
       success: false,
       error: 'Internal server error'

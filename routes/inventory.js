@@ -369,6 +369,100 @@ router.get('/material/:materialId/stock',
   }
 );
 
+// GET /api/inventory/batch-stock/:materialId - Get stock from inventory_batches (FIFO source)
+// This endpoint provides accurate real-time stock for sales order forms
+router.get('/batch-stock/:materialId',
+  validateParams(Joi.object({ materialId: Joi.number().integer().positive().required() })),
+  requirePermission('VIEW_INVENTORY'),
+  async (req, res) => {
+    try {
+      const { materialId } = req.params;
+      const { companyId } = req.user;
+      const db = getDbConnection(companyId);
+
+      // Get material details
+      const material = await db('materials')
+        .where({ id: materialId, isActive: true })
+        .first();
+
+      if (!material) {
+        return res.status(404).json({
+          success: false,
+          error: 'Material not found'
+        });
+      }
+
+      // Get available stock from inventory_batches (excludes depleted batches)
+      const batchStock = await db('inventory_batches')
+        .select(
+          db.raw('SUM(remaining_quantity) as totalRemaining'),
+          db.raw('COUNT(CASE WHEN is_depleted = false THEN 1 END) as activeBatchCount'),
+          db.raw('MIN(purchase_date) as oldestBatchDate'),
+          db.raw('AVG(unit_cost) as weightedAvgCost')
+        )
+        .where({ material_id: materialId, is_depleted: false })
+        .first();
+
+      // Get reserved quantity from inventory table for this material
+      const inventoryReserved = await db('inventory')
+        .select(db.raw('COALESCE(SUM(reservedQuantity), 0) as totalReserved'))
+        .where({ materialId, isActive: true })
+        .first();
+
+      const totalRemaining = parseFloat(batchStock?.totalRemaining || 0);
+      const reservedQuantity = parseFloat(inventoryReserved?.totalReserved || 0);
+      const availableQuantity = Math.max(0, totalRemaining - reservedQuantity);
+
+      // Determine stock status
+      let stockStatus = 'in-stock';
+      if (availableQuantity <= 0) {
+        stockStatus = 'out-of-stock';
+      } else if (availableQuantity <= 10) { // Low stock threshold
+        stockStatus = 'low-stock';
+      }
+
+      const result = {
+        materialId: parseInt(materialId),
+        materialName: material.name,
+        materialCode: material.code,
+        category: material.category,
+        unit: material.unit,
+        standardPrice: parseFloat(material.standardPrice || 0),
+        totalRemaining: totalRemaining,
+        reservedQuantity: reservedQuantity,
+        availableQuantity: availableQuantity,
+        activeBatchCount: parseInt(batchStock?.activeBatchCount || 0),
+        oldestBatchDate: batchStock?.oldestBatchDate || null,
+        weightedAvgCost: parseFloat(batchStock?.weightedAvgCost || 0),
+        stockStatus,
+        source: 'inventory_batches' // Indicates this is from FIFO batch system
+      };
+
+      auditLog('BATCH_STOCK_VIEWED', req.user.userId, {
+        materialId,
+        materialName: material.name,
+        availableQuantity: result.availableQuantity
+      });
+
+      res.json({
+        success: true,
+        data: result
+      });
+
+    } catch (error) {
+      logger.error('Error fetching batch stock', {
+        error: error.message,
+        materialId: req.params.materialId,
+        userId: req.user.userId
+      });
+      res.status(500).json({
+        success: false,
+        error: 'Failed to fetch batch stock'
+      });
+    }
+  }
+);
+
 // GET /api/inventory/movements - Get stock movements timeline
 router.get('/movements', requirePermission('VIEW_INVENTORY'), async (req, res) => {
   try {

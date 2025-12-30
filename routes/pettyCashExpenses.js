@@ -5,6 +5,10 @@ const { requirePermission } = require('../middleware/auth');
 const { validate } = require('../middleware/validation');
 const Joi = require('joi');
 const winston = require('winston');
+const {
+  logExpenseSubmission,
+  logExpenseRejection,
+} = require('../utils/pettyCashTransactions');
 
 // Validation schemas
 const expenseSchema = Joi.object({
@@ -293,23 +297,48 @@ router.post('/',
         submitted_by_pc_user: pcUserId,
         notes: expenseData.notes || null
       };
-      
-      const [id] = await db('petty_cash_expenses').insert(newExpense);
-      
-      winston.info('Petty cash expense created', {
-        expenseId: id,
+
+      // Use transaction to ensure atomic balance deduction + expense creation
+      // This prevents double-spending by immediately reserving the amount
+      const result = await db.transaction(async (trx) => {
+        // 1. Create the expense record
+        const [id] = await trx('petty_cash_expenses').insert(newExpense);
+
+        // 2. Immediately deduct balance from card (reserve the amount)
+        // This prevents users from submitting expenses exceeding their balance
+        await trx('petty_cash_cards')
+          .where('id', expenseData.cardId)
+          .update({
+            currentBalance: trx.raw('currentBalance - ?', [requestedAmount])
+          });
+
+        // 3. Log the expense submission transaction
+        await logExpenseSubmission(trx, expenseData.cardId, id, requestedAmount, {
+          cardBalance: cardBalance,
+          description: `${expenseData.category}: ${expenseData.description}`,
+          pcUserId: pcUserId,
+          performedBy: req.user.userId
+        });
+
+        return { id, newBalance: cardBalance - requestedAmount };
+      });
+
+      winston.info('Petty cash expense created with immediate balance deduction', {
+        expenseId: result.id,
         expenseNumber,
         cardId: expenseData.cardId,
         amount: expenseData.amount,
+        previousBalance: cardBalance,
+        newBalance: result.newBalance,
         category: expenseData.category,
         companyId: req.user.companyId,
         userId: req.user.userId
       });
-      
+
       res.status(201).json({
         success: true,
-        data: { id, ...newExpense },
-        message: 'Expense submitted successfully and is pending approval'
+        data: { id: result.id, ...newExpense, newCardBalance: result.newBalance },
+        message: 'Expense submitted successfully. Balance has been reserved pending approval.'
       });
       
     } catch (error) {

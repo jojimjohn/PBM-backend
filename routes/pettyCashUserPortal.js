@@ -427,6 +427,8 @@ router.post('/expenses', requirePcAuth, async (req, res) => {
     const expenseNumber = generateExpenseNumber(req.pcUser.companyId);
 
     // Create expense
+    // Use the card's assignedTo user as submittedBy since DB requires NOT NULL
+    // The actual submitter is tracked via submitted_by_pc_user
     const newExpense = {
       expenseNumber,
       cardId: req.pcUser.cardId,
@@ -439,7 +441,7 @@ router.post('/expenses', requirePcAuth, async (req, res) => {
       notes: notes || null,
       status: 'pending',
       submitted_by_pc_user: req.pcUser.id,
-      submittedBy: null, // Not a system user
+      submittedBy: card.assignedTo, // Use card owner as system user reference
     };
 
     const [id] = await db('petty_cash_expenses').insert(newExpense);

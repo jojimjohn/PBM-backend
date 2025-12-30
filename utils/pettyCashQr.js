@@ -17,9 +17,27 @@
 const crypto = require('crypto');
 const QRCode = require('qrcode');
 
-// Get portal base URL from environment (defaults to localhost for dev)
-const getPortalBaseUrl = () => {
-  return process.env.PETTY_CASH_PORTAL_URL || process.env.FRONTEND_URL || 'http://localhost:3000';
+// Get portal base URL from environment or request origin
+// Priority: Explicit env var > Request origin > Default localhost
+const getPortalBaseUrl = (requestOrigin = null) => {
+  // If explicit portal URL is set, always use it
+  if (process.env.PETTY_CASH_PORTAL_URL) {
+    return process.env.PETTY_CASH_PORTAL_URL;
+  }
+
+  // If FRONTEND_URL is set, use it
+  if (process.env.FRONTEND_URL) {
+    return process.env.FRONTEND_URL;
+  }
+
+  // If we have a request origin (from where the admin is accessing), use that
+  // This handles dynamic port scenarios during development
+  if (requestOrigin) {
+    return requestOrigin;
+  }
+
+  // Default fallback
+  return 'http://localhost:3000';
 };
 
 /**
@@ -39,10 +57,11 @@ const generateQrToken = () => {
  * @param {string} qrToken - The unique token for this user
  * @param {string} companyId - Company identifier (for URL routing)
  * @param {object} options - QR code generation options
+ * @param {string} options.requestOrigin - Optional origin from the request to use as base URL
  * @returns {Promise<string>} Data URL of the QR code image
  */
 const generateQRCodeDataUrl = async (qrToken, companyId, options = {}) => {
-  const portalUrl = getPortalBaseUrl();
+  const portalUrl = getPortalBaseUrl(options.requestOrigin);
 
   // URL format: /pc-portal?token=xxx&company=yyy
   // Company is included to help with multi-tenant routing
@@ -73,10 +92,11 @@ const generateQRCodeDataUrl = async (qrToken, companyId, options = {}) => {
  * @param {string} qrToken - The unique token for this user
  * @param {string} companyId - Company identifier
  * @param {object} options - QR code generation options
+ * @param {string} options.requestOrigin - Optional origin from the request to use as base URL
  * @returns {Promise<Buffer>} PNG buffer of the QR code
  */
 const generateQRCodeBuffer = async (qrToken, companyId, options = {}) => {
-  const portalUrl = getPortalBaseUrl();
+  const portalUrl = getPortalBaseUrl(options.requestOrigin);
   const url = `${portalUrl}/pc-portal?token=${qrToken}&company=${encodeURIComponent(companyId)}`;
 
   const qrOptions = {
@@ -104,10 +124,11 @@ const generateQRCodeBuffer = async (qrToken, companyId, options = {}) => {
  *
  * @param {string} qrToken - The unique token
  * @param {string} companyId - Company identifier
+ * @param {string} requestOrigin - Optional origin from the request to use as base URL
  * @returns {string} The full portal URL
  */
-const getPortalUrl = (qrToken, companyId) => {
-  const portalUrl = getPortalBaseUrl();
+const getPortalUrl = (qrToken, companyId, requestOrigin = null) => {
+  const portalUrl = getPortalBaseUrl(requestOrigin);
   return `${portalUrl}/pc-portal?token=${qrToken}&company=${encodeURIComponent(companyId)}`;
 };
 

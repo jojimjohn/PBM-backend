@@ -3,7 +3,7 @@ const { validate, validateParams, sanitize } = require('../middleware/validation
 const { requirePermission } = require('../middleware/auth');
 const { logger, auditLog } = require('../utils/logger');
 const { getDbConnection } = require('../config/database');
-const { allocateFIFO } = require('../utils/fifoAllocator');
+const { allocateFIFO, previewFIFO, reverseFIFOAllocation } = require('../utils/fifoAllocator');
 const Joi = require('joi');
 
 const router = express.Router();
@@ -116,6 +116,149 @@ function convertDecimalFields(data) {
 
   return Array.isArray(data) ? data.map(convertObject) : convertObject(data);
 }
+
+// FIFO preview validation schema
+const fifoPreviewSchema = Joi.object({
+  items: Joi.array().items(Joi.object({
+    materialId: Joi.number().integer().positive().required(),
+    quantity: Joi.number().min(0.001).precision(3).required(),
+    unitPrice: Joi.number().min(0).precision(3).optional() // For gross margin calculation
+  })).min(1).required(),
+  branchId: Joi.number().integer().positive().optional()
+});
+
+// POST /api/sales-orders/preview-fifo - Preview FIFO allocation before confirmation
+// Returns batch allocation breakdown, COGS, and gross margin for each item
+router.post('/preview-fifo',
+  validate(fifoPreviewSchema),
+  requirePermission('VIEW_SALES'),
+  async (req, res) => {
+    try {
+      const { companyId } = req.user;
+      const db = getDbConnection(companyId);
+      const { items, branchId } = req.body;
+
+      logger.debug('FIFO preview requested', {
+        userId: req.user.userId,
+        companyId,
+        itemCount: items.length,
+        branchId: branchId || 'none'
+      });
+
+      const previews = [];
+      let totalCOGS = 0;
+      let totalRevenue = 0;
+      let allCanFulfill = true;
+      const insufficientItems = [];
+
+      for (const item of items) {
+        // Ensure materialId is an integer
+        const materialId = parseInt(item.materialId, 10);
+
+        // Get material details
+        const material = await db('materials')
+          .where({ id: materialId })
+          .first();
+
+        if (!material) {
+          return res.status(400).json({
+            success: false,
+            error: `Material with ID ${materialId} not found`
+          });
+        }
+
+        // Preview FIFO allocation for this item
+        const preview = await previewFIFO(db, materialId, item.quantity, { branchId });
+
+        logger.debug('FIFO preview result for material', {
+          materialId,
+          materialName: material.name,
+          canFulfill: preview.canFulfill,
+          totalAvailable: preview.totalAvailable,
+          allocationsCount: preview.allocations?.length || 0
+        });
+
+        // Calculate revenue if unit price provided
+        const itemRevenue = item.unitPrice ? item.unitPrice * item.quantity : 0;
+        const itemGrossMargin = item.unitPrice ? itemRevenue - preview.totalCOGS : null;
+
+        previews.push({
+          materialId: materialId,
+          materialName: material.name,
+          materialCode: material.code,
+          unit: material.unit,
+          requestedQuantity: item.quantity,
+          unitPrice: item.unitPrice || null,
+          revenue: parseFloat(itemRevenue.toFixed(3)),
+          canFulfill: preview.canFulfill,
+          totalAvailable: preview.totalAvailable,
+          shortfall: preview.shortfall,
+          cogs: preview.totalCOGS,
+          grossMargin: itemGrossMargin !== null ? parseFloat(itemGrossMargin.toFixed(3)) : null,
+          allocations: preview.allocations.map(alloc => ({
+            batchId: alloc.batchId,
+            batchNumber: alloc.batchNumber,
+            quantity: alloc.quantity,
+            unitCost: alloc.unitCost,
+            cogs: alloc.cogs,
+            purchaseDate: alloc.purchaseDate,
+            remainingAfter: alloc.remainingAfter
+          }))
+        });
+
+        totalCOGS += preview.totalCOGS;
+        totalRevenue += itemRevenue;
+
+        if (!preview.canFulfill) {
+          allCanFulfill = false;
+          insufficientItems.push({
+            materialId: item.materialId,
+            materialName: material.name,
+            requested: item.quantity,
+            available: preview.totalAvailable,
+            shortfall: preview.shortfall
+          });
+        }
+      }
+
+      const orderGrossMargin = totalRevenue - totalCOGS;
+
+      auditLog('FIFO_PREVIEW_GENERATED', req.user.userId, {
+        companyId,
+        itemCount: items.length,
+        totalCOGS: parseFloat(totalCOGS.toFixed(3)),
+        canFulfill: allCanFulfill
+      });
+
+      res.json({
+        success: true,
+        data: {
+          canFulfillAll: allCanFulfill,
+          items: previews,
+          summary: {
+            totalCOGS: parseFloat(totalCOGS.toFixed(3)),
+            totalRevenue: parseFloat(totalRevenue.toFixed(3)),
+            grossMargin: parseFloat(orderGrossMargin.toFixed(3)),
+            grossMarginPercent: totalRevenue > 0
+              ? parseFloat(((orderGrossMargin / totalRevenue) * 100).toFixed(2))
+              : 0
+          },
+          insufficientItems: insufficientItems.length > 0 ? insufficientItems : null
+        }
+      });
+
+    } catch (error) {
+      logger.error('Error generating FIFO preview', {
+        error: error.message,
+        userId: req.user.userId
+      });
+      res.status(500).json({
+        success: false,
+        error: 'Failed to generate FIFO preview'
+      });
+    }
+  }
+);
 
 // GET /api/sales-orders - List all sales orders
 router.get('/', requirePermission('VIEW_SALES'), async (req, res) => {
@@ -821,7 +964,7 @@ router.put('/:id/status',
       }
 
       const updateData = {
-        orderStatus,
+        status: orderStatus, // DB column is 'status', not 'orderStatus'
         updated_at: new Date()
       };
 
@@ -834,7 +977,8 @@ router.put('/:id/status',
         .update(updateData);
 
       // If order is confirmed, reserve inventory
-      if (orderStatus === 'confirmed' && order.orderStatus !== 'confirmed') {
+      // Note: order.status comes from DB (column name is 'status')
+      if (orderStatus === 'confirmed' && order.status !== 'confirmed') {
         const items = await db('sales_order_items')
           .where({ salesOrderId: id });
 
@@ -848,7 +992,7 @@ router.put('/:id/status',
       }
 
       // If order is delivered, reduce actual inventory using FIFO allocation
-      if (orderStatus === 'delivered' && order.orderStatus !== 'delivered') {
+      if (orderStatus === 'delivered' && order.status !== 'delivered') {
         const items = await db('sales_order_items')
           .where({ salesOrderId: id });
 
@@ -937,9 +1081,94 @@ router.put('/:id/status',
         });
       }
 
+      // Handle cancellation - reverse inventory operations
+      if (orderStatus === 'cancelled' && order.status !== 'cancelled') {
+        const items = await db('sales_order_items')
+          .where({ salesOrderId: id });
+
+        await db.transaction(async (trx) => {
+          // Case 1: Cancelling from confirmed - release reserved quantity
+          if (order.status === 'confirmed') {
+            for (const item of items) {
+              await trx('inventory')
+                .where({ materialId: item.materialId })
+                .decrement('reservedQuantity', item.quantity)
+                .update('updated_at', new Date());
+            }
+
+            logger.info('Cancelled confirmed order - reserved inventory released', {
+              salesOrderId: id,
+              orderNumber: order.orderNumber,
+              itemCount: items.length
+            });
+          }
+
+          // Case 2: Cancelling from delivered - reverse FIFO allocations
+          if (order.status === 'delivered') {
+            // Reverse FIFO allocations (restores batch quantities)
+            const reversalResult = await reverseFIFOAllocation(
+              trx,
+              'sales_order',
+              id,
+              req.user.userId
+            );
+
+            if (!reversalResult.success) {
+              throw new Error(`FIFO reversal failed: ${reversalResult.error}`);
+            }
+
+            // Also restore legacy inventory table
+            for (const item of items) {
+              await trx('inventory')
+                .where({ materialId: item.materialId })
+                .increment('quantity', item.quantity)
+                .update('updated_at', new Date());
+
+              // Create reversal transaction record
+              await trx('transactions').insert({
+                transactionNumber: `SALE-REV-${Date.now()}-${item.id}`,
+                transactionType: 'adjustment',
+                referenceId: id,
+                referenceType: 'sales_order_cancellation',
+                materialId: item.materialId,
+                quantity: item.quantity, // Positive for reversal
+                amount: item.totalPrice,
+                transactionDate: new Date(),
+                description: `Sale cancelled - Order ${order.orderNumber} | COGS reversed: ${item.cogs || 0}`,
+                createdBy: req.user.userId,
+                created_at: new Date(),
+                updated_at: new Date()
+              });
+            }
+
+            // Clear COGS from cancelled order
+            await trx('sales_orders')
+              .where({ id })
+              .update({
+                cogs: 0,
+                updated_at: new Date()
+              });
+
+            await trx('sales_order_items')
+              .where({ salesOrderId: id })
+              .update({
+                cogs: 0,
+                updated_at: new Date()
+              });
+
+            logger.info('Cancelled delivered order - FIFO reversed', {
+              salesOrderId: id,
+              orderNumber: order.orderNumber,
+              reversedMovements: reversalResult.reversedCount,
+              itemCount: items.length
+            });
+          }
+        });
+      }
+
       auditLog('SALES_ORDER_STATUS_UPDATED', req.user.userId, {
         salesOrderId: id,
-        oldStatus: order.orderStatus,
+        oldStatus: order.status,
         newStatus: orderStatus,
         orderNumber: order.orderNumber
       });
@@ -947,7 +1176,10 @@ router.put('/:id/status',
       res.json({
         success: true,
         message: 'Sales order status updated successfully',
-        data: { orderStatus, paymentStatus }
+        data: {
+          status: orderStatus,
+          paymentStatus: order.paymentStatus
+        }
       });
 
     } catch (error) {

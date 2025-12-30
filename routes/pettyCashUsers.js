@@ -55,6 +55,13 @@ const resetPinSchema = Joi.object({
   }),
 });
 
+const deactivateUserSchema = Joi.object({
+  reason: Joi.string().min(5).max(500).required().messages({
+    'string.min': 'Deactivation reason must be at least 5 characters',
+    'any.required': 'Deactivation reason is required'
+  }),
+});
+
 // Constants
 const BCRYPT_ROUNDS = 12;
 
@@ -221,8 +228,9 @@ router.get('/:id', requirePermission('MANAGE_PETTY_CASH'), async (req, res) => {
 
     user.userSubmittedSummary = userSubmittedSummary;
 
-    // Generate portal URL for display
-    user.portalUrl = getPortalUrl(user.qr_token, req.user.companyId);
+    // Generate portal URL for display (using request origin for dynamic URL)
+    const requestOrigin = req.get('origin') || (req.get('referer') ? new URL(req.get('referer')).origin : null);
+    user.portalUrl = getPortalUrl(user.qr_token, req.user.companyId, requestOrigin);
 
     winston.info('Petty cash user retrieved', {
       pcUserId: id,
@@ -298,8 +306,11 @@ router.post(
 
       const [id] = await db('petty_cash_users').insert(newUser);
 
+      // Get request origin for dynamic URL generation
+      const requestOrigin = req.get('origin') || (req.get('referer') ? new URL(req.get('referer')).origin : null);
+
       // Generate QR code
-      const qrCodeDataUrl = await generateQRCodeDataUrl(qrToken, req.user.companyId);
+      const qrCodeDataUrl = await generateQRCodeDataUrl(qrToken, req.user.companyId, { requestOrigin });
 
       winston.info('Petty cash user created', {
         pcUserId: id,
@@ -317,7 +328,7 @@ router.post(
           pin_hash: undefined, // Don't send back the hash
           cardNumber: card.cardNumber,
           qrCode: qrCodeDataUrl,
-          portalUrl: getPortalUrl(qrToken, req.user.companyId),
+          portalUrl: getPortalUrl(qrToken, req.user.companyId, requestOrigin),
         },
         message: 'Petty cash user created successfully',
       });
@@ -470,6 +481,138 @@ router.delete('/:id', requirePermission('MANAGE_PETTY_CASH'), async (req, res) =
   }
 });
 
+// POST /petty-cash-users/:id/deactivate - Deactivate user with reason
+router.post(
+  '/:id/deactivate',
+  requirePermission('MANAGE_PETTY_CASH'),
+  validate(deactivateUserSchema),
+  async (req, res) => {
+    try {
+      const db = getDbConnection(req.user.companyId);
+      const { id } = req.params;
+      const { reason } = req.body;
+
+      const existingUser = await db('petty_cash_users').where('id', id).first();
+
+      if (!existingUser) {
+        return res.status(404).json({
+          success: false,
+          error: 'Petty cash user not found',
+        });
+      }
+
+      if (!existingUser.is_active) {
+        return res.status(400).json({
+          success: false,
+          error: 'User is already deactivated',
+        });
+      }
+
+      // Deactivate with reason
+      await db('petty_cash_users').where('id', id).update({
+        is_active: false,
+        deactivation_reason: reason,
+        deactivated_at: new Date(),
+        deactivated_by: req.user.userId,
+        updated_at: new Date(),
+      });
+
+      winston.info('Petty cash user deactivated with reason', {
+        pcUserId: id,
+        reason,
+        companyId: req.user.companyId,
+        deactivatedBy: req.user.userId,
+      });
+
+      res.json({
+        success: true,
+        message: 'User deactivated successfully',
+        data: {
+          userId: id,
+          reason,
+          deactivatedAt: new Date(),
+        },
+      });
+    } catch (error) {
+      winston.error('Error deactivating petty cash user', {
+        error: error.message,
+        pcUserId: req.params.id,
+      });
+
+      res.status(500).json({
+        success: false,
+        error: 'Internal server error',
+      });
+    }
+  }
+);
+
+// POST /petty-cash-users/:id/reactivate - Reactivate a deactivated user
+router.post('/:id/reactivate', requirePermission('MANAGE_PETTY_CASH'), async (req, res) => {
+  try {
+    const db = getDbConnection(req.user.companyId);
+    const { id } = req.params;
+
+    const existingUser = await db('petty_cash_users').where('id', id).first();
+
+    if (!existingUser) {
+      return res.status(404).json({
+        success: false,
+        error: 'Petty cash user not found',
+      });
+    }
+
+    if (existingUser.is_active) {
+      return res.status(400).json({
+        success: false,
+        error: 'User is already active',
+      });
+    }
+
+    // Check if the linked card is active
+    const card = await db('petty_cash_cards').where('id', existingUser.card_id).first();
+
+    if (!card || card.status !== 'active') {
+      return res.status(400).json({
+        success: false,
+        error: 'Cannot reactivate user - linked card is not active',
+      });
+    }
+
+    // Reactivate the user
+    await db('petty_cash_users').where('id', id).update({
+      is_active: true,
+      deactivation_reason: null,
+      deactivated_at: null,
+      deactivated_by: null,
+      failed_attempts: 0,
+      locked_until: null,
+      updated_at: new Date(),
+    });
+
+    winston.info('Petty cash user reactivated', {
+      pcUserId: id,
+      companyId: req.user.companyId,
+      reactivatedBy: req.user.userId,
+    });
+
+    res.json({
+      success: true,
+      message: 'User reactivated successfully',
+    });
+  } catch (error) {
+    winston.error('Error reactivating petty cash user', {
+      error: error.message,
+      pcUserId: req.params.id,
+    });
+
+    res.status(500).json({
+      success: false,
+      error: 'Internal server error',
+    });
+  }
+});
+
 // POST /petty-cash-users/:id/reset-pin - Reset user's PIN
 router.post(
   '/:id/reset-pin',
@@ -543,9 +686,13 @@ router.get('/:id/qr-code', requirePermission('MANAGE_PETTY_CASH'), async (req, r
       });
     }
 
+    // Get request origin for dynamic URL generation
+    const requestOrigin = req.get('origin') || (req.get('referer') ? new URL(req.get('referer')).origin : null);
+
     // Generate QR code
     const qrCodeDataUrl = await generateQRCodeDataUrl(user.qr_token, req.user.companyId, {
       width: 400,
+      requestOrigin,
     });
 
     winston.info('QR code generated', {
@@ -557,7 +704,7 @@ router.get('/:id/qr-code', requirePermission('MANAGE_PETTY_CASH'), async (req, r
       success: true,
       data: {
         qrCode: qrCodeDataUrl,
-        portalUrl: getPortalUrl(user.qr_token, req.user.companyId),
+        portalUrl: getPortalUrl(user.qr_token, req.user.companyId, requestOrigin),
         userName: user.name,
       },
     });
@@ -597,8 +744,11 @@ router.post('/:id/regenerate-qr', requirePermission('MANAGE_PETTY_CASH'), async 
       updated_at: new Date(),
     });
 
+    // Get request origin for dynamic URL generation
+    const requestOrigin = req.get('origin') || (req.get('referer') ? new URL(req.get('referer')).origin : null);
+
     // Generate new QR code
-    const qrCodeDataUrl = await generateQRCodeDataUrl(newQrToken, req.user.companyId);
+    const qrCodeDataUrl = await generateQRCodeDataUrl(newQrToken, req.user.companyId, { requestOrigin });
 
     winston.info('QR token regenerated', {
       pcUserId: id,
@@ -610,7 +760,7 @@ router.post('/:id/regenerate-qr', requirePermission('MANAGE_PETTY_CASH'), async 
       success: true,
       data: {
         qrCode: qrCodeDataUrl,
-        portalUrl: getPortalUrl(newQrToken, req.user.companyId),
+        portalUrl: getPortalUrl(newQrToken, req.user.companyId, requestOrigin),
       },
       message: 'QR code regenerated successfully. Previous QR code is now invalid.',
     });

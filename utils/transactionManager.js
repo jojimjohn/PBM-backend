@@ -331,6 +331,11 @@ class TransactionManager {
 
   /**
    * Process petty cash expense approval with card balance update
+   *
+   * IMPORTANT: Balance is now DEDUCTED IMMEDIATELY on expense submission.
+   * - On APPROVAL: Just update totalSpent (balance already deducted)
+   * - On REJECTION: RESTORE the balance (refund the reserved amount)
+   *
    * @param {number} expenseId - Expense ID
    * @param {string} status - approved/rejected
    * @param {number} userId - User ID
@@ -365,25 +370,19 @@ class TransactionManager {
 
       // IMPORTANT: MySQL returns DECIMAL as strings, so we must parseFloat
       const expenseAmount = parseFloat(expense.amount) || 0;
+      const cardBalance = parseFloat(expense.currentBalance) || 0;
+      const totalSpent = parseFloat(expense.totalSpent) || 0;
 
       if (status === 'approved') {
-        const cardBalance = parseFloat(expense.currentBalance) || 0;
-        const totalSpent = parseFloat(expense.totalSpent) || 0;
-
-        // Check sufficient balance
-        if (cardBalance < expenseAmount) {
-          throw new Error('Insufficient card balance for approval');
-        }
-
-        // Update card balance
+        // Balance was ALREADY deducted on submission
+        // Just update totalSpent to track approved expenses
         await trx('petty_cash_cards')
           .where('id', expense.cardId)
           .update({
-            currentBalance: cardBalance - expenseAmount,
             totalSpent: totalSpent + expenseAmount
           });
 
-        // Record financial transaction
+        // Record financial transaction (confirms the expense)
         await trx('transactions').insert({
           transactionNumber: this.generateTransactionNumber('petty_cash'),
           transactionType: 'petty_cash',
@@ -394,12 +393,74 @@ class TransactionManager {
           unitPrice: null,
           amount: -expenseAmount, // Negative for expense
           transactionDate: expense.expenseDate,
-          description: `Petty Cash - ${expense.category}: ${expense.description}`,
+          description: `Petty Cash Approved - ${expense.category}: ${expense.description}`,
           createdBy: userId
+        });
+
+        // Log to petty cash transactions table
+        await trx('petty_cash_transactions').insert({
+          card_id: expense.cardId,
+          transaction_number: this.generateTransactionNumber('petty_cash'),
+          transaction_type: 'expense_approved',
+          amount: -expenseAmount, // Negative for deduction
+          balance_before: cardBalance,
+          balance_after: cardBalance, // Balance unchanged (already deducted)
+          expense_id: expenseId,
+          description: `Expense approved: ${expense.category} - ${expense.description}`,
+          performed_by: userId,
+          pc_user_id: expense.submitted_by_pc_user,
+          transaction_date: new Date()
+        });
+
+        winston.info('Petty cash expense approved', {
+          expenseId,
+          amount: expenseAmount,
+          cardId: expense.cardId,
+          approvedBy: userId
+        });
+
+      } else if (status === 'rejected') {
+        // RESTORE the balance - refund the reserved amount
+        const newBalance = cardBalance + expenseAmount;
+
+        await trx('petty_cash_cards')
+          .where('id', expense.cardId)
+          .update({
+            currentBalance: newBalance
+          });
+
+        // Log to petty cash transactions table
+        await trx('petty_cash_transactions').insert({
+          card_id: expense.cardId,
+          transaction_number: this.generateTransactionNumber('petty_cash'),
+          transaction_type: 'expense_rejected',
+          amount: expenseAmount, // Positive for refund
+          balance_before: cardBalance,
+          balance_after: newBalance,
+          expense_id: expenseId,
+          description: `Expense rejected (balance restored): ${expense.category} - ${notes || 'No reason provided'}`,
+          performed_by: userId,
+          pc_user_id: expense.submitted_by_pc_user,
+          transaction_date: new Date()
+        });
+
+        winston.info('Petty cash expense rejected - balance restored', {
+          expenseId,
+          amount: expenseAmount,
+          cardId: expense.cardId,
+          previousBalance: cardBalance,
+          newBalance: newBalance,
+          rejectedBy: userId,
+          reason: notes
         });
       }
 
-      return { expenseId, status, amount: status === 'approved' ? expenseAmount : 0 };
+      return {
+        expenseId,
+        status,
+        amount: expenseAmount,
+        balanceRestored: status === 'rejected' ? expenseAmount : 0
+      };
     });
   }
 
