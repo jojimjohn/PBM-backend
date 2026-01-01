@@ -22,6 +22,8 @@ const {
 // Validation schemas
 // Note: assignedTo/staffName are now optional - petty cash users are managed separately via /petty-cash-users
 const pettyCashCardSchema = Joi.object({
+  cardNumber: Joi.string().max(50).allow('', null).optional(), // Manual entry for physical card number
+  cardType: Joi.string().valid('top_up', 'petrol').default('top_up').optional(),
   cardName: Joi.string().max(100).allow('', null).optional(),
   assignedTo: Joi.number().integer().positive().allow(null).optional(),
   staffName: Joi.string().max(100).allow('', null).optional(),
@@ -83,6 +85,7 @@ router.get('/', requirePermission('VIEW_PETTY_CASH'), async (req, res) => {
       page = 1,
       limit = 50,
       status,
+      cardType,
       assignedTo,
       department,
       search
@@ -115,11 +118,15 @@ router.get('/', requirePermission('VIEW_PETTY_CASH'), async (req, res) => {
     if (status) {
       query = query.where('petty_cash_cards.status', status);
     }
-    
+
+    if (cardType) {
+      query = query.where('petty_cash_cards.card_type', cardType);
+    }
+
     if (assignedTo) {
       query = query.where('petty_cash_cards.assignedTo', assignedTo);
     }
-    
+
     if (department) {
       query = query.where('petty_cash_cards.department', department);
     }
@@ -166,6 +173,45 @@ router.get('/', requirePermission('VIEW_PETTY_CASH'), async (req, res) => {
       userId: req.user.userId
     });
     
+    res.status(500).json({
+      success: false,
+      error: 'Internal server error'
+    });
+  }
+});
+
+// GET /petty-cash-cards/petrol-card - Get company's active petrol card
+// This endpoint is used when creating expenses with petrol_card payment method
+router.get('/petrol-card', requirePermission('VIEW_PETTY_CASH'), async (req, res) => {
+  try {
+    const db = getDbConnection(req.user.companyId);
+
+    const petrolCard = await db('petty_cash_cards')
+      .select('id', 'cardNumber', 'cardName', 'card_type', 'currentBalance', 'status')
+      .where('card_type', 'petrol')
+      .where('status', 'active')
+      .first();
+
+    if (!petrolCard) {
+      return res.status(404).json({
+        success: false,
+        error: 'No active petrol card found for this company',
+        data: null
+      });
+    }
+
+    res.json({
+      success: true,
+      data: petrolCard
+    });
+
+  } catch (error) {
+    winston.error('Error fetching petrol card', {
+      error: error.message,
+      companyId: req.user.companyId,
+      userId: req.user.userId
+    });
+
     res.status(500).json({
       success: false,
       error: 'Internal server error'
@@ -255,13 +301,54 @@ router.post('/',
     try {
       const db = getDbConnection(req.user.companyId);
       const cardData = req.body;
+      const cardType = cardData.cardType || 'top_up';
 
-      // Generate card number (unique identifier for QR code)
-      const cardNumber = generateCardNumber(req.user.companyId);
+      // Validate card type specific rules
+      if (cardType === 'petrol') {
+        // Petrol card: Only one active per company
+        const existingPetrolCard = await db('petty_cash_cards')
+          .where('card_type', 'petrol')
+          .where('status', 'active')
+          .first();
 
-      // Optional: Verify assigned user exists (if provided)
-      // Note: User assignment is now optional - petty cash users are managed separately
-      if (cardData.assignedTo) {
+        if (existingPetrolCard) {
+          return res.status(400).json({
+            success: false,
+            error: 'Company already has an active petrol card. Only one petrol card is allowed per company.'
+          });
+        }
+
+        // Petrol cards should not have user assignment
+        if (cardData.assignedTo) {
+          return res.status(400).json({
+            success: false,
+            error: 'Petrol cards are shared and cannot be assigned to a specific user'
+          });
+        }
+      }
+
+      // Use provided card number or generate one
+      let cardNumber;
+      if (cardData.cardNumber && cardData.cardNumber.trim()) {
+        // Verify card number is unique
+        const existingCardNumber = await db('petty_cash_cards')
+          .where('cardNumber', cardData.cardNumber.trim())
+          .first();
+
+        if (existingCardNumber) {
+          return res.status(400).json({
+            success: false,
+            error: 'Card number already exists. Please enter a unique card number.'
+          });
+        }
+        cardNumber = cardData.cardNumber.trim();
+      } else {
+        // Auto-generate card number
+        cardNumber = generateCardNumber(req.user.companyId);
+      }
+
+      // For top-up cards: Optional user assignment validation
+      if (cardType === 'top_up' && cardData.assignedTo) {
         const assignedUser = await db('users').where('id', cardData.assignedTo).first();
         if (!assignedUser) {
           return res.status(400).json({
@@ -270,7 +357,7 @@ router.post('/',
           });
         }
 
-        // Check if system user already has an active card (only if assignedTo provided)
+        // Check if system user already has an active card
         const existingCard = await db('petty_cash_cards')
           .where('assignedTo', cardData.assignedTo)
           .where('status', 'active')
@@ -286,9 +373,10 @@ router.post('/',
 
       const newCard = {
         cardNumber,
-        cardName: cardData.cardName || null,
-        assignedTo: cardData.assignedTo || null,
-        staffName: cardData.staffName || null,
+        card_type: cardType,
+        cardName: cardData.cardName || (cardType === 'petrol' ? 'Petrol Card' : null),
+        assignedTo: cardType === 'petrol' ? null : (cardData.assignedTo || null),
+        staffName: cardType === 'petrol' ? 'Shared' : (cardData.staffName || null),
         department: cardData.department || null,
         initialBalance: cardData.initialBalance,
         currentBalance: cardData.initialBalance, // Start with initial balance
@@ -317,7 +405,8 @@ router.post('/',
       winston.info('Petty cash card created', {
         cardId: id,
         cardNumber,
-        assignedTo: cardData.assignedTo,
+        cardType,
+        assignedTo: cardType === 'petrol' ? null : cardData.assignedTo,
         initialBalance: cardData.initialBalance,
         companyId: req.user.companyId,
         userId: req.user.userId
@@ -360,19 +449,55 @@ router.put('/:id',
       const db = getDbConnection(req.user.companyId);
       const { id } = req.params;
       const updateData = req.body;
-      
+
       // Check if card exists
       const existingCard = await db('petty_cash_cards').where('id', id).first();
-      
+
       if (!existingCard) {
         return res.status(404).json({
           success: false,
           error: 'Petty cash card not found'
         });
       }
-      
-      // If changing assigned user, verify new user exists and doesn't have active card
-      if (updateData.assignedTo && updateData.assignedTo !== existingCard.assignedTo) {
+
+      // Handle card type changes and validation
+      const newCardType = updateData.cardType || existingCard.card_type;
+
+      // Prevent changing card type if it would violate constraints
+      if (updateData.cardType && updateData.cardType !== existingCard.card_type) {
+        if (updateData.cardType === 'petrol') {
+          // Check if company already has an active petrol card
+          const existingPetrolCard = await db('petty_cash_cards')
+            .where('card_type', 'petrol')
+            .where('status', 'active')
+            .where('id', '!=', id)
+            .first();
+
+          if (existingPetrolCard) {
+            return res.status(400).json({
+              success: false,
+              error: 'Company already has an active petrol card. Cannot change this card to petrol type.'
+            });
+          }
+        }
+      }
+
+      // Validate card type specific rules
+      if (newCardType === 'petrol') {
+        // Petrol cards cannot have user assignment
+        if (updateData.assignedTo) {
+          return res.status(400).json({
+            success: false,
+            error: 'Petrol cards are shared and cannot be assigned to a specific user'
+          });
+        }
+        // Clear assignment for petrol cards
+        updateData.assignedTo = null;
+        updateData.staffName = 'Shared';
+      }
+
+      // If changing assigned user for top-up card, verify new user exists and doesn't have active card
+      if (newCardType === 'top_up' && updateData.assignedTo && updateData.assignedTo !== existingCard.assignedTo) {
         const newAssignedUser = await db('users').where('id', updateData.assignedTo).first();
         if (!newAssignedUser) {
           return res.status(400).json({
@@ -380,13 +505,13 @@ router.put('/:id',
             error: 'New assigned user not found'
           });
         }
-        
+
         const existingActiveCard = await db('petty_cash_cards')
           .where('assignedTo', updateData.assignedTo)
           .where('status', 'active')
           .where('id', '!=', id)
           .first();
-        
+
         if (existingActiveCard) {
           return res.status(400).json({
             success: false,
@@ -394,9 +519,31 @@ router.put('/:id',
           });
         }
       }
-      
+
+      // Handle card number uniqueness if being updated
+      if (updateData.cardNumber && updateData.cardNumber !== existingCard.cardNumber) {
+        const duplicateCard = await db('petty_cash_cards')
+          .where('cardNumber', updateData.cardNumber.trim())
+          .where('id', '!=', id)
+          .first();
+
+        if (duplicateCard) {
+          return res.status(400).json({
+            success: false,
+            error: 'Card number already exists. Please enter a unique card number.'
+          });
+        }
+      }
+
+      // Build update object with card_type mapping
+      const updateFields = { ...updateData };
+      if (updateData.cardType) {
+        updateFields.card_type = updateData.cardType;
+        delete updateFields.cardType;
+      }
+
       await db('petty_cash_cards').where('id', id).update({
-        ...updateData,
+        ...updateFields,
         updated_at: new Date()
       });
       

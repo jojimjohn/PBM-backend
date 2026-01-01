@@ -5,15 +5,41 @@ const { requirePermission } = require('../middleware/auth');
 const { validate } = require('../middleware/validation');
 const Joi = require('joi');
 const winston = require('winston');
+const multer = require('multer');
+const storageService = require('../services/storageService');
+const { MAX_FILE_SIZE, ALLOWED_MIME_TYPES } = require('../config/s3.config');
+const { validateFileSignature } = require('../utils/fileValidation');
 const {
   logExpenseSubmission,
   logExpenseRejection,
 } = require('../utils/pettyCashTransactions');
 
+// Multer configuration for receipt uploads (memory storage for S3)
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: MAX_FILE_SIZE },
+  fileFilter: (req, file, cb) => {
+    if (ALLOWED_MIME_TYPES.includes(file.mimetype)) {
+      cb(null, true);
+    } else {
+      cb(new Error('Invalid file type. Only JPG, PNG, and PDF files are allowed.'), false);
+    }
+  }
+});
+
+// Valid payment methods (updated for card type system)
+// top_up_card: User's assigned petty cash card - deducts from card balance
+// petrol_card: Shared fuel card - deducts from petrol card balance (fuel only)
+// company_card: Company debit card - no petty cash deduction
+// iou: Personal expense - no immediate deduction, reimbursed when approved
+const PAYMENT_METHODS = ['top_up_card', 'petrol_card', 'company_card', 'iou'];
+
 // Validation schemas
 const expenseSchema = Joi.object({
-  cardId: Joi.number().integer().positive().required(),
+  // cardId is required for top_up_card, optional for petrol_card (auto-selected), not needed for company_card/iou
+  cardId: Joi.number().integer().positive().allow(null).optional(),
   category: Joi.string().min(2).max(100).required(),
+  paymentMethod: Joi.string().valid(...PAYMENT_METHODS).default('top_up_card'),
   description: Joi.string().min(2).max(2000).required(),
   amount: Joi.number().positive().required(),
   expenseDate: Joi.date().iso().required(),
@@ -183,46 +209,71 @@ router.get('/categories', requirePermission('VIEW_EXPENSE_REPORTS'), async (req,
   });
 });
 
+// GET /petty-cash-expenses/pending-reimbursements - Get all pending IOU reimbursements
+// NOTE: This route must come BEFORE /:id routes to avoid matching "pending-reimbursements" as an id
+router.get('/pending-reimbursements', requirePermission('VIEW_PETTY_CASH'), async (req, res) => {
+  try {
+    const db = getDbConnection(req.user.companyId);
+
+    const pendingReimbursements = await db('petty_cash_expenses')
+      .select(
+        'petty_cash_expenses.*',
+        'submitter.firstName as submitterFirstName',
+        'submitter.lastName as submitterLastName',
+        'submitter.email as submitterEmail',
+        'approver.firstName as approverFirstName',
+        'approver.lastName as approverLastName'
+      )
+      .leftJoin('users as submitter', 'petty_cash_expenses.submittedBy', 'submitter.id')
+      .leftJoin('users as approver', 'petty_cash_expenses.approvedBy', 'approver.id')
+      .where('petty_cash_expenses.payment_method', 'iou')
+      .where('petty_cash_expenses.status', 'approved')
+      .where('petty_cash_expenses.reimbursement_status', 'pending')
+      .orderBy('petty_cash_expenses.approvedAt', 'asc');
+
+    // Calculate totals
+    const totalPending = pendingReimbursements.reduce(
+      (sum, exp) => sum + parseFloat(exp.reimbursement_amount || exp.amount || 0),
+      0
+    );
+
+    res.json({
+      success: true,
+      data: pendingReimbursements,
+      summary: {
+        count: pendingReimbursements.length,
+        totalPendingAmount: totalPending
+      }
+    });
+
+  } catch (error) {
+    winston.error('Error fetching pending reimbursements', {
+      error: error.message,
+      companyId: req.user.companyId,
+      userId: req.user.userId
+    });
+
+    res.status(500).json({
+      success: false,
+      error: 'Internal server error'
+    });
+  }
+});
+
 // POST /petty-cash-expenses - Create new expense
-router.post('/', 
+router.post('/',
   requirePermission('CREATE_EXPENSE'),
   validate(expenseSchema),
   async (req, res) => {
     try {
       const db = getDbConnection(req.user.companyId);
       const expenseData = req.body;
-      
+      const paymentMethod = expenseData.paymentMethod || 'top_up_card';
+      const requestedAmount = parseFloat(expenseData.amount) || 0;
+
       // Generate expense number
       const expenseNumber = generateExpenseNumber(req.user.companyId);
-      
-      // Verify card exists and is active
-      const card = await db('petty_cash_cards').where('id', expenseData.cardId).first();
-      if (!card) {
-        return res.status(400).json({
-          success: false,
-          error: 'Petty cash card not found'
-        });
-      }
-      
-      if (card.status !== 'active') {
-        return res.status(400).json({
-          success: false,
-          error: 'Petty cash card is not active'
-        });
-      }
-      
-      // Check if user has permission to use this card
-      // User can create expense if: assigned to card, OR has MANAGE_EXPENSES, OR has MANAGE_PETTY_CASH
-      const canManageExpenses = req.user.permissions.includes('MANAGE_EXPENSES') ||
-                                 req.user.permissions.includes('MANAGE_PETTY_CASH');
-      // Note: auth middleware uses 'userId', not 'id'
-      if (card.assignedTo !== req.user.userId && !canManageExpenses) {
-        return res.status(403).json({
-          success: false,
-          error: 'You are not authorized to use this card'
-        });
-      }
-      
+
       // Validate expense category
       if (!expenseCategoryIds.includes(expenseData.category)) {
         return res.status(400).json({
@@ -230,46 +281,148 @@ router.post('/',
           error: 'Invalid expense category'
         });
       }
-      
-      // Check if sufficient balance (for approved expenses)
-      // IMPORTANT: MySQL returns DECIMAL as strings, so we must parseFloat for comparison
-      const cardBalance = parseFloat(card.currentBalance) || 0;
-      const requestedAmount = parseFloat(expenseData.amount) || 0;
-      if (requestedAmount > cardBalance) {
-        return res.status(400).json({
-          success: false,
-          error: 'Insufficient card balance for this expense'
-        });
-      }
-      
-      // Check monthly limit if set
-      if (card.monthlyLimit) {
-        const currentMonth = new Date().toISOString().slice(0, 7); // YYYY-MM format
-        const [monthlySpent] = await db('petty_cash_expenses')
-          .where('cardId', expenseData.cardId)
-          .where('status', 'approved')
-          .where(db.raw('DATE_FORMAT(expenseDate, "%Y-%m")'), currentMonth)
-          .sum('amount as total');
 
-        // IMPORTANT: MySQL returns DECIMAL as strings, parseFloat all values
-        const monthlyTotal = parseFloat(monthlySpent.total) || 0;
-        const monthlyLimit = parseFloat(card.monthlyLimit) || 0;
-        const totalMonthlySpent = monthlyTotal + requestedAmount;
+      // Payment method specific validation and card handling
+      let card = null;
+      let petrolCardId = null;
+      let cardBalance = 0;
+      let shouldDeductBalance = false;
 
-        if (totalMonthlySpent > monthlyLimit) {
+      switch (paymentMethod) {
+        case 'top_up_card': {
+          // top_up_card: Requires cardId, deducts from user's top-up card
+          if (!expenseData.cardId) {
+            return res.status(400).json({
+              success: false,
+              error: 'Card ID is required for top-up card payment'
+            });
+          }
+
+          card = await db('petty_cash_cards').where('id', expenseData.cardId).first();
+          if (!card) {
+            return res.status(400).json({
+              success: false,
+              error: 'Petty cash card not found'
+            });
+          }
+
+          if (card.status !== 'active') {
+            return res.status(400).json({
+              success: false,
+              error: 'Petty cash card is not active'
+            });
+          }
+
+          // Validate it's a top-up card, not petrol
+          if (card.card_type === 'petrol') {
+            return res.status(400).json({
+              success: false,
+              error: 'Cannot use petrol card with top_up_card payment method. Use petrol_card instead.'
+            });
+          }
+
+          // Check if user has permission to use this card
+          const canManageExpenses = req.user.permissions.includes('MANAGE_EXPENSES') ||
+                                     req.user.permissions.includes('MANAGE_PETTY_CASH');
+          if (card.assignedTo !== req.user.userId && !canManageExpenses) {
+            return res.status(403).json({
+              success: false,
+              error: 'You are not authorized to use this card'
+            });
+          }
+
+          cardBalance = parseFloat(card.currentBalance) || 0;
+          if (requestedAmount > cardBalance) {
+            return res.status(400).json({
+              success: false,
+              error: 'Insufficient card balance for this expense'
+            });
+          }
+
+          // Check monthly limit if set
+          if (card.monthlyLimit) {
+            const currentMonth = new Date().toISOString().slice(0, 7);
+            const [monthlySpent] = await db('petty_cash_expenses')
+              .where('cardId', expenseData.cardId)
+              .where('status', 'approved')
+              .where(db.raw('DATE_FORMAT(expenseDate, "%Y-%m")'), currentMonth)
+              .sum('amount as total');
+
+            const monthlyTotal = parseFloat(monthlySpent.total) || 0;
+            const monthlyLimit = parseFloat(card.monthlyLimit) || 0;
+
+            if ((monthlyTotal + requestedAmount) > monthlyLimit) {
+              return res.status(400).json({
+                success: false,
+                error: `This expense would exceed the monthly limit of ${monthlyLimit.toFixed(3)}. Current monthly spent: ${monthlyTotal.toFixed(3)}`
+              });
+            }
+          }
+
+          shouldDeductBalance = true;
+          break;
+        }
+
+        case 'petrol_card': {
+          // petrol_card: Auto-select company's petrol card, fuel category only
+          if (expenseData.category !== 'fuel') {
+            return res.status(400).json({
+              success: false,
+              error: 'Petrol card can only be used for fuel category expenses'
+            });
+          }
+
+          // Find company's active petrol card
+          card = await db('petty_cash_cards')
+            .where('card_type', 'petrol')
+            .where('status', 'active')
+            .first();
+
+          if (!card) {
+            return res.status(400).json({
+              success: false,
+              error: 'No active petrol card found for this company. Please use another payment method.'
+            });
+          }
+
+          cardBalance = parseFloat(card.currentBalance) || 0;
+          if (requestedAmount > cardBalance) {
+            return res.status(400).json({
+              success: false,
+              error: `Insufficient petrol card balance (${cardBalance.toFixed(3)}). Consider using top-up card or IOU.`
+            });
+          }
+
+          petrolCardId = card.id;
+          shouldDeductBalance = true;
+          break;
+        }
+
+        case 'company_card': {
+          // company_card: No petty cash card involvement, paid via company bank
+          // No balance checks or deductions
+          break;
+        }
+
+        case 'iou': {
+          // IOU: Personal expense, will be reimbursed when approved
+          // No balance checks or deductions
+          break;
+        }
+
+        default:
           return res.status(400).json({
             success: false,
-            error: `This expense would exceed the monthly limit of ${monthlyLimit.toFixed(3)}. Current monthly spent: ${monthlyTotal.toFixed(3)}`
+            error: 'Invalid payment method'
           });
-        }
       }
-      
-      // If admin specifies a PC user, validate they belong to this card
+
+      // If admin specifies a PC user and we have a card, validate they belong to this card
       let pcUserId = null;
-      if (expenseData.submittedByPcUser) {
+      if (expenseData.submittedByPcUser && card) {
         const pcUser = await db('petty_cash_users')
           .where('id', expenseData.submittedByPcUser)
-          .where('card_id', expenseData.cardId)
+          .where('card_id', card.id)
           .where('is_active', true)
           .first();
 
@@ -282,10 +435,17 @@ router.post('/',
         pcUserId = pcUser.id;
       }
 
+      // Determine if expense requires reimbursement
+      const requiresReimbursement = paymentMethod === 'iou';
+
       const newExpense = {
         expenseNumber,
-        cardId: expenseData.cardId,
+        cardId: paymentMethod === 'top_up_card' ? expenseData.cardId :
+                (paymentMethod === 'petrol_card' ? card.id : null),
+        petrol_card_id: petrolCardId,
         category: expenseData.category,
+        payment_method: paymentMethod,
+        requires_reimbursement: requiresReimbursement,
         description: expenseData.description,
         amount: expenseData.amount,
         expenseDate: expenseData.expenseDate,
@@ -298,56 +458,77 @@ router.post('/',
         notes: expenseData.notes || null
       };
 
-      // Use transaction to ensure atomic balance deduction + expense creation
-      // This prevents double-spending by immediately reserving the amount
+      // Use transaction for atomic operations (if balance deduction needed)
       const result = await db.transaction(async (trx) => {
         // 1. Create the expense record
         const [id] = await trx('petty_cash_expenses').insert(newExpense);
 
-        // 2. Immediately deduct balance from card (reserve the amount)
-        // This prevents users from submitting expenses exceeding their balance
-        await trx('petty_cash_cards')
-          .where('id', expenseData.cardId)
-          .update({
-            currentBalance: trx.raw('currentBalance - ?', [requestedAmount])
+        // 2. Deduct balance from card if applicable (top_up_card or petrol_card)
+        let newBalance = null;
+        if (shouldDeductBalance && card) {
+          await trx('petty_cash_cards')
+            .where('id', card.id)
+            .update({
+              currentBalance: trx.raw('currentBalance - ?', [requestedAmount])
+            });
+
+          newBalance = cardBalance - requestedAmount;
+
+          // 3. Log the expense submission transaction
+          await logExpenseSubmission(trx, card.id, id, requestedAmount, {
+            cardBalance: cardBalance,
+            description: `${expenseData.category}: ${expenseData.description}`,
+            pcUserId: pcUserId,
+            performedBy: req.user.userId,
+            paymentMethod: paymentMethod
           });
+        }
 
-        // 3. Log the expense submission transaction
-        await logExpenseSubmission(trx, expenseData.cardId, id, requestedAmount, {
-          cardBalance: cardBalance,
-          description: `${expenseData.category}: ${expenseData.description}`,
-          pcUserId: pcUserId,
-          performedBy: req.user.userId
-        });
-
-        return { id, newBalance: cardBalance - requestedAmount };
+        return { id, newBalance };
       });
 
-      winston.info('Petty cash expense created with immediate balance deduction', {
+      winston.info('Petty cash expense created', {
         expenseId: result.id,
         expenseNumber,
-        cardId: expenseData.cardId,
+        paymentMethod,
+        cardId: card ? card.id : null,
+        petrolCardId,
         amount: expenseData.amount,
-        previousBalance: cardBalance,
+        previousBalance: shouldDeductBalance ? cardBalance : null,
         newBalance: result.newBalance,
+        requiresReimbursement,
         category: expenseData.category,
         companyId: req.user.companyId,
         userId: req.user.userId
       });
 
+      // Build response message based on payment method
+      let message = 'Expense submitted successfully.';
+      if (paymentMethod === 'top_up_card' || paymentMethod === 'petrol_card') {
+        message = 'Expense submitted successfully. Balance has been reserved pending approval.';
+      } else if (paymentMethod === 'iou') {
+        message = 'IOU expense submitted successfully. You will be reimbursed when this expense is approved.';
+      } else if (paymentMethod === 'company_card') {
+        message = 'Company card expense submitted successfully.';
+      }
+
       res.status(201).json({
         success: true,
-        data: { id: result.id, ...newExpense, newCardBalance: result.newBalance },
-        message: 'Expense submitted successfully. Balance has been reserved pending approval.'
+        data: {
+          id: result.id,
+          ...newExpense,
+          newCardBalance: result.newBalance
+        },
+        message
       });
-      
+
     } catch (error) {
       winston.error('Error creating petty cash expense', {
         error: error.message,
         companyId: req.user.companyId,
         userId: req.user.userId
       });
-      
+
       if (error.code === 'ER_DUP_ENTRY') {
         res.status(409).json({
           success: false,
@@ -409,11 +590,25 @@ router.put('/:id',
           error: 'Invalid expense category'
         });
       }
-      
-      await db('petty_cash_expenses').where('id', id).update({
-        ...updateData,
+
+      // Map camelCase request fields to snake_case database columns
+      const dbUpdateData = {
         updated_at: new Date()
-      });
+      };
+
+      if (updateData.cardId !== undefined) dbUpdateData.cardId = updateData.cardId;
+      if (updateData.category !== undefined) dbUpdateData.category = updateData.category;
+      if (updateData.amount !== undefined) dbUpdateData.amount = updateData.amount;
+      if (updateData.expenseDate !== undefined) dbUpdateData.expenseDate = updateData.expenseDate;
+      if (updateData.description !== undefined) dbUpdateData.description = updateData.description;
+      if (updateData.vendor !== undefined) dbUpdateData.vendor = updateData.vendor;
+      if (updateData.receiptNumber !== undefined) dbUpdateData.receiptNumber = updateData.receiptNumber;
+      if (updateData.receiptPhoto !== undefined) dbUpdateData.receiptPhoto = updateData.receiptPhoto;
+      if (updateData.notes !== undefined) dbUpdateData.notes = updateData.notes;
+      if (updateData.paymentMethod !== undefined) dbUpdateData.payment_method = updateData.paymentMethod;
+      if (updateData.submittedByPcUser !== undefined) dbUpdateData.submittedByPcUser = updateData.submittedByPcUser;
+
+      await db('petty_cash_expenses').where('id', id).update(dbUpdateData);
       
       winston.info('Petty cash expense updated', {
         expenseId: id,
@@ -493,6 +688,139 @@ router.post('/:id/approve',
   }
 );
 
+// POST /petty-cash-expenses/:id/reimburse - Process IOU reimbursement
+// This endpoint is used to mark an approved IOU expense as reimbursed
+const reimbursementSchema = Joi.object({
+  reimbursementAmount: Joi.number().positive().required(),
+  reimbursementDate: Joi.date().iso().required(),
+  reimbursementMethod: Joi.string().valid('bank_transfer', 'cash', 'check').required(),
+  reimbursementReference: Joi.string().max(100).allow('', null).optional()
+});
+
+router.post('/:id/reimburse',
+  requirePermission('MANAGE_PETTY_CASH'),
+  validate(reimbursementSchema),
+  async (req, res) => {
+    try {
+      const db = getDbConnection(req.user.companyId);
+      const { id } = req.params;
+      const {
+        reimbursementAmount,
+        reimbursementDate,
+        reimbursementMethod,
+        reimbursementReference
+      } = req.body;
+
+      // Get the expense
+      const expense = await db('petty_cash_expenses')
+        .where('id', id)
+        .first();
+
+      if (!expense) {
+        return res.status(404).json({
+          success: false,
+          error: 'Expense not found'
+        });
+      }
+
+      // Validate it's an IOU expense
+      if (expense.payment_method !== 'iou') {
+        return res.status(400).json({
+          success: false,
+          error: 'Only IOU expenses can be reimbursed'
+        });
+      }
+
+      // Validate expense is approved
+      if (expense.status !== 'approved') {
+        return res.status(400).json({
+          success: false,
+          error: 'Only approved expenses can be reimbursed'
+        });
+      }
+
+      // Validate reimbursement is pending
+      if (expense.reimbursement_status !== 'pending') {
+        return res.status(400).json({
+          success: false,
+          error: expense.reimbursement_status === 'processed'
+            ? 'This expense has already been reimbursed'
+            : 'This expense is not pending reimbursement'
+        });
+      }
+
+      // Process the reimbursement
+      await db('petty_cash_expenses')
+        .where('id', id)
+        .update({
+          reimbursement_status: 'processed',
+          reimbursement_amount: reimbursementAmount,
+          reimbursement_date: reimbursementDate,
+          reimbursement_method: reimbursementMethod,
+          reimbursement_reference: reimbursementReference || null,
+          reimbursed_by: req.user.userId,
+          reimbursed_at: new Date()
+        });
+
+      // Record in transactions table
+      await db('transactions').insert({
+        transactionNumber: `REIMB-${Date.now().toString().slice(-8)}`,
+        transactionType: 'petty_cash_reimbursement',
+        referenceId: id,
+        referenceType: 'petty_cash_expense',
+        materialId: null,
+        quantity: null,
+        unitPrice: null,
+        amount: -reimbursementAmount, // Negative as it's an outflow
+        transactionDate: reimbursementDate,
+        description: `IOU Reimbursement for ${expense.category}: ${expense.description}`,
+        createdBy: req.user.userId
+      });
+
+      winston.info('IOU expense reimbursed', {
+        expenseId: id,
+        expenseNumber: expense.expenseNumber,
+        originalAmount: expense.amount,
+        reimbursementAmount,
+        reimbursementMethod,
+        reimbursementReference,
+        submittedBy: expense.submittedBy,
+        reimbursedBy: req.user.userId,
+        companyId: req.user.companyId
+      });
+
+      res.json({
+        success: true,
+        data: {
+          expenseId: id,
+          expenseNumber: expense.expenseNumber,
+          originalAmount: expense.amount,
+          reimbursementAmount,
+          reimbursementDate,
+          reimbursementMethod,
+          reimbursementReference,
+          reimbursedBy: req.user.userId,
+          reimbursedAt: new Date()
+        },
+        message: 'IOU reimbursement processed successfully'
+      });
+
+    } catch (error) {
+      winston.error('Error processing IOU reimbursement', {
+        error: error.message,
+        expenseId: req.params.id,
+        companyId: req.user.companyId,
+        userId: req.user.userId
+      });
+
+      res.status(500).json({
+        success: false,
+        error: 'Internal server error'
+      });
+    }
+  }
+);
+
 // DELETE /petty-cash-expenses/:id - Delete expense (only if pending)
 router.delete('/:id', requirePermission('CREATE_EXPENSE'), async (req, res) => {
   try {
@@ -536,7 +864,7 @@ router.delete('/:id', requirePermission('CREATE_EXPENSE'), async (req, res) => {
       success: true,
       message: 'Expense deleted successfully'
     });
-    
+
   } catch (error) {
     winston.error('Error deleting petty cash expense', {
       error: error.message,
@@ -544,10 +872,525 @@ router.delete('/:id', requirePermission('CREATE_EXPENSE'), async (req, res) => {
       companyId: req.user.companyId,
       userId: req.user.userId
     });
-    
+
     res.status(500).json({
       success: false,
       error: 'Internal server error'
+    });
+  }
+});
+
+// Maximum receipts per expense
+const MAX_RECEIPTS_PER_EXPENSE = 2;
+
+// GET /petty-cash-expenses/:id/receipts - Get all receipts for expense
+router.get('/:id/receipts',
+  requirePermission('CREATE_EXPENSE'),
+  async (req, res) => {
+    try {
+      const db = getDbConnection(req.user.companyId);
+      const { id } = req.params;
+
+      // Check if expense exists
+      const expense = await db('petty_cash_expenses')
+        .select('petty_cash_expenses.*', 'petty_cash_cards.assignedTo')
+        .leftJoin('petty_cash_cards', 'petty_cash_expenses.cardId', 'petty_cash_cards.id')
+        .where('petty_cash_expenses.id', id)
+        .first();
+
+      if (!expense) {
+        return res.status(404).json({
+          success: false,
+          error: 'Expense not found'
+        });
+      }
+
+      // Check permission: owner, card holder, or admin
+      const isOwner = expense.submittedBy === req.user.userId;
+      const isCardHolder = expense.assignedTo === req.user.userId;
+      const canManage = req.user.permissions.includes('MANAGE_PETTY_CASH') ||
+                        req.user.permissions.includes('MANAGE_EXPENSES') ||
+                        req.user.permissions.includes('VIEW_EXPENSES');
+
+      if (!isOwner && !isCardHolder && !canManage) {
+        return res.status(403).json({
+          success: false,
+          error: 'You are not authorized to view receipts for this expense'
+        });
+      }
+
+      // Get receipts from new table
+      const receipts = await db('petty_cash_expense_receipts')
+        .select(
+          'petty_cash_expense_receipts.*',
+          'users.fullName as uploadedByName'
+        )
+        .leftJoin('users', 'petty_cash_expense_receipts.uploaded_by', 'users.id')
+        .where('expense_id', id)
+        .orderBy('uploaded_at', 'asc');
+
+      // Generate download URLs for each receipt
+      const receiptsWithUrls = await Promise.all(
+        receipts.map(async (receipt) => {
+          let downloadUrl = null;
+          try {
+            downloadUrl = await storageService.getDownloadUrl(receipt.storage_key);
+          } catch (err) {
+            winston.warn('Failed to generate download URL', {
+              receiptId: receipt.id,
+              storageKey: receipt.storage_key,
+              error: err.message
+            });
+          }
+          return {
+            id: receipt.id,
+            storageKey: receipt.storage_key,
+            originalFilename: receipt.original_filename,
+            contentType: receipt.content_type,
+            fileSize: receipt.file_size,
+            uploadedBy: receipt.uploaded_by,
+            uploadedByName: receipt.uploadedByName,
+            uploadedAt: receipt.uploaded_at,
+            downloadUrl
+          };
+        })
+      );
+
+      res.json({
+        success: true,
+        data: {
+          receipts: receiptsWithUrls,
+          maxAllowed: MAX_RECEIPTS_PER_EXPENSE,
+          canUploadMore: receiptsWithUrls.length < MAX_RECEIPTS_PER_EXPENSE
+        }
+      });
+
+    } catch (error) {
+      winston.error('Error fetching receipts', {
+        error: error.message,
+        expenseId: req.params.id,
+        companyId: req.user.companyId
+      });
+
+      res.status(500).json({
+        success: false,
+        error: 'Failed to fetch receipts'
+      });
+    }
+  }
+);
+
+// POST /petty-cash-expenses/:id/receipt - Upload receipt for expense (max 2)
+router.post('/:id/receipt',
+  requirePermission('CREATE_EXPENSE'),
+  upload.single('receipt'),
+  async (req, res) => {
+    try {
+      const db = getDbConnection(req.user.companyId);
+      const { id } = req.params;
+
+      // Check if expense exists
+      const expense = await db('petty_cash_expenses')
+        .select('petty_cash_expenses.*', 'petty_cash_cards.assignedTo')
+        .leftJoin('petty_cash_cards', 'petty_cash_expenses.cardId', 'petty_cash_cards.id')
+        .where('petty_cash_expenses.id', id)
+        .first();
+
+      if (!expense) {
+        return res.status(404).json({
+          success: false,
+          error: 'Expense not found'
+        });
+      }
+
+      // Check permission: owner, card holder, or admin
+      const isOwner = expense.submittedBy === req.user.userId;
+      const isCardHolder = expense.assignedTo === req.user.userId;
+      const canManage = req.user.permissions.includes('MANAGE_PETTY_CASH') ||
+                        req.user.permissions.includes('MANAGE_EXPENSES');
+
+      if (!isOwner && !isCardHolder && !canManage) {
+        return res.status(403).json({
+          success: false,
+          error: 'You are not authorized to upload receipts for this expense'
+        });
+      }
+
+      // Validate file was uploaded
+      if (!req.file) {
+        return res.status(400).json({
+          success: false,
+          error: 'No file uploaded'
+        });
+      }
+
+      // Check max receipts limit
+      const existingReceiptsCount = await db('petty_cash_expense_receipts')
+        .where('expense_id', id)
+        .count('id as count')
+        .first();
+
+      // Also count legacy receipt if exists
+      const hasLegacyReceipt = expense.receipt_key ? 1 : 0;
+      const totalReceipts = (existingReceiptsCount?.count || 0) + hasLegacyReceipt;
+
+      if (totalReceipts >= MAX_RECEIPTS_PER_EXPENSE) {
+        return res.status(400).json({
+          success: false,
+          error: `Maximum ${MAX_RECEIPTS_PER_EXPENSE} receipts allowed per expense. Delete an existing receipt first.`
+        });
+      }
+
+      // Validate file signature (magic bytes)
+      const isValidSignature = await validateFileSignature(req.file.buffer, req.file.mimetype);
+      if (!isValidSignature) {
+        return res.status(400).json({
+          success: false,
+          error: 'Invalid file format. The file content does not match its type.'
+        });
+      }
+
+      // Upload to S3 using expenseNumber for folder structure
+      const result = await storageService.uploadReceipt(
+        req.file.buffer,
+        req.file.originalname,
+        req.file.mimetype,
+        req.user.companyId,
+        expense.expenseNumber, // Use expenseNumber for folder path
+        req.user.userId
+      );
+
+      // Insert into new receipts table
+      const [receiptId] = await db('petty_cash_expense_receipts').insert({
+        expense_id: id,
+        storage_key: result.key,
+        original_filename: req.file.originalname,
+        content_type: req.file.mimetype,
+        file_size: req.file.size,
+        uploaded_by: req.user.userId,
+        uploaded_at: new Date(),
+        created_at: new Date(),
+        updated_at: new Date()
+      });
+
+      // Log transaction for audit
+      if (expense.cardId) {
+        await db('petty_cash_transactions').insert({
+          card_id: expense.cardId,
+          transaction_number: `TXN-RCP-${Date.now()}`,
+          transaction_type: 'adjustment',
+          amount: 0,
+          expense_id: id,
+          description: `Receipt uploaded for expense ${expense.expenseNumber}`,
+          notes: `File: ${req.file.originalname}, Size: ${req.file.size} bytes`,
+          performed_by: req.user.userId,
+          transaction_date: new Date()
+        });
+      }
+
+      winston.info('Receipt uploaded successfully', {
+        expenseId: id,
+        receiptId,
+        receiptKey: result.key,
+        size: result.size,
+        companyId: req.user.companyId,
+        userId: req.user.userId
+      });
+
+      // Generate download URL for immediate use
+      const downloadUrl = await storageService.getDownloadUrl(result.key);
+
+      res.json({
+        success: true,
+        data: {
+          id: receiptId,
+          storageKey: result.key,
+          originalFilename: req.file.originalname,
+          size: result.size,
+          contentType: result.contentType,
+          downloadUrl
+        },
+        message: 'Receipt uploaded successfully'
+      });
+
+    } catch (error) {
+      winston.error('Error uploading receipt', {
+        error: error.message,
+        expenseId: req.params.id,
+        companyId: req.user.companyId,
+        userId: req.user.userId
+      });
+
+      if (error.message.includes('Invalid file')) {
+        return res.status(400).json({
+          success: false,
+          error: error.message
+        });
+      }
+
+      res.status(500).json({
+        success: false,
+        error: 'Failed to upload receipt'
+      });
+    }
+  }
+);
+
+// DELETE /petty-cash-expenses/:id/receipts/:receiptId - Delete a receipt
+router.delete('/:id/receipts/:receiptId',
+  requirePermission('CREATE_EXPENSE'),
+  async (req, res) => {
+    try {
+      const db = getDbConnection(req.user.companyId);
+      const { id, receiptId } = req.params;
+
+      // Check if expense exists
+      const expense = await db('petty_cash_expenses')
+        .select('petty_cash_expenses.*', 'petty_cash_cards.assignedTo')
+        .leftJoin('petty_cash_cards', 'petty_cash_expenses.cardId', 'petty_cash_cards.id')
+        .where('petty_cash_expenses.id', id)
+        .first();
+
+      if (!expense) {
+        return res.status(404).json({
+          success: false,
+          error: 'Expense not found'
+        });
+      }
+
+      // Check permission: owner, card holder, or admin
+      const isOwner = expense.submittedBy === req.user.userId;
+      const isCardHolder = expense.assignedTo === req.user.userId;
+      const canManage = req.user.permissions.includes('MANAGE_PETTY_CASH') ||
+                        req.user.permissions.includes('MANAGE_EXPENSES');
+
+      if (!isOwner && !isCardHolder && !canManage) {
+        return res.status(403).json({
+          success: false,
+          error: 'You are not authorized to delete receipts for this expense'
+        });
+      }
+
+      // Find the receipt
+      const receipt = await db('petty_cash_expense_receipts')
+        .where('id', receiptId)
+        .where('expense_id', id)
+        .first();
+
+      if (!receipt) {
+        return res.status(404).json({
+          success: false,
+          error: 'Receipt not found'
+        });
+      }
+
+      // Delete from S3
+      try {
+        await storageService.deleteFile(receipt.storage_key);
+      } catch (deleteError) {
+        winston.warn('Failed to delete receipt from S3', {
+          error: deleteError.message,
+          key: receipt.storage_key
+        });
+      }
+
+      // Delete from database
+      await db('petty_cash_expense_receipts').where('id', receiptId).delete();
+
+      winston.info('Receipt deleted', {
+        expenseId: id,
+        receiptId,
+        companyId: req.user.companyId,
+        userId: req.user.userId
+      });
+
+      res.json({
+        success: true,
+        message: 'Receipt deleted successfully'
+      });
+
+    } catch (error) {
+      winston.error('Error deleting receipt', {
+        error: error.message,
+        expenseId: req.params.id,
+        receiptId: req.params.receiptId,
+        companyId: req.user.companyId
+      });
+
+      res.status(500).json({
+        success: false,
+        error: 'Failed to delete receipt'
+      });
+    }
+  }
+);
+
+// GET /petty-cash-expenses/:id/receipt - Get receipt download URL
+router.get('/:id/receipt', requirePermission('VIEW_EXPENSE_REPORTS'), async (req, res) => {
+  try {
+    const db = getDbConnection(req.user.companyId);
+    const { id } = req.params;
+
+    // Get expense with receipt info
+    const expense = await db('petty_cash_expenses')
+      .select('id', 'expenseNumber', 'receipt_key', 'receipt_uploaded_at', 'receipt_uploaded_by', 'submittedBy')
+      .where('id', id)
+      .first();
+
+    if (!expense) {
+      return res.status(404).json({
+        success: false,
+        error: 'Expense not found'
+      });
+    }
+
+    // Check if user can view this expense
+    const canView = req.user.permissions.includes('VIEW_EXPENSE_REPORTS') ||
+                    expense.submittedBy === req.user.userId;
+    if (!canView) {
+      return res.status(403).json({
+        success: false,
+        error: 'Access denied'
+      });
+    }
+
+    if (!expense.receipt_key) {
+      return res.status(404).json({
+        success: false,
+        error: 'No receipt attached to this expense'
+      });
+    }
+
+    // Check if file exists in S3
+    const exists = await storageService.fileExists(expense.receipt_key);
+    if (!exists) {
+      // File missing - clean up database record
+      await db('petty_cash_expenses').where('id', id).update({
+        receipt_key: null,
+        receipt_uploaded_at: null,
+        receipt_uploaded_by: null
+      });
+
+      return res.status(404).json({
+        success: false,
+        error: 'Receipt file not found. It may have been deleted.'
+      });
+    }
+
+    // Generate presigned download URL
+    const downloadUrl = await storageService.getDownloadUrl(expense.receipt_key);
+
+    // Get file info for additional metadata
+    const fileInfo = await storageService.getFileInfo(expense.receipt_key);
+
+    res.json({
+      success: true,
+      data: {
+        downloadUrl,
+        expiresIn: 3600, // 1 hour
+        key: expense.receipt_key,
+        uploadedAt: expense.receipt_uploaded_at,
+        size: fileInfo?.size,
+        contentType: fileInfo?.contentType
+      }
+    });
+
+  } catch (error) {
+    winston.error('Error getting receipt URL', {
+      error: error.message,
+      expenseId: req.params.id,
+      companyId: req.user.companyId,
+      userId: req.user.userId
+    });
+
+    res.status(500).json({
+      success: false,
+      error: 'Failed to get receipt URL'
+    });
+  }
+});
+
+// DELETE /petty-cash-expenses/:id/receipt - Delete receipt
+router.delete('/:id/receipt', requirePermission('MANAGE_PETTY_CASH'), async (req, res) => {
+  try {
+    const db = getDbConnection(req.user.companyId);
+    const { id } = req.params;
+
+    // Get expense with receipt info
+    const expense = await db('petty_cash_expenses')
+      .select('id', 'expenseNumber', 'cardId', 'receipt_key')
+      .where('id', id)
+      .first();
+
+    if (!expense) {
+      return res.status(404).json({
+        success: false,
+        error: 'Expense not found'
+      });
+    }
+
+    if (!expense.receipt_key) {
+      return res.status(400).json({
+        success: false,
+        error: 'No receipt attached to this expense'
+      });
+    }
+
+    // Delete from S3
+    try {
+      await storageService.deleteFile(expense.receipt_key);
+    } catch (deleteError) {
+      winston.warn('Failed to delete receipt from S3', {
+        expenseId: id,
+        key: expense.receipt_key,
+        error: deleteError.message
+      });
+      // Continue anyway to clean up database record
+    }
+
+    // Update expense record
+    await db('petty_cash_expenses').where('id', id).update({
+      receipt_key: null,
+      receipt_uploaded_at: null,
+      receipt_uploaded_by: null,
+      updated_at: new Date()
+    });
+
+    // Log transaction for audit
+    await db('petty_cash_transactions').insert({
+      card_id: expense.cardId,
+      transaction_number: `TXN-RCD-${Date.now()}`,
+      transaction_type: 'adjustment',
+      amount: 0,
+      expense_id: id,
+      description: `Receipt deleted for expense ${expense.expenseNumber}`,
+      performed_by: req.user.userId,
+      transaction_date: new Date()
+    });
+
+    winston.info('Receipt deleted successfully', {
+      expenseId: id,
+      receiptKey: expense.receipt_key,
+      companyId: req.user.companyId,
+      userId: req.user.userId
+    });
+
+    res.json({
+      success: true,
+      message: 'Receipt deleted successfully'
+    });
+
+  } catch (error) {
+    winston.error('Error deleting receipt', {
+      error: error.message,
+      expenseId: req.params.id,
+      companyId: req.user.companyId,
+      userId: req.user.userId
+    });
+
+    res.status(500).json({
+      success: false,
+      error: 'Failed to delete receipt'
     });
   }
 });

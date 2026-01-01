@@ -343,10 +343,10 @@ class TransactionManager {
    */
   async processExpenseApproval(expenseId, status, userId, notes = null) {
     return await this.executeTransaction(async (trx) => {
-      // Get expense and card details
+      // Get expense and card details (LEFT JOIN for expenses without cards like IOU/company_card)
       const expense = await trx('petty_cash_expenses')
         .select('petty_cash_expenses.*', 'petty_cash_cards.currentBalance', 'petty_cash_cards.totalSpent')
-        .join('petty_cash_cards', 'petty_cash_expenses.cardId', 'petty_cash_cards.id')
+        .leftJoin('petty_cash_cards', 'petty_cash_expenses.cardId', 'petty_cash_cards.id')
         .where('petty_cash_expenses.id', expenseId)
         .first();
 
@@ -358,15 +358,29 @@ class TransactionManager {
         throw new Error('Expense is not in pending status');
       }
 
+      // Check if expense has a card (for balance operations)
+      const hasCard = expense.cardId !== null;
+      const paymentMethod = expense.payment_method || 'top_up_card';
+      const isIOU = paymentMethod === 'iou';
+
+      // Build update object for expense status
+      const expenseUpdate = {
+        status,
+        approvedBy: userId,
+        approvedAt: new Date(),
+        approvalNotes: notes
+      };
+
+      // For IOU expenses, set reimbursement_status when approved
+      if (isIOU && status === 'approved') {
+        expenseUpdate.reimbursement_status = 'pending';
+        expenseUpdate.reimbursement_amount = expense.amount;
+      }
+
       // Update expense status
       await trx('petty_cash_expenses')
         .where('id', expenseId)
-        .update({
-          status,
-          approvedBy: userId,
-          approvedAt: new Date(),
-          approvalNotes: notes
-        });
+        .update(expenseUpdate);
 
       // IMPORTANT: MySQL returns DECIMAL as strings, so we must parseFloat
       const expenseAmount = parseFloat(expense.amount) || 0;
@@ -374,15 +388,33 @@ class TransactionManager {
       const totalSpent = parseFloat(expense.totalSpent) || 0;
 
       if (status === 'approved') {
-        // Balance was ALREADY deducted on submission
-        // Just update totalSpent to track approved expenses
-        await trx('petty_cash_cards')
-          .where('id', expense.cardId)
-          .update({
-            totalSpent: totalSpent + expenseAmount
-          });
+        // For card-based payments (top_up_card, petrol_card), balance was ALREADY deducted on submission
+        // For IOU/company_card, there's no card balance involved
+        if (hasCard) {
+          // Just update totalSpent to track approved expenses
+          await trx('petty_cash_cards')
+            .where('id', expense.cardId)
+            .update({
+              totalSpent: totalSpent + expenseAmount
+            });
 
-        // Record financial transaction (confirms the expense)
+          // Log to petty cash transactions table
+          await trx('petty_cash_transactions').insert({
+            card_id: expense.cardId,
+            transaction_number: this.generateTransactionNumber('petty_cash'),
+            transaction_type: 'expense_approved',
+            amount: -expenseAmount, // Negative for deduction
+            balance_before: cardBalance,
+            balance_after: cardBalance, // Balance unchanged (already deducted)
+            expense_id: expenseId,
+            description: `Expense approved: ${expense.category} - ${expense.description}`,
+            performed_by: userId,
+            pc_user_id: expense.submitted_by_pc_user,
+            transaction_date: new Date()
+          });
+        }
+
+        // Record financial transaction (confirms the expense) - for all payment methods
         await trx('transactions').insert({
           transactionNumber: this.generateTransactionNumber('petty_cash'),
           transactionType: 'petty_cash',
@@ -393,73 +425,75 @@ class TransactionManager {
           unitPrice: null,
           amount: -expenseAmount, // Negative for expense
           transactionDate: expense.expenseDate,
-          description: `Petty Cash Approved - ${expense.category}: ${expense.description}`,
+          description: `Petty Cash Approved (${paymentMethod}) - ${expense.category}: ${expense.description}`,
           createdBy: userId
-        });
-
-        // Log to petty cash transactions table
-        await trx('petty_cash_transactions').insert({
-          card_id: expense.cardId,
-          transaction_number: this.generateTransactionNumber('petty_cash'),
-          transaction_type: 'expense_approved',
-          amount: -expenseAmount, // Negative for deduction
-          balance_before: cardBalance,
-          balance_after: cardBalance, // Balance unchanged (already deducted)
-          expense_id: expenseId,
-          description: `Expense approved: ${expense.category} - ${expense.description}`,
-          performed_by: userId,
-          pc_user_id: expense.submitted_by_pc_user,
-          transaction_date: new Date()
         });
 
         winston.info('Petty cash expense approved', {
           expenseId,
           amount: expenseAmount,
+          paymentMethod,
           cardId: expense.cardId,
+          isIOU,
+          reimbursementPending: isIOU,
           approvedBy: userId
         });
 
       } else if (status === 'rejected') {
-        // RESTORE the balance - refund the reserved amount
-        const newBalance = cardBalance + expenseAmount;
+        // For card-based payments, RESTORE the balance - refund the reserved amount
+        if (hasCard) {
+          const newBalance = cardBalance + expenseAmount;
 
-        await trx('petty_cash_cards')
-          .where('id', expense.cardId)
-          .update({
-            currentBalance: newBalance
+          await trx('petty_cash_cards')
+            .where('id', expense.cardId)
+            .update({
+              currentBalance: newBalance
+            });
+
+          // Log to petty cash transactions table
+          await trx('petty_cash_transactions').insert({
+            card_id: expense.cardId,
+            transaction_number: this.generateTransactionNumber('petty_cash'),
+            transaction_type: 'expense_rejected',
+            amount: expenseAmount, // Positive for refund
+            balance_before: cardBalance,
+            balance_after: newBalance,
+            expense_id: expenseId,
+            description: `Expense rejected (balance restored): ${expense.category} - ${notes || 'No reason provided'}`,
+            performed_by: userId,
+            pc_user_id: expense.submitted_by_pc_user,
+            transaction_date: new Date()
           });
 
-        // Log to petty cash transactions table
-        await trx('petty_cash_transactions').insert({
-          card_id: expense.cardId,
-          transaction_number: this.generateTransactionNumber('petty_cash'),
-          transaction_type: 'expense_rejected',
-          amount: expenseAmount, // Positive for refund
-          balance_before: cardBalance,
-          balance_after: newBalance,
-          expense_id: expenseId,
-          description: `Expense rejected (balance restored): ${expense.category} - ${notes || 'No reason provided'}`,
-          performed_by: userId,
-          pc_user_id: expense.submitted_by_pc_user,
-          transaction_date: new Date()
-        });
-
-        winston.info('Petty cash expense rejected - balance restored', {
-          expenseId,
-          amount: expenseAmount,
-          cardId: expense.cardId,
-          previousBalance: cardBalance,
-          newBalance: newBalance,
-          rejectedBy: userId,
-          reason: notes
-        });
+          winston.info('Petty cash expense rejected - balance restored', {
+            expenseId,
+            amount: expenseAmount,
+            paymentMethod,
+            cardId: expense.cardId,
+            previousBalance: cardBalance,
+            newBalance: newBalance,
+            rejectedBy: userId,
+            reason: notes
+          });
+        } else {
+          // For IOU/company_card, just log the rejection
+          winston.info('Petty cash expense rejected (no balance to restore)', {
+            expenseId,
+            amount: expenseAmount,
+            paymentMethod,
+            rejectedBy: userId,
+            reason: notes
+          });
+        }
       }
 
       return {
         expenseId,
         status,
         amount: expenseAmount,
-        balanceRestored: status === 'rejected' ? expenseAmount : 0
+        paymentMethod,
+        balanceRestored: status === 'rejected' && hasCard ? expenseAmount : 0,
+        reimbursementPending: isIOU && status === 'approved'
       };
     });
   }
