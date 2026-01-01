@@ -80,6 +80,9 @@ const loginSchema = Joi.object({
   }),
 });
 
+// Payment methods available in user portal
+const PORTAL_PAYMENT_METHODS = ['top_up_card', 'petrol_card'];
+
 const expenseSchema = Joi.object({
   category: Joi.string().min(2).max(100).required(),
   description: Joi.string().min(2).max(2000).required(),
@@ -88,6 +91,7 @@ const expenseSchema = Joi.object({
   vendor: Joi.string().max(200).allow(null, '').optional(),
   receiptNumber: Joi.string().max(100).allow(null, '').optional(),
   notes: Joi.string().max(1000).allow(null, '').optional(),
+  paymentMethod: Joi.string().valid(...PORTAL_PAYMENT_METHODS).default('top_up_card').optional(),
 });
 
 // Predefined expense categories (same as main system)
@@ -393,45 +397,86 @@ router.post('/expenses', requirePcAuth, async (req, res) => {
     }
 
     const db = getDbConnectionByCompanyId(req.pcUser.companyId);
-    const { category, description, amount, expenseDate, vendor, receiptNumber, notes } = value;
+    const { category, description, amount, expenseDate, vendor, receiptNumber, notes, paymentMethod } = value;
 
-    // Check if card has sufficient balance
-    const card = await db('petty_cash_cards')
-      .where('id', req.pcUser.cardId)
-      .first();
+    // Determine which card to use based on payment method
+    let cardId = req.pcUser.cardId;
+    let shouldDeductBalance = true;
+    let isPetrolCard = false;
+    let card = null;
 
-    if (!card) {
-      return res.status(400).json({
-        success: false,
-        error: 'Petty cash card not found',
-      });
+    // For fuel category with petrol_card payment method, find company's shared petrol card
+    if (category === 'fuel' && paymentMethod === 'petrol_card') {
+      // Find company's active petrol card (shared among all users)
+      card = await db('petty_cash_cards')
+        .where('card_type', 'petrol')
+        .where('status', 'active')
+        .first();
+
+      if (card) {
+        cardId = card.id;
+        isPetrolCard = true;
+        // Check petrol card balance
+        const petrolBalance = parseFloat(card.currentBalance) || 0;
+        if (amount > petrolBalance) {
+          return res.status(400).json({
+            success: false,
+            error: `Insufficient petrol card balance (${petrolBalance.toFixed(3)}). Please use your regular card.`,
+            code: 'INSUFFICIENT_PETROL_BALANCE',
+          });
+        }
+        shouldDeductBalance = true; // Petrol cards DO deduct balance
+      } else {
+        return res.status(400).json({
+          success: false,
+          error: 'No active petrol card found for this company. Please use your regular card.',
+          code: 'NO_PETROL_CARD',
+        });
+      }
     }
 
-    if (card.status !== 'active') {
-      return res.status(400).json({
-        success: false,
-        error: 'Petty cash card is not active',
-      });
-    }
+    // For non-petrol cards, check user's assigned card
+    if (!isPetrolCard) {
+      card = await db('petty_cash_cards')
+        .where('id', cardId)
+        .first();
 
-    const currentBalance = parseFloat(card.currentBalance) || 0;
-    if (amount > currentBalance) {
-      return res.status(400).json({
-        success: false,
-        error: `Insufficient balance. Current balance: ${currentBalance.toFixed(3)}`,
-        code: 'INSUFFICIENT_BALANCE',
-      });
+      if (!card) {
+        return res.status(400).json({
+          success: false,
+          error: 'Petty cash card not found',
+        });
+      }
+
+      if (card.status !== 'active') {
+        return res.status(400).json({
+          success: false,
+          error: 'Petty cash card is not active',
+        });
+      }
+
+      // Check balance for user's card
+      const currentBalance = parseFloat(card.currentBalance) || 0;
+      if (amount > currentBalance) {
+        return res.status(400).json({
+          success: false,
+          error: `Insufficient balance. Current balance: ${currentBalance.toFixed(3)}`,
+          code: 'INSUFFICIENT_BALANCE',
+        });
+      }
     }
 
     // Generate expense number
     const expenseNumber = generateExpenseNumber(req.pcUser.companyId);
 
-    // Create expense
+    // Create expense with atomic balance deduction
     // Use the card's assignedTo user as submittedBy since DB requires NOT NULL
     // The actual submitter is tracked via submitted_by_pc_user
+    // For petrol cards (shared), we still use cardId to link to the petrol card for balance operations
     const newExpense = {
       expenseNumber,
-      cardId: req.pcUser.cardId,
+      cardId: cardId, // Always set cardId (user's card OR petrol card) for balance tracking
+      petrol_card_id: isPetrolCard ? cardId : null, // Track petrol card separately for reporting
       category,
       description,
       amount,
@@ -440,18 +485,59 @@ router.post('/expenses', requirePcAuth, async (req, res) => {
       receiptNumber: receiptNumber || null,
       notes: notes || null,
       status: 'pending',
+      payment_method: paymentMethod || 'top_up_card',
       submitted_by_pc_user: req.pcUser.id,
-      submittedBy: card.assignedTo, // Use card owner as system user reference
+      submittedBy: card.assignedTo || 1, // Use card owner as system user reference (fallback for shared cards)
     };
 
-    const [id] = await db('petty_cash_expenses').insert(newExpense);
+    // Get current balance for logging
+    const currentBalance = parseFloat(card.currentBalance) || 0;
 
-    winston.info('PC Portal expense submitted', {
-      expenseId: id,
+    // Use transaction for atomic expense creation + balance deduction
+    const result = await db.transaction(async (trx) => {
+      // 1. Create the expense record
+      const [id] = await trx('petty_cash_expenses').insert(newExpense);
+
+      // 2. Deduct balance from card immediately (will be refunded if rejected)
+      if (shouldDeductBalance) {
+        await trx('petty_cash_cards')
+          .where('id', cardId)
+          .update({
+            currentBalance: trx.raw('currentBalance - ?', [amount])
+          });
+
+        // 3. Log the expense submission transaction
+        await trx('petty_cash_transactions').insert({
+          card_id: cardId,
+          transaction_number: `TXN-EXP-${Date.now()}`,
+          transaction_type: 'expense_reserved',
+          amount: -amount, // Negative for deduction
+          balance_before: currentBalance,
+          balance_after: currentBalance - amount,
+          expense_id: id,
+          description: `Expense reserved: ${category} - ${description}`,
+          performed_by: card.assignedTo || 1,
+          pc_user_id: req.pcUser.id,
+          transaction_date: new Date()
+        });
+      }
+
+      return {
+        id,
+        newBalance: shouldDeductBalance ? currentBalance - amount : currentBalance
+      };
+    });
+
+    winston.info('PC Portal expense submitted with balance deduction', {
+      expenseId: result.id,
       expenseNumber,
       pcUserId: req.pcUser.id,
-      cardId: req.pcUser.cardId,
+      cardId: cardId,
+      isPetrolCard,
+      paymentMethod: paymentMethod || 'top_up_card',
       amount,
+      previousBalance: currentBalance,
+      newBalance: result.newBalance,
       category,
       company: req.pcUser.companyId,
     });
@@ -459,12 +545,13 @@ router.post('/expenses', requirePcAuth, async (req, res) => {
     res.status(201).json({
       success: true,
       data: {
-        id,
+        id: result.id,
         expenseNumber,
         ...value,
         status: 'pending',
+        newBalance: result.newBalance.toFixed(3),
       },
-      message: 'Expense submitted successfully',
+      message: 'Expense submitted successfully. Balance has been reserved pending approval.',
     });
   } catch (error) {
     winston.error('Error submitting PC Portal expense', { error: error.message });
