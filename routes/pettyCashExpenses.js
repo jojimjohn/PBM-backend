@@ -923,7 +923,7 @@ router.get('/:id/receipts',
       const receipts = await db('petty_cash_expense_receipts')
         .select(
           'petty_cash_expense_receipts.*',
-          'users.fullName as uploadedByName'
+          db.raw("CONCAT(users.firstName, ' ', users.lastName) as uploadedByName")
         )
         .leftJoin('users', 'petty_cash_expense_receipts.uploaded_by', 'users.id')
         .where('expense_id', id)
