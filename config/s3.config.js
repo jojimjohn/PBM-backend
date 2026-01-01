@@ -54,19 +54,30 @@ async function isS3Available() {
 
 /**
  * Generate S3 key for petty cash receipts
- * Path structure: {companyId}/petty-cash/{expenseNumber}/receipt-{timestamp}.{ext}
- * Example: al-ramrami/petty-cash/EXP-2025-0001/receipt-1704067200000.jpg
+ * Path structure: {companyId}/{year}/petty-cash/{expenseNumber}/receipt-{timestamp}.{ext}
+ * Example: al-ramrami/2025/petty-cash/EXP-2025-0001/receipt-1704067200000.jpg
  *
  * @param {string} companyId - Company identifier (e.g., 'al-ramrami', 'pride-muscat')
  * @param {string} expenseNumber - Expense number (e.g., 'EXP-2025-0001')
  * @param {string} filename - Original filename
+ * @param {string|Date} expenseDate - Expense date (used to determine year folder)
  * @returns {string} S3 object key
  */
-function generateReceiptKey(companyId, expenseNumber, filename) {
+function generateReceiptKey(companyId, expenseNumber, filename, expenseDate = null) {
   const timestamp = Date.now();
   const ext = filename.substring(filename.lastIndexOf('.'));
-  // Company-first path for easier bucket policies and organization
-  return `${companyId}/petty-cash/${expenseNumber}/receipt-${timestamp}${ext}`;
+
+  // Determine year from expense date, falling back to current year
+  let year;
+  if (expenseDate) {
+    const date = expenseDate instanceof Date ? expenseDate : new Date(expenseDate);
+    year = date.getFullYear();
+  } else {
+    year = new Date().getFullYear();
+  }
+
+  // Company/Year path for easier bucket policies and chronological organization
+  return `${companyId}/${year}/petty-cash/${expenseNumber}/receipt-${timestamp}${ext}`;
 }
 
 /**

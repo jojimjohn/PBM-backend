@@ -67,9 +67,10 @@ class StorageService {
    * @param {string} companyId - Company identifier
    * @param {string} expenseNumber - Expense number (e.g., 'EXP-2025-0001')
    * @param {number} uploadedBy - User ID who uploaded
+   * @param {string|Date} expenseDate - Expense date (for year-based folder organization)
    * @returns {Promise<{key: string, size: number, contentType: string}>}
    */
-  async uploadReceipt(buffer, originalName, contentType, companyId, expenseNumber, uploadedBy) {
+  async uploadReceipt(buffer, originalName, contentType, companyId, expenseNumber, uploadedBy, expenseDate = null) {
     // Validate file type
     if (!isValidFileType(contentType, originalName)) {
       throw new Error('Invalid file type. Only JPG, PNG, and PDF files are allowed.');
@@ -80,7 +81,7 @@ class StorageService {
       throw new Error(`File too large. Maximum size is ${MAX_FILE_SIZE / 1024 / 1024}MB.`);
     }
 
-    const key = generateReceiptKey(companyId, expenseNumber, originalName);
+    const key = generateReceiptKey(companyId, expenseNumber, originalName, expenseDate);
 
     return this.uploadFile(buffer, key, contentType, {
       originalName,

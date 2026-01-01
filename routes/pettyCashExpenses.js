@@ -1051,13 +1051,16 @@ router.post('/:id/receipt',
       }
 
       // Upload to S3 using expenseNumber for folder structure
+      // Path: {companyId}/{year}/petty-cash/{expenseNumber}/receipt-{timestamp}.{ext}
+      // Year is based on expense date (allows backdating old expenses)
       const result = await storageService.uploadReceipt(
         req.file.buffer,
         req.file.originalname,
         req.file.mimetype,
         req.user.companyId,
         expense.expenseNumber, // Use expenseNumber for folder path
-        req.user.userId
+        req.user.userId,
+        expense.expenseDate    // Expense date for year-based folder organization
       );
 
       // Insert into new receipts table

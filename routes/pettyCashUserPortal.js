@@ -17,8 +17,6 @@ const express = require('express');
 const router = express.Router();
 const bcrypt = require('bcrypt');
 const multer = require('multer');
-const path = require('path');
-const fs = require('fs');
 const { getDbConnection } = require('../config/database');
 const Joi = require('joi');
 const winston = require('winston');
@@ -31,37 +29,21 @@ const {
   getDbConnectionByCompanyId,
 } = require('../middleware/pettyCashPortalAuth');
 const { isValidTokenFormat } = require('../utils/pettyCashQr');
+const storageService = require('../services/storageService');
 
-// Configure multer for receipt uploads
-const storage = multer.diskStorage({
-  destination: (req, file, cb) => {
-    const uploadDir = path.join(__dirname, '../uploads/receipts');
-    // Create directory if it doesn't exist
-    if (!fs.existsSync(uploadDir)) {
-      fs.mkdirSync(uploadDir, { recursive: true });
-    }
-    cb(null, uploadDir);
-  },
-  filename: (req, file, cb) => {
-    const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1e9);
-    cb(null, `receipt-${uniqueSuffix}${path.extname(file.originalname)}`);
-  },
-});
+// Configure multer for receipt uploads (memory storage for S3 upload)
+const ALLOWED_MIME_TYPES = ['image/jpeg', 'image/png', 'image/gif', 'image/webp', 'application/pdf'];
+const MAX_FILE_SIZE = 5 * 1024 * 1024; // 5MB
 
 const upload = multer({
-  storage,
-  limits: {
-    fileSize: 5 * 1024 * 1024, // 5MB limit
-  },
+  storage: multer.memoryStorage(),
+  limits: { fileSize: MAX_FILE_SIZE },
   fileFilter: (req, file, cb) => {
-    const allowedTypes = /jpeg|jpg|png|gif|webp|pdf/;
-    const extname = allowedTypes.test(path.extname(file.originalname).toLowerCase());
-    const mimetype = allowedTypes.test(file.mimetype);
-
-    if (mimetype && extname) {
-      return cb(null, true);
+    if (ALLOWED_MIME_TYPES.includes(file.mimetype)) {
+      cb(null, true);
+    } else {
+      cb(new Error('Only image files (JPEG, PNG, GIF, WebP) and PDF are allowed'));
     }
-    cb(new Error('Only image files (JPEG, PNG, GIF, WebP) and PDF are allowed'));
   },
 });
 
@@ -365,9 +347,32 @@ router.get('/expenses', requirePcAuth, async (req, res) => {
       .limit(limit)
       .offset(offset);
 
+    // Get receipt counts for each expense from the receipts table
+    const expenseIds = expenses.map(e => e.id);
+    let receiptCounts = {};
+
+    if (expenseIds.length > 0) {
+      const counts = await db('petty_cash_expense_receipts')
+        .whereIn('expense_id', expenseIds)
+        .groupBy('expense_id')
+        .select('expense_id', db.raw('COUNT(*) as count'));
+
+      receiptCounts = counts.reduce((acc, row) => {
+        acc[row.expense_id] = parseInt(row.count);
+        return acc;
+      }, {});
+    }
+
+    // Add receipt count to each expense
+    const expensesWithReceipts = expenses.map(expense => ({
+      ...expense,
+      receiptCount: receiptCounts[expense.id] || 0,
+      hasReceipt: (receiptCounts[expense.id] || 0) > 0 || !!expense.receiptPhoto,
+    }));
+
     res.json({
       success: true,
-      data: expenses,
+      data: expensesWithReceipts,
       pagination: {
         page: parseInt(page),
         limit: parseInt(limit),
@@ -473,6 +478,9 @@ router.post('/expenses', requirePcAuth, async (req, res) => {
     // Use the card's assignedTo user as submittedBy since DB requires NOT NULL
     // The actual submitter is tracked via submitted_by_pc_user
     // For petrol cards (shared), we still use cardId to link to the petrol card for balance operations
+    // For submittedBy: use card.assignedTo, or fallback to the admin who created this PC user
+    const submittedByUserId = card.assignedTo || req.pcUser.createdBy;
+
     const newExpense = {
       expenseNumber,
       cardId: cardId, // Always set cardId (user's card OR petrol card) for balance tracking
@@ -487,7 +495,7 @@ router.post('/expenses', requirePcAuth, async (req, res) => {
       status: 'pending',
       payment_method: paymentMethod || 'top_up_card',
       submitted_by_pc_user: req.pcUser.id,
-      submittedBy: card.assignedTo || 1, // Use card owner as system user reference (fallback for shared cards)
+      submittedBy: submittedByUserId, // Card owner or admin who created this PC user
     };
 
     // Get current balance for logging
@@ -507,16 +515,17 @@ router.post('/expenses', requirePcAuth, async (req, res) => {
           });
 
         // 3. Log the expense submission transaction
+        // Using 'expense' type for the initial deduction (balance reserved pending approval)
         await trx('petty_cash_transactions').insert({
           card_id: cardId,
           transaction_number: `TXN-EXP-${Date.now()}`,
-          transaction_type: 'expense_reserved',
+          transaction_type: 'expense', // Valid enum value for expense submission
           amount: -amount, // Negative for deduction
           balance_before: currentBalance,
           balance_after: currentBalance - amount,
           expense_id: id,
-          description: `Expense reserved: ${category} - ${description}`,
-          performed_by: card.assignedTo || 1,
+          description: `Expense submitted (pending approval): ${category} - ${description}`,
+          performed_by: submittedByUserId, // Same user as submittedBy
           pc_user_id: req.pcUser.id,
           transaction_date: new Date()
         });
@@ -564,6 +573,7 @@ router.post('/expenses', requirePcAuth, async (req, res) => {
 });
 
 // POST /pc-portal/expenses/:id/receipt - Upload receipt photo
+// Uses S3 storage with path: {companyId}/petty-cash/{expenseNumber}/receipt-{timestamp}.{ext}
 router.post('/expenses/:id/receipt', requirePcAuth, upload.single('receipt'), async (req, res) => {
   try {
     const db = getDbConnectionByCompanyId(req.pcUser.companyId);
@@ -578,6 +588,7 @@ router.post('/expenses/:id/receipt', requirePcAuth, upload.single('receipt'), as
 
     // Verify expense belongs to this user
     const expense = await db('petty_cash_expenses')
+      .select('id', 'expenseNumber', 'expenseDate', 'status', 'submitted_by_pc_user')
       .where({
         id,
         submitted_by_pc_user: req.pcUser.id,
@@ -585,9 +596,6 @@ router.post('/expenses/:id/receipt', requirePcAuth, upload.single('receipt'), as
       .first();
 
     if (!expense) {
-      // Delete uploaded file
-      fs.unlinkSync(req.file.path);
-
       return res.status(404).json({
         success: false,
         error: 'Expense not found',
@@ -596,52 +604,76 @@ router.post('/expenses/:id/receipt', requirePcAuth, upload.single('receipt'), as
 
     // Only allow receipt upload for pending expenses
     if (expense.status !== 'pending') {
-      fs.unlinkSync(req.file.path);
-
       return res.status(400).json({
         success: false,
         error: 'Cannot upload receipt for processed expense',
       });
     }
 
-    // Delete old receipt if exists
-    if (expense.receiptPhoto) {
-      const oldPath = path.join(__dirname, '../uploads/receipts', expense.receiptPhoto);
-      if (fs.existsSync(oldPath)) {
-        fs.unlinkSync(oldPath);
-      }
+    // Check existing receipts count (max 2 per expense)
+    const MAX_RECEIPTS = 2;
+    const [existingCount] = await db('petty_cash_expense_receipts')
+      .where('expense_id', id)
+      .count('id as count');
+
+    if ((existingCount?.count || 0) >= MAX_RECEIPTS) {
+      return res.status(400).json({
+        success: false,
+        error: `Maximum ${MAX_RECEIPTS} receipts allowed per expense`,
+      });
     }
 
-    // Update expense with receipt path
-    await db('petty_cash_expenses').where('id', id).update({
-      receiptPhoto: req.file.filename,
-      updated_at: new Date(),
+    // Upload to S3 using expenseNumber for folder structure
+    // Path: {companyId}/{year}/petty-cash/{expenseNumber}/receipt-{timestamp}.{ext}
+    // Year is based on expense date (allows backdating old expenses)
+    const result = await storageService.uploadReceipt(
+      req.file.buffer,
+      req.file.originalname,
+      req.file.mimetype,
+      req.pcUser.companyId,
+      expense.expenseNumber,
+      req.pcUser.createdBy, // Admin who created this PC user (for audit trail)
+      expense.expenseDate   // Expense date for year-based folder organization
+    );
+
+    // Insert into receipts table
+    const [receiptId] = await db('petty_cash_expense_receipts').insert({
+      expense_id: id,
+      storage_key: result.key,
+      original_filename: req.file.originalname,
+      content_type: req.file.mimetype,
+      file_size: req.file.size,
+      uploaded_by: req.pcUser.createdBy, // Link to admin user for FK constraint
+      uploaded_at: new Date(),
+      created_at: new Date(),
+      updated_at: new Date()
     });
 
-    winston.info('Receipt uploaded via PC Portal', {
+    winston.info('Receipt uploaded via PC Portal to S3', {
       expenseId: id,
+      receiptId,
+      receiptKey: result.key,
       pcUserId: req.pcUser.id,
-      filename: req.file.filename,
+      filename: req.file.originalname,
+      fileSize: req.file.size,
+      company: req.pcUser.companyId,
     });
 
     res.json({
       success: true,
       data: {
-        receiptPhoto: req.file.filename,
+        receiptId,
+        storageKey: result.key,
+        originalFilename: req.file.originalname,
       },
       message: 'Receipt uploaded successfully',
     });
   } catch (error) {
-    // Clean up uploaded file on error
-    if (req.file) {
-      try {
-        fs.unlinkSync(req.file.path);
-      } catch (e) {
-        // Ignore cleanup errors
-      }
-    }
-
-    winston.error('Error uploading receipt', { error: error.message });
+    winston.error('Error uploading receipt via PC Portal', {
+      error: error.message,
+      expenseId: req.params.id,
+      pcUserId: req.pcUser?.id,
+    });
 
     res.status(500).json({
       success: false,
@@ -650,7 +682,7 @@ router.post('/expenses/:id/receipt', requirePcAuth, upload.single('receipt'), as
   }
 });
 
-// GET /pc-portal/expenses/:id - Get specific expense
+// GET /pc-portal/expenses/:id - Get specific expense with receipts
 router.get('/expenses/:id', requirePcAuth, async (req, res) => {
   try {
     const db = getDbConnectionByCompanyId(req.pcUser.companyId);
@@ -670,9 +702,20 @@ router.get('/expenses/:id', requirePcAuth, async (req, res) => {
       });
     }
 
+    // Get receipts from the receipts table
+    const receipts = await db('petty_cash_expense_receipts')
+      .where('expense_id', id)
+      .select('id', 'original_filename', 'content_type', 'file_size', 'uploaded_at')
+      .orderBy('uploaded_at', 'desc');
+
     res.json({
       success: true,
-      data: expense,
+      data: {
+        ...expense,
+        receipts,
+        receiptCount: receipts.length,
+        hasReceipt: receipts.length > 0 || !!expense.receiptPhoto,
+      },
     });
   } catch (error) {
     winston.error('Error fetching expense', { error: error.message });
@@ -680,6 +723,111 @@ router.get('/expenses/:id', requirePcAuth, async (req, res) => {
     res.status(500).json({
       success: false,
       error: 'Failed to fetch expense',
+    });
+  }
+});
+
+// GET /pc-portal/expenses/:id/receipts - Get all receipts for an expense
+router.get('/expenses/:id/receipts', requirePcAuth, async (req, res) => {
+  try {
+    const db = getDbConnectionByCompanyId(req.pcUser.companyId);
+    const { id } = req.params;
+
+    // Verify expense belongs to this user
+    const expense = await db('petty_cash_expenses')
+      .where({
+        id,
+        submitted_by_pc_user: req.pcUser.id,
+      })
+      .first();
+
+    if (!expense) {
+      return res.status(404).json({
+        success: false,
+        error: 'Expense not found',
+      });
+    }
+
+    // Get receipts from the receipts table
+    const receipts = await db('petty_cash_expense_receipts')
+      .where('expense_id', id)
+      .select('id', 'storage_key', 'original_filename', 'content_type', 'file_size', 'uploaded_at')
+      .orderBy('uploaded_at', 'desc');
+
+    res.json({
+      success: true,
+      data: receipts,
+    });
+  } catch (error) {
+    winston.error('Error fetching receipts', { error: error.message });
+
+    res.status(500).json({
+      success: false,
+      error: 'Failed to fetch receipts',
+    });
+  }
+});
+
+// GET /pc-portal/expenses/:id/receipts/:receiptId - Get presigned URL for a specific receipt
+router.get('/expenses/:id/receipts/:receiptId', requirePcAuth, async (req, res) => {
+  try {
+    const db = getDbConnectionByCompanyId(req.pcUser.companyId);
+    const { id, receiptId } = req.params;
+
+    // Verify expense belongs to this user
+    const expense = await db('petty_cash_expenses')
+      .where({
+        id,
+        submitted_by_pc_user: req.pcUser.id,
+      })
+      .first();
+
+    if (!expense) {
+      return res.status(404).json({
+        success: false,
+        error: 'Expense not found',
+      });
+    }
+
+    // Get the specific receipt
+    const receipt = await db('petty_cash_expense_receipts')
+      .where({
+        id: receiptId,
+        expense_id: id,
+      })
+      .first();
+
+    if (!receipt) {
+      return res.status(404).json({
+        success: false,
+        error: 'Receipt not found',
+      });
+    }
+
+    // Generate presigned URL for viewing
+    const downloadUrl = await storageService.getDownloadUrl(receipt.storage_key);
+
+    res.json({
+      success: true,
+      data: {
+        id: receipt.id,
+        downloadUrl,
+        originalFilename: receipt.original_filename,
+        contentType: receipt.content_type,
+        fileSize: receipt.file_size,
+        uploadedAt: receipt.uploaded_at,
+      },
+    });
+  } catch (error) {
+    winston.error('Error fetching receipt URL', {
+      error: error.message,
+      expenseId: req.params.id,
+      receiptId: req.params.receiptId,
+    });
+
+    res.status(500).json({
+      success: false,
+      error: 'Failed to fetch receipt',
     });
   }
 });

@@ -147,6 +147,7 @@ const requirePcAuth = async (req, res, next) => {
       cardNumber: pcUser.cardNumber,
       currentBalance: parseFloat(pcUser.currentBalance) || 0,
       monthlyLimit: pcUser.monthlyLimit ? parseFloat(pcUser.monthlyLimit) : null,
+      createdBy: pcUser.created_by, // Admin user who created this PC user (for submittedBy)
     };
 
     next();
