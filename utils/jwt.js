@@ -64,13 +64,14 @@ const verifyRefreshToken = (token) => {
 };
 
 // Generate token pair (access + refresh)
-const generateTokenPair = (userId, email, role, companyId, permissions = []) => {
+const generateTokenPair = (userId, email, role, companyId, permissions = [], roleId = null) => {
   const payload = {
     userId,
     email,
     role,
     companyId,
     permissions,
+    roleId,
     tokenType: 'access'
   };
 

@@ -18,6 +18,7 @@ const {
   recalculateAndFixBalance,
   getCardAuditTrail
 } = require('../utils/pettyCashBalanceVerifier');
+const pettyCashUserService = require('../services/pettyCashUserService');
 
 // Validation schemas
 // Note: assignedTo/staffName are now optional - petty cash users are managed separately via /petty-cash-users
@@ -402,6 +403,71 @@ router.post('/',
         );
       }
 
+      // Handle petty cash user linking for top-up cards with assigned users
+      let pettyCashUserResult = null;
+      let generatedPin = null;
+
+      if (cardType === 'top_up' && cardData.assignedTo) {
+        try {
+          // Check if user already has a petty cash user record (from auto-creation during registration)
+          const existingPcUser = await pettyCashUserService.findByUserId(
+            cardData.assignedTo,
+            req.user.companyId
+          );
+
+          if (existingPcUser) {
+            // Activate existing PC user and link to this card
+            pettyCashUserResult = await pettyCashUserService.activateAndLinkCard(
+              existingPcUser.id,
+              id,
+              req.user.companyId,
+              { activatedBy: req.user.userId }
+            );
+            generatedPin = pettyCashUserResult.generatedPin;
+
+            winston.info('Existing petty cash user activated and linked to card', {
+              pettyCashUserId: existingPcUser.id,
+              cardId: id,
+              userId: cardData.assignedTo,
+            });
+          } else {
+            // No existing PC user - get or create one (legacy flow with auto-creation)
+            const createResult = await pettyCashUserService.getOrCreate(
+              cardData.assignedTo,
+              req.user.companyId,
+              {
+                name: cardData.staffName || `User ${cardData.assignedTo}`,
+                department: cardData.department,
+                createdBy: req.user.userId,
+              }
+            );
+
+            // Now activate and link the card
+            pettyCashUserResult = await pettyCashUserService.activateAndLinkCard(
+              createResult.pettyCashUser.id,
+              id,
+              req.user.companyId,
+              { activatedBy: req.user.userId }
+            );
+            generatedPin = pettyCashUserResult.generatedPin;
+
+            winston.info('New petty cash user created and linked to card', {
+              pettyCashUserId: createResult.pettyCashUser.id,
+              cardId: id,
+              userId: cardData.assignedTo,
+              wasExisting: createResult.existing,
+            });
+          }
+        } catch (pcError) {
+          // Log error but don't fail card creation
+          winston.error('Failed to link petty cash user to card', {
+            cardId: id,
+            userId: cardData.assignedTo,
+            error: pcError.message,
+          });
+        }
+      }
+
       winston.info('Petty cash card created', {
         cardId: id,
         cardNumber,
@@ -409,13 +475,26 @@ router.post('/',
         assignedTo: cardType === 'petrol' ? null : cardData.assignedTo,
         initialBalance: cardData.initialBalance,
         companyId: req.user.companyId,
-        userId: req.user.userId
+        userId: req.user.userId,
+        pettyCashUserLinked: !!pettyCashUserResult,
       });
 
       res.status(201).json({
         success: true,
-        data: { id, ...newCard },
-        message: 'Petty cash card created successfully'
+        data: {
+          id,
+          ...newCard,
+          // Include generated PIN (one-time display) if a PC user was linked
+          ...(generatedPin ? { generatedPin } : {}),
+          pettyCashUser: pettyCashUserResult ? {
+            id: pettyCashUserResult.pettyCashUserId,
+            activated: true,
+            message: 'Petty cash user activated. Please securely provide the PIN to the user.',
+          } : null,
+        },
+        message: generatedPin
+          ? 'Petty cash card created and user activated. IMPORTANT: Save the generated PIN - it will only be shown once!'
+          : 'Petty cash card created successfully'
       });
       
     } catch (error) {

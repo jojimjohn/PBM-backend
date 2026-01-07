@@ -1,6 +1,7 @@
 const express = require('express');
 const { validate, validateParams, sanitize } = require('../middleware/validation');
 const { requirePermission } = require('../middleware/auth');
+const { projectFilter, applyProjectFilter } = require('../middleware/projectFilter');
 const { logger, auditLog } = require('../utils/logger');
 const { getDbConnection } = require('../config/database');
 const { uploadMultiple, deleteFile, fileExists } = require('../middleware/upload');
@@ -77,11 +78,11 @@ const purchaseOrderItemSchema = Joi.object({
 });
 
 // GET /api/purchase-orders - List all purchase orders
-router.get('/', requirePermission('VIEW_PURCHASE'), async (req, res) => {
+router.get('/', requirePermission('VIEW_PURCHASE'), projectFilter, async (req, res) => {
   try {
     const { companyId } = req.user;
     const db = getDbConnection(companyId);
-    
+
     const {
       page = 1,
       limit = 50,
@@ -93,7 +94,7 @@ router.get('/', requirePermission('VIEW_PURCHASE'), async (req, res) => {
     } = req.query;
 
     const offset = (page - 1) * limit;
-    
+
     let query = db('purchase_orders')
       .leftJoin('suppliers', 'purchase_orders.supplierId', 'suppliers.id')
       .leftJoin('collection_orders', 'purchase_orders.collection_order_id', 'collection_orders.id')
@@ -106,6 +107,9 @@ router.get('/', requirePermission('VIEW_PURCHASE'), async (req, res) => {
         db.raw('(SELECT COUNT(*) FROM purchase_order_items WHERE purchase_order_items.purchaseOrderId = purchase_orders.id) as itemCount')
       )
       .whereNot('purchase_orders.status', 'cancelled');
+
+    // Apply project-based filtering
+    query = applyProjectFilter(query, req.projectFilter, 'purchase_orders.project_id');
 
     // Search filter
     if (search) {

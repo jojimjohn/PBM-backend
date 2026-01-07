@@ -60,8 +60,8 @@ const logAudit = async (db, params) => {
       details: details ? JSON.stringify(details) : null,
       old_values: oldValues ? JSON.stringify(oldValues) : null,
       new_values: newValues ? JSON.stringify(newValues) : null,
-      status,
-      created_at: new Date()
+      status
+      // timestamp column auto-populates via DEFAULT CURRENT_TIMESTAMP
     });
   } catch (error) {
     logger.error('Failed to log audit event:', { error: error.message, params });
@@ -702,13 +702,17 @@ router.post('/:id/clone', requirePermission('MANAGE_ROLES'), async (req, res) =>
       hierarchyLevel = Math.min(8, sourceRole.hierarchy_level - 1);
     }
 
-    // Create clone
+    // Create clone - ensure permissions is JSON string (may be array if parsed by DB)
+    const permissionsJson = Array.isArray(sourceRole.permissions)
+      ? JSON.stringify(sourceRole.permissions)
+      : sourceRole.permissions;
+
     const [insertId] = await db('roles').insert({
       company_id: companyId,
       name: cloneName,
       slug: cloneSlug,
       description: sourceRole.description,
-      permissions: sourceRole.permissions, // Already JSON string
+      permissions: permissionsJson,
       hierarchy_level: hierarchyLevel,
       is_system: false,
       is_active: true,

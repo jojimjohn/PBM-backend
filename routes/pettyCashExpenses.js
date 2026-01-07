@@ -3,6 +3,7 @@ const router = express.Router();
 const { getDbConnection } = require('../config/database');
 const { requirePermission } = require('../middleware/auth');
 const { validate } = require('../middleware/validation');
+const { getRepositoryFactory } = require('../repositories/RepositoryFactory');
 const Joi = require('joi');
 const winston = require('winston');
 const multer = require('multer');
@@ -85,8 +86,32 @@ const expenseCategories = [
   { id: 'emergency', name: 'Emergency Expenses', maxAmount: 2000, category: 'other' }
 ];
 
-// Helper to get category IDs for validation
+// Helper to get category IDs for validation (fallback)
 const expenseCategoryIds = expenseCategories.map(cat => cat.id);
+
+// Helper to validate expense category against database or fallback
+async function isValidExpenseCategory(db, categoryCode) {
+  if (!categoryCode) return false;
+
+  try {
+    // First try to validate against database categories
+    const dbCategory = await db('expense_categories')
+      .where('code', categoryCode)
+      .where('is_active', true)
+      .whereIn('type', ['petty_cash', 'operational', 'other'])
+      .first();
+
+    if (dbCategory) {
+      return true;
+    }
+  } catch (error) {
+    // Table might not exist or other DB error - fall through to hardcoded validation
+    winston.debug('Database category validation failed, using fallback', { error: error.message });
+  }
+
+  // Fallback to hardcoded categories
+  return expenseCategoryIds.includes(categoryCode);
+}
 
 // GET /petty-cash-expenses - List all expenses with filtering
 router.get('/', requirePermission('VIEW_EXPENSE_REPORTS'), async (req, res) => {
@@ -201,12 +226,52 @@ router.get('/', requirePermission('VIEW_EXPENSE_REPORTS'), async (req, res) => {
   }
 });
 
-// GET /petty-cash-expenses/categories - Get expense categories
+// GET /petty-cash-expenses/categories - Get expense categories (from database)
 router.get('/categories', requirePermission('VIEW_EXPENSE_REPORTS'), async (req, res) => {
-  res.json({
-    success: true,
-    data: expenseCategories
-  });
+  try {
+    const repositoryFactory = getRepositoryFactory(req.user.companyId);
+    const categoryRepository = repositoryFactory.getExpenseCategoriesRepository();
+    const locale = req.query.locale || 'en';
+
+    // Fetch petty_cash type categories from the database
+    const dbCategories = await categoryRepository.findForDropdown('petty_cash', locale);
+
+    if (dbCategories && dbCategories.length > 0) {
+      // Map database categories to match expected format
+      const categories = dbCategories.map(cat => ({
+        id: cat.code,
+        name: cat.name,
+        maxAmount: cat.max_amount || null,
+        category: 'petty_cash'
+      }));
+
+      return res.json({
+        success: true,
+        data: categories
+      });
+    }
+
+    // Fallback to predefined categories if no database categories exist
+    winston.debug('No database categories found, using fallback', {
+      companyId: req.user.companyId
+    });
+
+    res.json({
+      success: true,
+      data: expenseCategories
+    });
+  } catch (error) {
+    winston.error('Error fetching expense categories', {
+      error: error.message,
+      companyId: req.user.companyId
+    });
+
+    // Fallback to predefined categories on error
+    res.json({
+      success: true,
+      data: expenseCategories
+    });
+  }
 });
 
 // GET /petty-cash-expenses/pending-reimbursements - Get all pending IOU reimbursements
@@ -274,8 +339,9 @@ router.post('/',
       // Generate expense number
       const expenseNumber = generateExpenseNumber(req.user.companyId);
 
-      // Validate expense category
-      if (!expenseCategoryIds.includes(expenseData.category)) {
+      // Validate expense category (check database first, then fallback to hardcoded)
+      const isValidCategory = await isValidExpenseCategory(db, expenseData.category);
+      if (!isValidCategory) {
         return res.status(400).json({
           success: false,
           error: 'Invalid expense category'

@@ -1,6 +1,7 @@
 const express = require('express');
 const { validate, validateParams, sanitize } = require('../middleware/validation');
 const { requirePermission } = require('../middleware/auth');
+const { projectFilter, applyProjectFilter } = require('../middleware/projectFilter');
 const { logger, auditLog } = require('../utils/logger');
 const { getDbConnection } = require('../config/database');
 const { getRepositoryFactory } = require('../repositories/RepositoryFactory');
@@ -649,7 +650,7 @@ router.put('/:id/driver',
 );
 
 // GET /api/collection-orders - List all collection orders
-router.get('/', requirePermission('VIEW_PURCHASE'), async (req, res) => {
+router.get('/', requirePermission('VIEW_PURCHASE'), projectFilter, async (req, res) => {
   try {
     const { companyId } = req.user;
     const db = getDbConnection(companyId);
@@ -696,6 +697,9 @@ router.get('/', requirePermission('VIEW_PURCHASE'), async (req, res) => {
         db.raw('0 as calculatedValue'),
         db.raw('0 as calculatedExpenses')
       );
+
+    // Apply project filter (if user has project restrictions)
+    query = applyProjectFilter(query, req.projectFilter, 'collection_orders.project_id');
 
     // Status filter
     if (status) {

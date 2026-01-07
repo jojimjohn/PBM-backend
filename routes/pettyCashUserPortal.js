@@ -18,6 +18,7 @@ const router = express.Router();
 const bcrypt = require('bcrypt');
 const multer = require('multer');
 const { getDbConnection } = require('../config/database');
+const { getRepositoryFactory } = require('../repositories/RepositoryFactory');
 const Joi = require('joi');
 const winston = require('winston');
 const {
@@ -279,12 +280,53 @@ router.get('/me', requirePcAuth, async (req, res) => {
   }
 });
 
-// GET /pc-portal/categories - Get expense categories
-router.get('/categories', (req, res) => {
-  res.json({
-    success: true,
-    data: expenseCategories,
-  });
+// GET /pc-portal/categories - Get expense categories (from database with fallback)
+router.get('/categories', async (req, res) => {
+  try {
+    // Get company from query param or use default
+    const companyId = req.query.company || 'al-ramrami';
+    const locale = req.query.locale || 'en';
+
+    const repositoryFactory = getRepositoryFactory(companyId);
+    const categoryRepository = repositoryFactory.getExpenseCategoriesRepository();
+
+    // Fetch petty_cash type categories from the database
+    const dbCategories = await categoryRepository.findForDropdown('petty_cash', locale);
+
+    if (dbCategories && dbCategories.length > 0) {
+      // Map database categories to match expected format
+      const categories = dbCategories.map(cat => ({
+        id: cat.code,
+        name: cat.name,
+        nameAr: cat.name_ar || cat.name,
+        maxAmount: cat.max_amount || null,
+        icon: 'Package' // Default icon, can be extended
+      }));
+
+      return res.json({
+        success: true,
+        data: categories,
+      });
+    }
+
+    // Fallback to predefined categories if no database categories exist
+    winston.debug('No database categories found for portal, using fallback', { companyId });
+
+    res.json({
+      success: true,
+      data: expenseCategories,
+    });
+  } catch (error) {
+    winston.error('Error fetching portal expense categories', {
+      error: error.message
+    });
+
+    // Fallback to predefined categories on error
+    res.json({
+      success: true,
+      data: expenseCategories,
+    });
+  }
 });
 
 // GET /pc-portal/expenses - Get expense history

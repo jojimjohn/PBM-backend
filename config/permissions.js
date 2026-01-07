@@ -300,6 +300,18 @@ const PERMISSIONS = {
     description: 'View profit and loss reports',
     module: 'finance'
   },
+  VIEW_EXPENSES: {
+    key: 'VIEW_EXPENSES',
+    label: 'View Expenses',
+    description: 'View all expense records and categories',
+    module: 'finance'
+  },
+  MANAGE_EXPENSE_CATEGORIES: {
+    key: 'MANAGE_EXPENSE_CATEGORIES',
+    label: 'Manage Expense Categories',
+    description: 'Create, edit, and manage expense categories',
+    module: 'finance'
+  },
 
   // Petty Cash Management
   VIEW_PETTY_CASH: {
@@ -417,6 +429,20 @@ const PERMISSIONS = {
     label: 'View Audit Logs',
     description: 'Access system audit trail',
     module: 'system'
+  },
+
+  // Project Management
+  VIEW_PROJECTS: {
+    key: 'VIEW_PROJECTS',
+    label: 'View Projects',
+    description: 'View project list and details',
+    module: 'projects'
+  },
+  MANAGE_PROJECTS: {
+    key: 'MANAGE_PROJECTS',
+    label: 'Manage Projects',
+    description: 'Create, edit, and manage projects',
+    module: 'projects'
   }
 };
 
@@ -511,6 +537,12 @@ const MODULES = {
     label: 'System',
     icon: 'settings',
     order: 15
+  },
+  projects: {
+    key: 'projects',
+    label: 'Projects',
+    icon: 'folder',
+    order: 16
   }
 };
 

@@ -1,6 +1,7 @@
 const express = require('express');
 const { validate, validateParams, sanitize } = require('../middleware/validation');
 const { requirePermission } = require('../middleware/auth');
+const { projectFilter, applyProjectFilter } = require('../middleware/projectFilter');
 const { logger, auditLog } = require('../utils/logger');
 const { getDbConnection } = require('../config/database');
 const { allocateFIFO, previewFIFO, reverseFIFOAllocation } = require('../utils/fifoAllocator');
@@ -261,11 +262,11 @@ router.post('/preview-fifo',
 );
 
 // GET /api/sales-orders - List all sales orders
-router.get('/', requirePermission('VIEW_SALES'), async (req, res) => {
+router.get('/', requirePermission('VIEW_SALES'), projectFilter, async (req, res) => {
   try {
     const { companyId } = req.user;
     const db = getDbConnection(companyId);
-    
+
     const {
       page = 1,
       limit = 50,
@@ -277,7 +278,7 @@ router.get('/', requirePermission('VIEW_SALES'), async (req, res) => {
     } = req.query;
 
     const offset = (page - 1) * limit;
-    
+
     let query = db('sales_orders')
       .leftJoin('customers', 'sales_orders.customerId', 'customers.id')
       .select(
@@ -285,8 +286,10 @@ router.get('/', requirePermission('VIEW_SALES'), async (req, res) => {
         'customers.name as customerName',
         'customers.customerType',
         db.raw('(SELECT COUNT(*) FROM sales_order_items WHERE sales_order_items.salesOrderId = sales_orders.id) as itemCount')
-      )
-      ;
+      );
+
+    // Apply project-based filtering
+    query = applyProjectFilter(query, req.projectFilter, 'sales_orders.project_id');
 
     // Search filter
     if (search) {

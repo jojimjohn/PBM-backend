@@ -74,7 +74,8 @@ const authenticateToken = async (req, res, next) => {
       email: decoded.email,
       role: decoded.role,
       companyId: decoded.companyId,
-      permissions: decoded.permissions || []
+      permissions: decoded.permissions || [],
+      role_id: decoded.roleId
     };
 
     // Store token for potential logout blacklisting

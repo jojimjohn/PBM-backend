@@ -1,6 +1,8 @@
 const BaseRepository = require('./BaseRepository');
 const WastageRepository = require('./WastageRepository');
 const TransactionRepository = require('./TransactionRepository');
+const ProjectsRepository = require('./ProjectsRepository');
+const ExpenseCategoryRepository = require('./ExpenseCategoryRepository');
 
 /**
  * Repository Factory
@@ -32,6 +34,12 @@ class RepositoryFactory {
         break;
       case 'transactions':
         repository = new TransactionRepository(this.companyId);
+        break;
+      case 'projects':
+        repository = new ProjectsRepository(this.companyId);
+        break;
+      case 'expense_categories':
+        repository = new ExpenseCategoryRepository(this.companyId);
         break;
       // Add other specialized repositories here as needed
       default:
@@ -119,6 +127,20 @@ class RepositoryFactory {
    */
   getTransactionsRepository() {
     return this.getRepository('transactions');
+  }
+
+  /**
+   * Get projects repository (specialized)
+   */
+  getProjectsRepository() {
+    return this.getRepository('projects');
+  }
+
+  /**
+   * Get expense categories repository (specialized)
+   */
+  getExpenseCategoriesRepository() {
+    return this.getRepository('expense_categories');
   }
 
   /**

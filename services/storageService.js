@@ -20,7 +20,7 @@ const {
   generateReceiptKey,
   isValidFileType,
 } = require('../config/s3.config');
-const logger = require('../utils/logger');
+const { logger } = require('../utils/logger');
 
 class StorageService {
   /**

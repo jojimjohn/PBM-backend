@@ -32,6 +32,7 @@ const {
 const emailService = require('../utils/emailService');
 const { blacklistAllUserTokens } = require('../utils/tokenBlacklist');
 const { clearSession } = require('../middleware/sessionTimeout');
+const pettyCashUserService = require('../services/pettyCashUserService');
 
 // Import all valid permissions from roles config (for permission override validation)
 const VALID_PERMISSIONS = [
@@ -353,7 +354,7 @@ router.post('/',
   async (req, res) => {
     try {
       const { companyId, userId: actorId, role: actorRole, email: actorEmail, roleId: actorRoleId } = req.user;
-      const { email, firstName, lastName, roleId, sendWelcomeEmail = true } = req.body;
+      const { email, firstName, lastName, roleId, sendWelcomeEmail = true, createPettyCashAccount = true } = req.body;
       const db = getDbConnection(companyId);
 
       // Look up the target role from the database
@@ -450,6 +451,33 @@ router.post('/',
         emailSent = result.success;
       }
 
+      // Auto-create petty cash account if enabled
+      let pettyCashResult = null;
+      if (createPettyCashAccount) {
+        try {
+          pettyCashResult = await pettyCashUserService.createFromSystemUser(
+            userId,
+            companyId,
+            {
+              name: `${firstName} ${lastName}`,
+              createdBy: actorId,
+            }
+          );
+
+          logger.info('Petty cash account auto-created for new user', {
+            userId,
+            pettyCashUserId: pettyCashResult.pettyCashUser?.id,
+            existing: pettyCashResult.existing,
+          });
+        } catch (pcError) {
+          // Log error but don't fail user creation
+          logger.error('Failed to auto-create petty cash account', {
+            userId,
+            error: pcError.message,
+          });
+        }
+      }
+
       logger.info('User created', {
         newUserId: userId,
         email,
@@ -457,7 +485,8 @@ router.post('/',
         roleName: targetRole.name,
         createdBy: actorId,
         companyId,
-        emailSent
+        emailSent,
+        pettyCashAccountCreated: !!pettyCashResult?.pettyCashUser,
       });
 
       res.status(201).json({
@@ -474,7 +503,13 @@ router.post('/',
           forcePasswordChange: true,
           emailSent,
           // Only include temp password if email wasn't sent
-          ...((!emailSent && sendWelcomeEmail) ? { tempPassword } : {})
+          ...((!emailSent && sendWelcomeEmail) ? { tempPassword } : {}),
+          // Include petty cash account info
+          pettyCashAccount: pettyCashResult ? {
+            created: !pettyCashResult.existing,
+            pettyCashUserId: pettyCashResult.pettyCashUser?.id,
+            message: pettyCashResult.message || 'Petty cash account created. PIN will be generated when card is assigned.',
+          } : null,
         }
       });
 
@@ -714,6 +749,32 @@ router.delete('/:id',
       // Blacklist all tokens for this user
       await blacklistAllUserTokens(parseInt(id));
 
+      // Deactivate linked petty cash user
+      let pettyCashDeactivated = null;
+      try {
+        pettyCashDeactivated = await pettyCashUserService.deactivateByUserId(
+          parseInt(id),
+          companyId,
+          {
+            deactivatedBy: actorId,
+            reason: 'System user deactivated',
+          }
+        );
+
+        if (pettyCashDeactivated.deactivated) {
+          logger.info('Petty cash user deactivated with system user', {
+            userId: id,
+            pettyCashUserId: pettyCashDeactivated.pettyCashUserId,
+          });
+        }
+      } catch (pcError) {
+        // Log error but don't fail user deactivation
+        logger.error('Failed to deactivate petty cash user', {
+          userId: id,
+          error: pcError.message,
+        });
+      }
+
       // Log audit event
       await logAudit(db, {
         actorId,
@@ -739,12 +800,16 @@ router.delete('/:id',
       logger.info('User deactivated', {
         targetUserId: id,
         targetEmail: targetUser.email,
-        deactivatedBy: actorId
+        deactivatedBy: actorId,
+        pettyCashDeactivated: !!pettyCashDeactivated?.deactivated,
       });
 
       res.json({
         success: true,
-        message: 'User deactivated successfully'
+        message: 'User deactivated successfully',
+        data: {
+          pettyCashAccountDeactivated: !!pettyCashDeactivated?.deactivated,
+        },
       });
 
     } catch (error) {

@@ -44,8 +44,11 @@ const bankAccountsRoutes = require('./routes/bankAccounts');
 const bankTransactionsRoutes = require('./routes/bankTransactions');
 const inventoryBatchesRoutes = require('./routes/inventoryBatches');
 const rolesRoutes = require('./routes/roles');
+const permissionsRoutes = require('./routes/permissions');
 const pettyCashUsersRoutes = require('./routes/pettyCashUsers');
 const pettyCashUserPortalRoutes = require('./routes/pettyCashUserPortal');
+const projectsRoutes = require('./routes/projects');
+const expenseCategoriesRoutes = require('./routes/expenseCategories');
 const { authenticateToken } = require('./middleware/auth');
 const { checkSessionTimeout } = require('./middleware/sessionTimeout');
 const { validateCsrfToken, ensureCsrfToken } = require('./middleware/csrf');
@@ -259,6 +262,7 @@ app.use('/api/workflow', workflowRoutes);
 app.use('/api/supplier-locations', supplierLocationsRoutes);
 app.use('/api/users', usersRoutes);
 app.use('/api/roles', rolesRoutes);
+app.use('/api/permissions', permissionsRoutes);
 app.use('/api/system-settings', systemSettingsRoutes);
 app.use('/api/uploads', uploadRoutes);
 app.use('/api/customer-types', customerTypesRoutes);
@@ -271,6 +275,8 @@ app.use('/api/reports', reportsRoutes);
 app.use('/api/bank-accounts', bankAccountsRoutes);
 app.use('/api/bank-transactions', bankTransactionsRoutes);
 app.use('/api/inventory-batches', inventoryBatchesRoutes);
+app.use('/api/projects', projectsRoutes);
+app.use('/api/expense-categories', expenseCategoriesRoutes);
 
 // 404 handler
 app.use('*', (req, res) => {
