@@ -10,6 +10,13 @@ const router = express.Router();
 // Apply sanitization to all routes
 router.use(sanitize);
 
+// Valid waste types for disposable materials
+const WASTE_TYPES = [
+  'waste', 'spillage', 'contamination', 'expiry', 'damage',
+  'theft', 'evaporation', 'sorting_loss', 'quality_rejection',
+  'transport_loss', 'handling_damage', 'other'
+];
+
 // Material validation schema
 const materialSchema = Joi.object({
   code: Joi.string().max(50).required().trim().uppercase(),
@@ -28,6 +35,10 @@ const materialSchema = Joi.object({
   trackBatches: Joi.boolean().default(false),
   isActive: Joi.boolean().default(true),
   is_composite: Joi.boolean().default(false),
+  // Disposable material fields - for materials that auto-convert to wastage
+  is_disposable: Joi.boolean().default(false),
+  default_waste_type: Joi.string().valid(...WASTE_TYPES).allow(null).optional(),
+  auto_wastage_percentage: Joi.number().min(0).max(100).precision(2).default(100),
   compositions: Joi.array().items(
     Joi.object({
       component_material_id: Joi.number().integer().positive().required(),

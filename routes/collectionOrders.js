@@ -1797,9 +1797,62 @@ router.post('/:id/finalize-wcn',
         // 3. Rejected wastage doesn't leave inventory in wrong state
 
         // 2. Update inventory for each collected item (using FULL verified quantities)
+        // Track disposable materials for wastage summary in response
+        const disposableWastages = [];
+
         for (const item of items) {
-          // Check if material is composite
+          // Check material properties (composite, disposable)
           const material = await trx('materials').where({ id: item.materialId }).first();
+
+          // Handle DISPOSABLE materials - 100% of collected quantity goes to wastage, NOT inventory
+          if (material && material.is_disposable) {
+            // ALL disposable material goes to wastage - no partial inventory tracking
+            const wastageQty = item.collectedQuantity;
+
+            // Determine waste type from material configuration
+            const wasteType = material.default_waste_type || 'waste';
+            const unitCost = item.contractRate || material.standardPrice || 0;
+
+            // Create wastage record (status: pending for approval)
+            const [wastageId] = await trx('wastages').insert({
+              materialId: item.materialId,
+              quantity: wastageQty,
+              unitCost: unitCost,
+              totalCost: wastageQty * unitCost,
+              wasteType: wasteType,
+              reason: `Auto-generated from disposable material during WCN finalization`,
+              description: `Disposable material collected via ${wcnNumber}`,
+              status: 'pending',
+              wastageDate: new Date(),
+              collectionOrderId: id, // Link to collection order
+              createdBy: userId,
+              created_at: new Date(),
+              updated_at: new Date()
+            });
+
+            disposableWastages.push({
+              wastageId,
+              materialId: item.materialId,
+              materialName: material.name,
+              quantity: wastageQty,
+              wasteType,
+              totalCost: wastageQty * unitCost
+            });
+
+            logger.info('Auto-wastage created for disposable material', {
+              wcnNumber,
+              collectionOrderId: id,
+              wastageId,
+              materialId: item.materialId,
+              materialName: material.name,
+              collectedQuantity: item.collectedQuantity,
+              wastageQuantity: wastageQty,
+              wasteType
+            });
+
+            // Disposable materials are 100% wastage - skip inventory processing entirely
+            continue;
+          }
 
           if (material && material.is_composite) {
             // Get composite breakdown
@@ -2228,8 +2281,12 @@ router.post('/:id/finalize-wcn',
       if (newItemsAdded > 0) {
         message += ` ${newItemsAdded} new material(s) were added to the collection order.`;
       }
-      // NOTE: Wastage is now recorded separately via the Wastage module.
-      // Users can record wastage from the Collection Details modal after finalization.
+      // Add disposable materials message if any were auto-converted to wastage
+      if (disposableWastages.length > 0) {
+        message += ` ${disposableWastages.length} disposable material(s) auto-converted to wastage (pending approval).`;
+      }
+      // NOTE: Manual wastage is recorded separately via the Wastage module.
+      // Users can record additional wastage from the Collection Details modal after finalization.
 
       res.json({
         success: true,
@@ -2241,8 +2298,14 @@ router.post('/:id/finalize-wcn',
           itemsProcessed: items.length,
           newItemsAdded,
           inventoryUpdated: true,
-          poCreated: true
-          // Wastage is recorded separately - see GET /collection-orders/:id/wastages
+          poCreated: true,
+          // Disposable material auto-wastage summary
+          disposableWastages: disposableWastages.length > 0 ? {
+            count: disposableWastages.length,
+            totalCost: disposableWastages.reduce((sum, w) => sum + w.totalCost, 0),
+            items: disposableWastages
+          } : null
+          // Manual wastage is recorded separately - see GET /collection-orders/:id/wastages
         }
       });
 

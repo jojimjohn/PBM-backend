@@ -649,12 +649,15 @@ router.put('/:id',
         });
       }
       
-      // Validate category if provided
-      if (updateData.category && !expenseCategoryIds.includes(updateData.category)) {
-        return res.status(400).json({
-          success: false,
-          error: 'Invalid expense category'
-        });
+      // Validate category if provided (check database first, then fallback to hardcoded)
+      if (updateData.category) {
+        const isValidCategory = await isValidExpenseCategory(db, updateData.category);
+        if (!isValidCategory) {
+          return res.status(400).json({
+            success: false,
+            error: 'Invalid expense category'
+          });
+        }
       }
 
       // Map camelCase request fields to snake_case database columns
