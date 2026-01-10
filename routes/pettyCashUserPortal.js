@@ -70,7 +70,9 @@ const expenseSchema = Joi.object({
   category: Joi.string().min(2).max(100).required(),
   description: Joi.string().min(2).max(2000).required(),
   amount: Joi.number().positive().max(100000).required(),
-  expenseDate: Joi.date().iso().required(),
+  // Keep as string (YYYY-MM-DD) to avoid timezone conversion issues
+  expenseDate: Joi.string().pattern(/^\d{4}-\d{2}-\d{2}$/).required()
+    .messages({ 'string.pattern.base': 'expenseDate must be in YYYY-MM-DD format' }),
   vendor: Joi.string().max(200).allow(null, '').optional(),
   receiptNumber: Joi.string().max(100).allow(null, '').optional(),
   notes: Joi.string().max(1000).allow(null, '').optional(),

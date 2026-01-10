@@ -499,6 +499,295 @@ class TransactionManager {
   }
 
   /**
+   * Change the card and/or amount for an approved expense
+   * Handles card changes and amount adjustments with proper balance updates
+   * @param {number} expenseId - Expense ID
+   * @param {number} newCardId - New card ID (can be same as current for amount-only changes)
+   * @param {number} newAmount - New expense amount (can be same for card-only changes)
+   * @param {number} userId - User performing the change
+   * @param {string} notes - Reason for change
+   */
+  async processExpenseCardChange(expenseId, newCardId, newAmount, userId, notes = null) {
+    return await this.executeTransaction(async (trx) => {
+      // Get expense with old card details
+      const expense = await trx('petty_cash_expenses')
+        .select('petty_cash_expenses.*',
+                'petty_cash_cards.currentBalance as oldCardBalance',
+                'petty_cash_cards.totalSpent as oldCardTotalSpent',
+                'petty_cash_cards.cardNumber as oldCardNumber',
+                'petty_cash_cards.cardName as oldCardName',
+                'petty_cash_cards.card_type as oldCardType')
+        .leftJoin('petty_cash_cards', 'petty_cash_expenses.cardId', 'petty_cash_cards.id')
+        .where('petty_cash_expenses.id', expenseId)
+        .first();
+
+      if (!expense) {
+        throw new Error('Expense record not found');
+      }
+
+      if (expense.status !== 'approved') {
+        throw new Error('Can only change card/amount for approved expenses. For pending expenses, use the regular update.');
+      }
+
+      if (!expense.cardId) {
+        throw new Error('Expense has no card associated (IOU or company card payment)');
+      }
+
+      const originalAmount = parseFloat(expense.amount) || 0;
+      const finalAmount = parseFloat(newAmount) || originalAmount;
+      const oldCardId = expense.cardId;
+      const isCardChange = oldCardId !== newCardId;
+      const isAmountChange = originalAmount !== finalAmount;
+
+      // Validate at least one change
+      if (!isCardChange && !isAmountChange) {
+        throw new Error('No changes detected');
+      }
+
+      const oldCardBalance = parseFloat(expense.oldCardBalance) || 0;
+      const oldCardTotalSpent = parseFloat(expense.oldCardTotalSpent) || 0;
+
+      let result = {
+        success: true,
+        expenseId,
+        originalAmount,
+        newAmount: finalAmount,
+        amountDifference: finalAmount - originalAmount,
+        cardChanged: isCardChange,
+        amountChanged: isAmountChange,
+        oldCard: null,
+        newCard: null,
+        notes
+      };
+
+      if (isCardChange) {
+        // CARD CHANGE SCENARIO: Refund old card (original amount), deduct new card (new amount)
+        const newCard = await trx('petty_cash_cards')
+          .where('id', newCardId)
+          .first();
+
+        if (!newCard) {
+          throw new Error('New card not found');
+        }
+
+        if (newCard.status !== 'active') {
+          throw new Error('New card is not active');
+        }
+
+        const newCardBalance = parseFloat(newCard.currentBalance) || 0;
+        const newCardTotalSpent = parseFloat(newCard.totalSpent) || 0;
+
+        // Check if new card has sufficient balance for the new amount
+        if (newCardBalance < finalAmount) {
+          throw new Error(`Insufficient balance on new card. Required: ${finalAmount.toFixed(3)}, Available: ${newCardBalance.toFixed(3)}`);
+        }
+
+        // Step 1: Refund the old card (original amount)
+        const oldCardNewBalance = oldCardBalance + originalAmount;
+        const oldCardNewTotalSpent = Math.max(0, oldCardTotalSpent - originalAmount);
+
+        await trx('petty_cash_cards')
+          .where('id', oldCardId)
+          .update({
+            currentBalance: oldCardNewBalance,
+            totalSpent: oldCardNewTotalSpent
+          });
+
+        // Log refund transaction for old card
+        await trx('petty_cash_transactions').insert({
+          card_id: oldCardId,
+          transaction_number: this.generateTransactionNumber('petty_cash'),
+          transaction_type: 'reversal',
+          amount: originalAmount,
+          balance_before: oldCardBalance,
+          balance_after: oldCardNewBalance,
+          expense_id: expenseId,
+          description: `Card change refund: ${expense.category} - Transferred to different card`,
+          notes: notes || 'Expense transferred to another card',
+          performed_by: userId,
+          pc_user_id: expense.submitted_by_pc_user,
+          transaction_date: new Date()
+        });
+
+        // Step 2: Deduct from new card (new amount)
+        const newCardNewBalance = newCardBalance - finalAmount;
+        const newCardNewTotalSpent = newCardTotalSpent + finalAmount;
+
+        await trx('petty_cash_cards')
+          .where('id', newCardId)
+          .update({
+            currentBalance: newCardNewBalance,
+            totalSpent: newCardNewTotalSpent
+          });
+
+        // Log deduction transaction for new card
+        await trx('petty_cash_transactions').insert({
+          card_id: newCardId,
+          transaction_number: this.generateTransactionNumber('petty_cash'),
+          transaction_type: 'expense_approved',
+          amount: -finalAmount,
+          balance_before: newCardBalance,
+          balance_after: newCardNewBalance,
+          expense_id: expenseId,
+          description: `Card change deduction: ${expense.category} - Transferred from different card${isAmountChange ? ` (amount: ${originalAmount.toFixed(3)} → ${finalAmount.toFixed(3)})` : ''}`,
+          notes: notes || 'Expense transferred from another card',
+          performed_by: userId,
+          pc_user_id: expense.submitted_by_pc_user,
+          transaction_date: new Date()
+        });
+
+        // Update expense record with new card and amount
+        const newPaymentMethod = newCard.card_type === 'petrol' ? 'petrol_card' : 'top_up_card';
+        const changeLog = isAmountChange
+          ? `[Card changed from ${expense.oldCardNumber || 'Card #' + oldCardId} to ${newCard.cardNumber || 'Card #' + newCardId}, amount changed from ${originalAmount.toFixed(3)} to ${finalAmount.toFixed(3)} by admin on ${new Date().toISOString().split('T')[0]}]`
+          : `[Card changed from ${expense.oldCardNumber || 'Card #' + oldCardId} to ${newCard.cardNumber || 'Card #' + newCardId} by admin on ${new Date().toISOString().split('T')[0]}]`;
+
+        await trx('petty_cash_expenses')
+          .where('id', expenseId)
+          .update({
+            cardId: newCardId,
+            amount: finalAmount,
+            payment_method: newPaymentMethod,
+            updated_at: new Date(),
+            notes: expense.notes ? `${expense.notes}\n${changeLog}` : changeLog
+          });
+
+        result.oldCard = {
+          id: oldCardId,
+          cardNumber: expense.oldCardNumber,
+          cardName: expense.oldCardName,
+          previousBalance: oldCardBalance,
+          refundAmount: originalAmount,
+          newBalance: oldCardNewBalance
+        };
+        result.newCard = {
+          id: newCardId,
+          cardNumber: newCard.cardNumber,
+          cardName: newCard.cardName,
+          previousBalance: newCardBalance,
+          deductAmount: finalAmount,
+          newBalance: newCardNewBalance
+        };
+
+        winston.info('Expense card change processed', {
+          expenseId,
+          originalAmount,
+          newAmount: finalAmount,
+          oldCardId,
+          oldCardRefunded: originalAmount,
+          newCardId,
+          newCardDeducted: finalAmount,
+          changedBy: userId
+        });
+
+      } else {
+        // AMOUNT-ONLY CHANGE: Adjust same card balance
+        const amountDifference = finalAmount - originalAmount;
+
+        if (amountDifference > 0) {
+          // Amount increased - need to deduct more
+          if (oldCardBalance < amountDifference) {
+            throw new Error(`Insufficient balance for amount increase. Additional required: ${amountDifference.toFixed(3)}, Available: ${oldCardBalance.toFixed(3)}`);
+          }
+
+          const newBalance = oldCardBalance - amountDifference;
+          const newTotalSpent = oldCardTotalSpent + amountDifference;
+
+          await trx('petty_cash_cards')
+            .where('id', oldCardId)
+            .update({
+              currentBalance: newBalance,
+              totalSpent: newTotalSpent
+            });
+
+          await trx('petty_cash_transactions').insert({
+            card_id: oldCardId,
+            transaction_number: this.generateTransactionNumber('petty_cash'),
+            transaction_type: 'adjustment',
+            amount: -amountDifference,
+            balance_before: oldCardBalance,
+            balance_after: newBalance,
+            expense_id: expenseId,
+            description: `Amount adjustment: ${expense.category} - Increased from ${originalAmount.toFixed(3)} to ${finalAmount.toFixed(3)}`,
+            notes: notes || 'Expense amount increased',
+            performed_by: userId,
+            pc_user_id: expense.submitted_by_pc_user,
+            transaction_date: new Date()
+          });
+
+          result.oldCard = {
+            id: oldCardId,
+            cardNumber: expense.oldCardNumber,
+            cardName: expense.oldCardName,
+            previousBalance: oldCardBalance,
+            adjustmentAmount: -amountDifference,
+            newBalance: newBalance
+          };
+
+        } else {
+          // Amount decreased - refund the difference
+          const refundAmount = -amountDifference;
+          const newBalance = oldCardBalance + refundAmount;
+          const newTotalSpent = Math.max(0, oldCardTotalSpent - refundAmount);
+
+          await trx('petty_cash_cards')
+            .where('id', oldCardId)
+            .update({
+              currentBalance: newBalance,
+              totalSpent: newTotalSpent
+            });
+
+          await trx('petty_cash_transactions').insert({
+            card_id: oldCardId,
+            transaction_number: this.generateTransactionNumber('petty_cash'),
+            transaction_type: 'adjustment',
+            amount: refundAmount,
+            balance_before: oldCardBalance,
+            balance_after: newBalance,
+            expense_id: expenseId,
+            description: `Amount adjustment: ${expense.category} - Decreased from ${originalAmount.toFixed(3)} to ${finalAmount.toFixed(3)}`,
+            notes: notes || 'Expense amount decreased',
+            performed_by: userId,
+            pc_user_id: expense.submitted_by_pc_user,
+            transaction_date: new Date()
+          });
+
+          result.oldCard = {
+            id: oldCardId,
+            cardNumber: expense.oldCardNumber,
+            cardName: expense.oldCardName,
+            previousBalance: oldCardBalance,
+            adjustmentAmount: refundAmount,
+            newBalance: newBalance
+          };
+        }
+
+        // Update expense amount
+        const changeLog = `[Amount changed from ${originalAmount.toFixed(3)} to ${finalAmount.toFixed(3)} by admin on ${new Date().toISOString().split('T')[0]}]`;
+
+        await trx('petty_cash_expenses')
+          .where('id', expenseId)
+          .update({
+            amount: finalAmount,
+            updated_at: new Date(),
+            notes: expense.notes ? `${expense.notes}\n${changeLog}` : changeLog
+          });
+
+        winston.info('Expense amount adjustment processed', {
+          expenseId,
+          originalAmount,
+          newAmount: finalAmount,
+          amountDifference,
+          cardId: oldCardId,
+          changedBy: userId
+        });
+      }
+
+      return result;
+    });
+  }
+
+  /**
    * Transfer inventory between locations/batches
    * @param {Object} transferData - Transfer details
    * @param {number} userId - User ID

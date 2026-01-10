@@ -240,36 +240,39 @@ const getCardTransactionHistory = async (db, cardId, options = {}) => {
 
   const offset = (page - 1) * limit;
 
-  let query = db('petty_cash_transactions')
-    .where('card_id', cardId)
-    .orderBy('transaction_date', 'desc');
+  // Build base query with joins first for proper SQL structure
+  let baseQuery = db('petty_cash_transactions')
+    .leftJoin('users', 'petty_cash_transactions.performed_by', 'users.id')
+    .leftJoin('petty_cash_users', 'petty_cash_transactions.pc_user_id', 'petty_cash_users.id')
+    .where('petty_cash_transactions.card_id', cardId);
 
   if (transactionType) {
-    query = query.where('transaction_type', transactionType);
+    baseQuery = baseQuery.where('petty_cash_transactions.transaction_type', transactionType);
   }
 
   if (dateFrom) {
-    query = query.where('transaction_date', '>=', dateFrom);
+    baseQuery = baseQuery.where('petty_cash_transactions.transaction_date', '>=', dateFrom);
   }
 
   if (dateTo) {
-    query = query.where('transaction_date', '<=', dateTo);
+    baseQuery = baseQuery.where('petty_cash_transactions.transaction_date', '<=', dateTo);
   }
 
   // Get total count
-  const countQuery = query.clone();
-  const [{ count }] = await countQuery.clearSelect().clearOrder().count('* as count');
+  const countQuery = baseQuery.clone();
+  const [countResult] = await countQuery.count('petty_cash_transactions.id as count');
+  const count = parseInt(countResult?.count) || 0;
 
   // Get paginated results with user details
-  const transactions = await query
+  const transactions = await baseQuery
+    .clone()
     .select(
       'petty_cash_transactions.*',
       'users.firstName as performedByFirstName',
       'users.lastName as performedByLastName',
       'petty_cash_users.name as pcUserName'
     )
-    .leftJoin('users', 'petty_cash_transactions.performed_by', 'users.id')
-    .leftJoin('petty_cash_users', 'petty_cash_transactions.pc_user_id', 'petty_cash_users.id')
+    .orderBy('petty_cash_transactions.transaction_date', 'desc')
     .limit(limit)
     .offset(offset);
 

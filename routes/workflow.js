@@ -17,6 +17,7 @@ const router = express.Router();
 const { authenticateToken, requirePermission } = require('../middleware/auth');
 const { getDbConnection } = require('../config/database');
 const { logger } = require('../utils/logger');
+const { projectFilter, applyProjectFilter } = require('../middleware/projectFilter');
 
 // Apply authentication to all workflow routes
 router.use(authenticateToken);
@@ -26,12 +27,48 @@ router.use(authenticateToken);
  *
  * Returns unified list of pending actions across ALL workflows
  * Grouped by urgency (high/normal) with actionable next steps
+ * Filtered by user's permissions - only shows tasks the user can act on
  */
 router.get('/pending-actions',
-  requirePermission('VIEW_PURCHASE'),
+  // Apply project filter middleware for project-based task filtering
+  projectFilter,
+  // No strict permission required - we filter based on user's actual permissions
   async (req, res) => {
     const user = req.user;
     const companyId = user.companyId;
+    const userPermissions = user.permissions || [];
+    const userRole = user.role || '';
+
+    // Check if user has a specific permission
+    const hasPermission = (permission) => {
+      // Super admins and company admins see all
+      if (userRole === 'SUPER_ADMIN' || userRole === 'COMPANY_ADMIN') return true;
+      return userPermissions.includes(permission);
+    };
+
+    // Map task types to required permissions
+    const taskPermissionMap = {
+      // Purchase tasks
+      wcn_finalization: 'VIEW_PURCHASE',
+      po_receipt: 'VIEW_PURCHASE',
+      generate_bill: 'VIEW_PURCHASE',
+      // Finance/Accounting tasks
+      record_payment: 'VIEW_FINANCIALS',
+      bank_reconciliation: 'VIEW_FINANCIALS',
+      // Contract tasks
+      contract_renewal: 'VIEW_CONTRACTS',
+      // Inventory tasks
+      low_stock: 'VIEW_INVENTORY',
+      // Petty Cash tasks
+      petty_cash_expiry: 'MANAGE_PETTY_CASH',
+      petty_cash_low_balance: 'MANAGE_PETTY_CASH',
+      expense_approval: 'APPROVE_EXPENSES',
+      // Wastage tasks
+      wastage_approval: 'APPROVE_WASTAGE',
+      // Sales tasks
+      sales_delivery: 'VIEW_SALES',
+      customer_payment: 'VIEW_SALES'
+    };
 
     try {
       const db = getDbConnection(companyId);
@@ -45,8 +82,14 @@ router.get('/pending-actions',
         }
       };
 
-      // Helper function to add action
+      // Helper function to add action (only if user has permission)
       const addAction = (action) => {
+        // Check if user has permission for this task type
+        const requiredPermission = taskPermissionMap[action.type];
+        if (requiredPermission && !hasPermission(requiredPermission)) {
+          return; // Skip this task - user doesn't have permission
+        }
+
         if (action.urgency === 'high') {
           pendingActions.high.push(action);
           pendingActions.stats.highPriority++;
@@ -61,7 +104,7 @@ router.get('/pending-actions',
       // 1. WCNs Pending Finalization (High Priority if >2 days)
       // FIXED: Using actualEndTime instead of completedAt
       // ============================================
-      const pendingWCNs = await db('collection_orders as co')
+      let pendingWCNsQuery = db('collection_orders as co')
         .leftJoin('contracts as c', 'co.contractId', 'c.id')
         .leftJoin('suppliers as s', 'c.supplierId', 's.id')
         .select(
@@ -79,6 +122,9 @@ router.get('/pending-actions',
         .where('co.is_finalized', 0)
         .whereNotNull('co.actualEndTime')
         .orderBy('co.actualEndTime', 'asc');
+      // Apply project filter
+      pendingWCNsQuery = applyProjectFilter(pendingWCNsQuery, req.projectFilter, 'co.project_id');
+      const pendingWCNs = await pendingWCNsQuery;
 
       pendingWCNs.forEach(wcn => {
         addAction({
@@ -97,7 +143,7 @@ router.get('/pending-actions',
             completedAt: wcn.actualEndTime
           },
           actionLabel: 'Finalize WCN',
-          actionRoute: `/purchase?tab=collections&action=finalize&id=${wcn.id}`
+          actionRoute: `/purchase?tab=collections&action=finalize&id=${wcn.id}&search=${encodeURIComponent(wcn.orderNumber)}`
         });
       });
 
@@ -144,7 +190,7 @@ router.get('/pending-actions',
             sourceType: po.source_type
           },
           actionLabel: 'Mark as Received',
-          actionRoute: `/purchase?tab=orders&action=receive&id=${po.id}`
+          actionRoute: `/purchase?tab=orders&action=receive&id=${po.id}&search=${encodeURIComponent(po.orderNumber)}`
         });
       });
 
@@ -190,7 +236,7 @@ router.get('/pending-actions',
             actualDeliveryDate: po.actualDeliveryDate
           },
           actionLabel: 'Generate Bill',
-          actionRoute: `/purchase?tab=orders&action=generate-bill&id=${po.id}`
+          actionRoute: `/purchase?tab=orders&action=generate-bill&id=${po.id}&search=${encodeURIComponent(po.orderNumber)}`
         });
       });
 
@@ -239,7 +285,7 @@ router.get('/pending-actions',
             dueDate: invoice.due_date
           },
           actionLabel: 'Record Payment',
-          actionRoute: `/purchase?tab=orders&action=record-payment&invoice=${invoice.id}`
+          actionRoute: `/purchase?tab=bills&action=record-payment&invoice=${invoice.id}&search=${encodeURIComponent(invoice.invoice_number)}`
         });
       });
 
@@ -278,7 +324,7 @@ router.get('/pending-actions',
               daysUntilExpiry: contract.daysUntilExpiry
             },
             actionLabel: 'Review Contract',
-            actionRoute: `/contracts?action=view&id=${contract.id}`
+            actionRoute: `/contracts?action=view&id=${contract.id}&search=${encodeURIComponent(contract.contractNumber)}`
           });
         });
       }
@@ -324,7 +370,7 @@ router.get('/pending-actions',
               unit: item.unit
             },
             actionLabel: 'Create PO',
-            actionRoute: `/inventory?highlight=${item.materialId}`
+            actionRoute: `/inventory?highlight=${item.materialId}&search=${encodeURIComponent(item.materialName)}`
           });
         });
       } catch (err) {
@@ -375,7 +421,7 @@ router.get('/pending-actions',
                 assignedTo: card.assignedTo
               },
               actionLabel: 'Renew Card',
-              actionRoute: `/petty-cash?action=renew&id=${card.id}`
+              actionRoute: `/petty-cash?action=renew&id=${card.id}&search=${encodeURIComponent(card.card_number)}`
             });
           }
 
@@ -400,7 +446,7 @@ router.get('/pending-actions',
                 assignedTo: card.assignedTo
               },
               actionLabel: 'Reload Card',
-              actionRoute: `/petty-cash?action=reload&id=${card.id}`
+              actionRoute: `/petty-cash?action=reload&id=${card.id}&search=${encodeURIComponent(card.card_number)}`
             });
           }
         });
@@ -448,7 +494,7 @@ router.get('/pending-actions',
               submittedBy: expense.submittedBy
             },
             actionLabel: 'Review',
-            actionRoute: `/petty-cash?tab=expenses&action=review&id=${expense.id}`
+            actionRoute: `/petty-cash?tab=expenses&action=review&id=${expense.id}&search=${encodeURIComponent(expense.expense_number || '')}`
           });
         });
       } catch (err) {
@@ -460,23 +506,25 @@ router.get('/pending-actions',
       // ============================================
       try {
         const pendingWastages = await db('wastages as w')
-          .join('materials as m', 'w.materialId', 'm.id')
+          .leftJoin('materials as m', 'w.materialId', 'm.id')
           .leftJoin('users as u', 'w.reportedBy', 'u.id')
           .select(
             'w.id',
             'w.wastageNumber',
             'w.quantity',
-            'w.wastageType',
-            'w.estimatedValue',
-            'w.created_at',
-            'm.name as materialName',
-            'm.unit',
-            db.raw('CONCAT(u.firstName, " ", u.lastName) as reportedBy'),
-            db.raw('DATEDIFF(NOW(), w.created_at) as daysPending')
+            'w.wasteType',
+            'w.totalCost',
+            'w.wastageDate',
+            db.raw('COALESCE(m.name, "Unknown Material") as materialName'),
+            db.raw('COALESCE(m.unit, "units") as unit'),
+            db.raw('CONCAT(COALESCE(u.firstName, ""), " ", COALESCE(u.lastName, "")) as reportedBy'),
+            db.raw('DATEDIFF(NOW(), COALESCE(w.wastageDate, NOW())) as daysPending')
           )
           .where('w.status', 'pending')
-          .orderBy('w.created_at', 'asc')
-          .limit(10);
+          .orderBy('w.wastageDate', 'asc')
+          .limit(20);
+
+        logger.info('Pending wastages found:', { count: pendingWastages.length, userRole, hasApprovePermission: hasPermission('APPROVE_WASTAGE') });
 
         pendingWastages.forEach(wastage => {
           addAction({
@@ -486,22 +534,22 @@ router.get('/pending-actions',
             entityId: wastage.id,
             entityNumber: wastage.wastageNumber,
             title: `Wastage Pending Approval - ${wastage.materialName}`,
-            description: `${wastage.quantity} ${wastage.unit} (${wastage.wastageType}) - OMR ${wastage.estimatedValue || 0}`,
+            description: `${wastage.quantity} ${wastage.unit} (${wastage.wasteType}) - OMR ${parseFloat(wastage.totalCost || 0).toFixed(3)}`,
             urgency: (wastage.daysPending || 0) >= 3 ? 'high' : 'normal',
             daysPending: wastage.daysPending || 0,
             metadata: {
               materialName: wastage.materialName,
               quantity: wastage.quantity,
-              wastageType: wastage.wastageType,
-              estimatedValue: wastage.estimatedValue,
+              wasteType: wastage.wasteType,
+              totalCost: wastage.totalCost,
               reportedBy: wastage.reportedBy
             },
             actionLabel: 'Review',
-            actionRoute: `/wastage?action=review&id=${wastage.id}`
+            actionRoute: `/wastage?action=review&id=${wastage.id}&search=${encodeURIComponent(wastage.wastageNumber || '')}`
           });
         });
       } catch (err) {
-        logger.warn('Could not fetch pending wastages:', err.message);
+        logger.error('Could not fetch pending wastages:', { error: err.message, stack: err.stack });
       }
 
       // ============================================
@@ -547,7 +595,7 @@ router.get('/pending-actions',
               expectedDeliveryDate: so.expectedDeliveryDate
             },
             actionLabel: 'Process Delivery',
-            actionRoute: `/sales?action=deliver&id=${so.id}`
+            actionRoute: `/sales?action=deliver&id=${so.id}&search=${encodeURIComponent(so.orderNumber)}`
           });
         });
       } catch (err) {
@@ -597,7 +645,7 @@ router.get('/pending-actions',
               paymentTerms: so.paymentTermDays || 30
             },
             actionLabel: 'Record Payment',
-            actionRoute: `/sales?action=payment&id=${so.id}`
+            actionRoute: `/sales?action=payment&id=${so.id}&search=${encodeURIComponent(so.orderNumber)}`
           });
         });
       } catch (err) {
@@ -642,7 +690,7 @@ router.get('/pending-actions',
               transactionDate: txn.transaction_date
             },
             actionLabel: 'Reconcile',
-            actionRoute: `/banking?tab=transactions&action=reconcile&id=${txn.id}`
+            actionRoute: `/banking?tab=transactions&action=reconcile&id=${txn.id}&search=${encodeURIComponent(txn.reference_number || '')}`
           });
         });
       } catch (err) {

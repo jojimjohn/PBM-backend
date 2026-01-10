@@ -6,27 +6,21 @@ const { validate } = require('../middleware/validation');
 const { getRepositoryFactory } = require('../repositories/RepositoryFactory');
 const Joi = require('joi');
 const winston = require('winston');
-const multer = require('multer');
 const storageService = require('../services/storageService');
-const { MAX_FILE_SIZE, ALLOWED_MIME_TYPES } = require('../config/s3.config');
+const { MAX_FILE_SIZE } = require('../config/s3.config');
 const { validateFileSignature } = require('../utils/fileValidation');
+const {
+  createS3SingleUpload,
+  handleS3UploadError,
+} = require('../middleware/upload');
 const {
   logExpenseSubmission,
   logExpenseRejection,
 } = require('../utils/pettyCashTransactions');
 
-// Multer configuration for receipt uploads (memory storage for S3)
-const upload = multer({
-  storage: multer.memoryStorage(),
-  limits: { fileSize: MAX_FILE_SIZE },
-  fileFilter: (req, file, cb) => {
-    if (ALLOWED_MIME_TYPES.includes(file.mimetype)) {
-      cb(null, true);
-    } else {
-      cb(new Error('Invalid file type. Only JPG, PNG, and PDF files are allowed.'), false);
-    }
-  }
-});
+// Use shared upload middleware for receipt uploads (memory storage for S3)
+// Using createS3SingleUpload with 'receipt' field name for backward compatibility
+const uploadReceipt = handleS3UploadError(createS3SingleUpload('receipt'));
 
 // Valid payment methods (updated for card type system)
 // top_up_card: User's assigned petty cash card - deducts from card balance
@@ -36,6 +30,8 @@ const upload = multer({
 const PAYMENT_METHODS = ['top_up_card', 'petrol_card', 'company_card', 'iou'];
 
 // Validation schemas
+// IMPORTANT: Use string for dates to avoid timezone conversion issues
+// Joi.date().iso() converts to Date object which causes UTC timezone shifts
 const expenseSchema = Joi.object({
   // cardId is required for top_up_card, optional for petrol_card (auto-selected), not needed for company_card/iou
   cardId: Joi.number().integer().positive().allow(null).optional(),
@@ -43,7 +39,9 @@ const expenseSchema = Joi.object({
   paymentMethod: Joi.string().valid(...PAYMENT_METHODS).default('top_up_card'),
   description: Joi.string().min(2).max(2000).required(),
   amount: Joi.number().positive().required(),
-  expenseDate: Joi.date().iso().required(),
+  // Keep as string (YYYY-MM-DD format) to preserve date without timezone conversion
+  expenseDate: Joi.string().pattern(/^\d{4}-\d{2}-\d{2}$/).required()
+    .messages({ 'string.pattern.base': 'expenseDate must be in YYYY-MM-DD format' }),
   vendor: Joi.string().max(200).allow(null, '').optional(),
   receiptNumber: Joi.string().max(100).allow(null, '').optional(),
   receiptPhoto: Joi.string().max(500).allow(null, '').optional(),
@@ -93,10 +91,13 @@ const expenseCategoryIds = expenseCategories.map(cat => cat.id);
 async function isValidExpenseCategory(db, categoryCode) {
   if (!categoryCode) return false;
 
+  // Normalize to lowercase for comparison
+  const normalizedCode = categoryCode.toLowerCase();
+
   try {
-    // First try to validate against database categories
+    // First try to validate against database categories (case-insensitive)
     const dbCategory = await db('expense_categories')
-      .where('code', categoryCode)
+      .whereRaw('LOWER(code) = ?', [normalizedCode])
       .where('is_active', true)
       .whereIn('type', ['petty_cash', 'operational', 'other'])
       .first();
@@ -109,8 +110,8 @@ async function isValidExpenseCategory(db, categoryCode) {
     winston.debug('Database category validation failed, using fallback', { error: error.message });
   }
 
-  // Fallback to hardcoded categories
-  return expenseCategoryIds.includes(categoryCode);
+  // Fallback to hardcoded categories (also case-insensitive)
+  return expenseCategoryIds.some(id => id.toLowerCase() === normalizedCode);
 }
 
 // GET /petty-cash-expenses - List all expenses with filtering
@@ -238,10 +239,12 @@ router.get('/categories', requirePermission('VIEW_EXPENSE_REPORTS'), async (req,
 
     if (dbCategories && dbCategories.length > 0) {
       // Map database categories to match expected format
+      // Use lowercase code for consistency with existing expense data
       const categories = dbCategories.map(cat => ({
-        id: cat.code,
+        id: cat.code.toLowerCase(),
+        code: cat.code,
         name: cat.name,
-        maxAmount: cat.max_amount || null,
+        maxAmount: cat.maxAmount || null,
         category: 'petty_cash'
       }));
 
@@ -619,28 +622,28 @@ router.put('/:id',
       const db = getDbConnection(req.user.companyId);
       const { id } = req.params;
       const updateData = req.body;
-      
+
       // Check if expense exists and is pending
       const existingExpense = await db('petty_cash_expenses')
         .select('petty_cash_expenses.*', 'petty_cash_cards.assignedTo')
         .leftJoin('petty_cash_cards', 'petty_cash_expenses.cardId', 'petty_cash_cards.id')
         .where('petty_cash_expenses.id', id)
         .first();
-      
+
       if (!existingExpense) {
         return res.status(404).json({
           success: false,
           error: 'Expense not found'
         });
       }
-      
+
       if (existingExpense.status !== 'pending') {
         return res.status(400).json({
           success: false,
           error: 'Cannot update non-pending expense'
         });
       }
-      
+
       // Check permission to update
       if (existingExpense.submittedBy !== req.user.userId && !req.user.permissions.includes('MANAGE_EXPENSES')) {
         return res.status(403).json({
@@ -648,7 +651,7 @@ router.put('/:id',
           error: 'You can only update your own expenses'
         });
       }
-      
+
       // Validate category if provided (check database first, then fallback to hardcoded)
       if (updateData.category) {
         const isValidCategory = await isValidExpenseCategory(db, updateData.category);
@@ -660,36 +663,159 @@ router.put('/:id',
         }
       }
 
-      // Map camelCase request fields to snake_case database columns
-      const dbUpdateData = {
-        updated_at: new Date()
-      };
+      // Determine if card or amount is changing (for balance adjustments)
+      const originalCardId = existingExpense.cardId;
+      const originalAmount = parseFloat(existingExpense.amount);
+      const newCardId = updateData.cardId !== undefined ? updateData.cardId : originalCardId;
+      const newAmount = updateData.amount !== undefined ? parseFloat(updateData.amount) : originalAmount;
+      const cardChanged = newCardId !== originalCardId;
+      const amountChanged = newAmount !== originalAmount;
 
-      if (updateData.cardId !== undefined) dbUpdateData.cardId = updateData.cardId;
-      if (updateData.category !== undefined) dbUpdateData.category = updateData.category;
-      if (updateData.amount !== undefined) dbUpdateData.amount = updateData.amount;
-      if (updateData.expenseDate !== undefined) dbUpdateData.expenseDate = updateData.expenseDate;
-      if (updateData.description !== undefined) dbUpdateData.description = updateData.description;
-      if (updateData.vendor !== undefined) dbUpdateData.vendor = updateData.vendor;
-      if (updateData.receiptNumber !== undefined) dbUpdateData.receiptNumber = updateData.receiptNumber;
-      if (updateData.receiptPhoto !== undefined) dbUpdateData.receiptPhoto = updateData.receiptPhoto;
-      if (updateData.notes !== undefined) dbUpdateData.notes = updateData.notes;
-      if (updateData.paymentMethod !== undefined) dbUpdateData.payment_method = updateData.paymentMethod;
-      if (updateData.submittedByPcUser !== undefined) dbUpdateData.submittedByPcUser = updateData.submittedByPcUser;
+      // Check if balance adjustment is needed (only for top_up_card or petrol_card payment methods)
+      const requiresBalanceAdjustment = (cardChanged || amountChanged) &&
+        ['top_up_card', 'petrol_card'].includes(existingExpense.payment_method);
 
-      await db('petty_cash_expenses').where('id', id).update(dbUpdateData);
-      
+      // Use transaction for ACID compliance when balance adjustments are needed
+      const result = await db.transaction(async (trx) => {
+        // If balance adjustment is required
+        if (requiresBalanceAdjustment) {
+          // Validate new card if card is changing
+          if (cardChanged && newCardId) {
+            const newCard = await trx('petty_cash_cards')
+              .where('id', newCardId)
+              .first();
+
+            if (!newCard) {
+              throw new Error('New card not found');
+            }
+
+            if (newCard.status !== 'active') {
+              throw new Error('New card is not active');
+            }
+
+            // Check if new card has sufficient balance
+            if (parseFloat(newCard.currentBalance) < newAmount) {
+              throw new Error(`Insufficient balance on new card. Required: ${newAmount.toFixed(3)}, Available: ${parseFloat(newCard.currentBalance).toFixed(3)}`);
+            }
+          }
+
+          // If only amount changed (same card), check if increase is possible
+          if (!cardChanged && amountChanged && newAmount > originalAmount && originalCardId) {
+            const currentCard = await trx('petty_cash_cards')
+              .where('id', originalCardId)
+              .first();
+
+            const amountDifference = newAmount - originalAmount;
+            if (currentCard && parseFloat(currentCard.currentBalance) < amountDifference) {
+              throw new Error(`Insufficient balance for amount increase. Additional required: ${amountDifference.toFixed(3)}, Available: ${parseFloat(currentCard.currentBalance).toFixed(3)}`);
+            }
+          }
+
+          // Perform balance adjustments
+          if (cardChanged) {
+            // Card is changing: refund to old card, deduct from new card
+            if (originalCardId) {
+              // Refund original amount to old card
+              await trx('petty_cash_cards')
+                .where('id', originalCardId)
+                .update({
+                  currentBalance: trx.raw('currentBalance + ?', [originalAmount]),
+                  totalSpent: trx.raw('GREATEST(0, totalSpent - ?)', [originalAmount]),
+                  updated_at: new Date()
+                });
+
+              winston.info('Refunded to original card for pending expense edit', {
+                cardId: originalCardId,
+                amount: originalAmount,
+                expenseId: id
+              });
+            }
+
+            if (newCardId) {
+              // Deduct new amount from new card
+              await trx('petty_cash_cards')
+                .where('id', newCardId)
+                .update({
+                  currentBalance: trx.raw('currentBalance - ?', [newAmount]),
+                  totalSpent: trx.raw('totalSpent + ?', [newAmount]),
+                  updated_at: new Date()
+                });
+
+              winston.info('Deducted from new card for pending expense edit', {
+                cardId: newCardId,
+                amount: newAmount,
+                expenseId: id
+              });
+            }
+          } else if (amountChanged && originalCardId) {
+            // Same card, different amount: adjust the difference
+            const amountDifference = newAmount - originalAmount;
+
+            await trx('petty_cash_cards')
+              .where('id', originalCardId)
+              .update({
+                currentBalance: trx.raw('currentBalance - ?', [amountDifference]), // Negative diff = refund
+                totalSpent: trx.raw('totalSpent + ?', [amountDifference]),
+                updated_at: new Date()
+              });
+
+            winston.info('Adjusted card balance for pending expense amount change', {
+              cardId: originalCardId,
+              amountDifference,
+              oldAmount: originalAmount,
+              newAmount,
+              expenseId: id
+            });
+          }
+        }
+
+        // Map camelCase request fields to snake_case database columns
+        const dbUpdateData = {
+          updated_at: new Date()
+        };
+
+        if (updateData.cardId !== undefined) dbUpdateData.cardId = updateData.cardId;
+        if (updateData.category !== undefined) dbUpdateData.category = updateData.category;
+        if (updateData.amount !== undefined) dbUpdateData.amount = updateData.amount;
+        if (updateData.expenseDate !== undefined) dbUpdateData.expenseDate = updateData.expenseDate;
+        if (updateData.description !== undefined) dbUpdateData.description = updateData.description;
+        if (updateData.vendor !== undefined) dbUpdateData.vendor = updateData.vendor;
+        if (updateData.receiptNumber !== undefined) dbUpdateData.receiptNumber = updateData.receiptNumber;
+        if (updateData.receiptPhoto !== undefined) dbUpdateData.receiptPhoto = updateData.receiptPhoto;
+        if (updateData.notes !== undefined) dbUpdateData.notes = updateData.notes;
+        if (updateData.paymentMethod !== undefined) dbUpdateData.payment_method = updateData.paymentMethod;
+        if (updateData.submittedByPcUser !== undefined) dbUpdateData.submittedByPcUser = updateData.submittedByPcUser;
+
+        await trx('petty_cash_expenses').where('id', id).update(dbUpdateData);
+
+        return {
+          cardChanged,
+          amountChanged,
+          balanceAdjusted: requiresBalanceAdjustment
+        };
+      });
+
       winston.info('Petty cash expense updated', {
         expenseId: id,
         companyId: req.user.companyId,
-        userId: req.user.userId
+        userId: req.user.userId,
+        cardChanged: result.cardChanged,
+        amountChanged: result.amountChanged,
+        balanceAdjusted: result.balanceAdjusted
       });
-      
+
       res.json({
         success: true,
-        message: 'Expense updated successfully'
+        message: result.balanceAdjusted
+          ? 'Expense updated and card balances adjusted successfully'
+          : 'Expense updated successfully',
+        data: {
+          cardChanged: result.cardChanged,
+          amountChanged: result.amountChanged,
+          balanceAdjusted: result.balanceAdjusted
+        }
       });
-      
+
     } catch (error) {
       winston.error('Error updating petty cash expense', {
         error: error.message,
@@ -697,7 +823,17 @@ router.put('/:id',
         companyId: req.user.companyId,
         userId: req.user.userId
       });
-      
+
+      // Return user-friendly error for validation errors
+      if (error.message.includes('Insufficient balance') ||
+          error.message.includes('not found') ||
+          error.message.includes('not active')) {
+        return res.status(400).json({
+          success: false,
+          error: error.message
+        });
+      }
+
       res.status(500).json({
         success: false,
         error: 'Internal server error'
@@ -757,11 +893,73 @@ router.post('/:id/approve',
   }
 );
 
+// POST /petty-cash-expenses/:id/change-card - Change card and/or amount for approved expense
+// This endpoint handles the complex operation of refunding old card and deducting from new card
+// Also handles amount changes with proper balance adjustments
+const cardChangeSchema = Joi.object({
+  newCardId: Joi.number().integer().positive().required(),
+  newAmount: Joi.number().positive().optional(),
+  notes: Joi.string().max(500).allow('', null).optional()
+});
+
+router.post('/:id/change-card',
+  requirePermission('MANAGE_PETTY_CASH'),
+  validate(cardChangeSchema),
+  async (req, res) => {
+    try {
+      const TransactionManager = require('../utils/transactionManager');
+      const txnManager = new TransactionManager(req.user.companyId);
+
+      const { id } = req.params;
+      const { newCardId, newAmount, notes } = req.body;
+
+      // Process the card/amount change with ACID compliance
+      const result = await txnManager.processExpenseCardChange(
+        parseInt(id),
+        newCardId,
+        newAmount,
+        req.user.userId,
+        notes
+      );
+
+      winston.info('Expense card change completed', {
+        expenseId: id,
+        newCardId,
+        companyId: req.user.companyId,
+        userId: req.user.userId,
+        result
+      });
+
+      res.json({
+        success: true,
+        data: result,
+        message: 'Card changed successfully. Old card refunded, new card deducted.'
+      });
+
+    } catch (error) {
+      winston.error('Error changing expense card', {
+        error: error.message,
+        expenseId: req.params.id,
+        newCardId: req.body.newCardId,
+        companyId: req.user.companyId,
+        userId: req.user.userId
+      });
+
+      res.status(400).json({
+        success: false,
+        error: error.message || 'Failed to change card'
+      });
+    }
+  }
+);
+
 // POST /petty-cash-expenses/:id/reimburse - Process IOU reimbursement
 // This endpoint is used to mark an approved IOU expense as reimbursed
 const reimbursementSchema = Joi.object({
   reimbursementAmount: Joi.number().positive().required(),
-  reimbursementDate: Joi.date().iso().required(),
+  // Keep as string (YYYY-MM-DD) to avoid timezone conversion issues
+  reimbursementDate: Joi.string().pattern(/^\d{4}-\d{2}-\d{2}$/).required()
+    .messages({ 'string.pattern.base': 'reimbursementDate must be in YYYY-MM-DD format' }),
   reimbursementMethod: Joi.string().valid('bank_transfer', 'cash', 'check').required(),
   reimbursementReference: Joi.string().max(100).allow('', null).optional()
 });
@@ -1052,7 +1250,7 @@ router.get('/:id/receipts',
 // POST /petty-cash-expenses/:id/receipt - Upload receipt for expense (max 2)
 router.post('/:id/receipt',
   requirePermission('CREATE_EXPENSE'),
-  upload.single('receipt'),
+  uploadReceipt,
   async (req, res) => {
     try {
       const db = getDbConnection(req.user.companyId);

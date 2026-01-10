@@ -31,8 +31,11 @@ const pettyCashCardSchema = Joi.object({
   department: Joi.string().max(100).allow('', null).optional(),
   initialBalance: Joi.number().min(0).required(),
   monthlyLimit: Joi.number().min(0).allow(null).optional(),
-  issueDate: Joi.alternatives().try(Joi.date().iso(), Joi.string().pattern(/^\d{4}-\d{2}-\d{2}$/)).required(),
-  expiryDate: Joi.alternatives().try(Joi.date().iso(), Joi.string().pattern(/^\d{4}-\d{2}-\d{2}$/)).allow('', null).optional(),
+  // Keep as string (YYYY-MM-DD) to avoid timezone conversion issues
+  issueDate: Joi.string().pattern(/^\d{4}-\d{2}-\d{2}$/).required()
+    .messages({ 'string.pattern.base': 'issueDate must be in YYYY-MM-DD format' }),
+  expiryDate: Joi.string().pattern(/^\d{4}-\d{2}-\d{2}$/).allow('', null).optional()
+    .messages({ 'string.pattern.base': 'expiryDate must be in YYYY-MM-DD format' }),
   notes: Joi.string().max(1000).allow('', null).optional()
 });
 
@@ -64,7 +67,9 @@ const reloadCardSchema = Joi.object({
     'number.positive': 'Reload amount must be greater than 0',
     'any.required': 'Reload amount is required'
   }),
-  reloadDate: Joi.alternatives().try(Joi.date().iso(), Joi.string().pattern(/^\d{4}-\d{2}-\d{2}$/)).optional(),
+  // Keep as string (YYYY-MM-DD) to avoid timezone conversion issues
+  reloadDate: Joi.string().pattern(/^\d{4}-\d{2}-\d{2}$/).optional()
+    .messages({ 'string.pattern.base': 'reloadDate must be in YYYY-MM-DD format' }),
   notes: Joi.string().max(500).allow('', null).optional(),
   bankAccountId: Joi.number().integer().positive().allow(null).optional()
 });

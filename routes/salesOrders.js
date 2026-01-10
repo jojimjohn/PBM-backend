@@ -7,6 +7,11 @@ const { getDbConnection } = require('../config/database');
 const { allocateFIFO, previewFIFO, reverseFIFOAllocation } = require('../utils/fifoAllocator');
 const Joi = require('joi');
 
+// File attachment imports
+const { uploadMultipleToS3, requireFiles } = require('../middleware/upload');
+const storageService = require('../services/storageService');
+const { salesOrderAttachments } = require('../repositories/AttachmentRepository');
+
 const router = express.Router();
 
 // Apply sanitization to all routes
@@ -1288,6 +1293,243 @@ router.post('/:id/invoice',
       res.status(500).json({
         success: false,
         error: 'Failed to generate invoice'
+      });
+    }
+  }
+);
+
+// ============================================================================
+// File Attachment Routes
+// ============================================================================
+
+/**
+ * POST /sales-orders/:id/attachments
+ * Upload file attachments to a sales order (max 5 files)
+ */
+router.post('/:id/attachments',
+  requirePermission('CREATE_SALES'),
+  uploadMultipleToS3,
+  async (req, res) => {
+    const db = getDbConnection(req.user.companyId);
+    const { id } = req.params;
+
+    try {
+      // Verify sales order exists
+      const salesOrder = await db('sales_orders')
+        .where('id', id)
+        .first();
+
+      if (!salesOrder) {
+        return res.status(404).json({
+          success: false,
+          error: 'Sales order not found'
+        });
+      }
+
+      // Check if files were uploaded
+      if (!req.files || req.files.length === 0) {
+        return res.status(400).json({
+          success: false,
+          error: 'No files uploaded'
+        });
+      }
+
+      // Upload each file to S3 and save metadata
+      const uploadedFiles = [];
+      for (const file of req.files) {
+        // Upload to S3
+        const uploadResult = await storageService.uploadAttachment(
+          file.buffer,
+          file.originalname,
+          file.mimetype,
+          {
+            companyId: req.user.companyId,
+            module: 'sales-orders',
+            referenceCode: salesOrder.orderNumber,
+            uploadedBy: req.user.userId,
+            referenceDate: salesOrder.orderDate
+          }
+        );
+
+        // Save attachment metadata to database
+        const attachment = await salesOrderAttachments.create(db, {
+          sales_order_id: id,
+          storage_key: uploadResult.key,
+          original_filename: file.originalname,
+          content_type: file.mimetype,
+          file_size: file.size,
+          uploaded_by: req.user.userId
+        });
+
+        // Get presigned download URL
+        const downloadUrl = await storageService.getPresignedUrl(uploadResult.key);
+
+        uploadedFiles.push({
+          id: attachment.id,
+          originalFilename: file.originalname,
+          contentType: file.mimetype,
+          fileSize: file.size,
+          downloadUrl,
+          uploadedAt: attachment.uploaded_at
+        });
+      }
+
+      logger.info('Sales order attachments uploaded', {
+        salesOrderId: id,
+        fileCount: uploadedFiles.length,
+        userId: req.user.userId
+      });
+
+      res.status(201).json({
+        success: true,
+        message: `${uploadedFiles.length} file(s) uploaded successfully`,
+        data: uploadedFiles
+      });
+
+    } catch (error) {
+      logger.error('Error uploading sales order attachments', {
+        error: error.message,
+        salesOrderId: id,
+        userId: req.user.userId
+      });
+      res.status(500).json({
+        success: false,
+        error: 'Failed to upload attachments'
+      });
+    }
+  }
+);
+
+/**
+ * GET /sales-orders/:id/attachments
+ * List all attachments for a sales order with presigned download URLs
+ */
+router.get('/:id/attachments',
+  requirePermission('VIEW_SALES'),
+  async (req, res) => {
+    const db = getDbConnection(req.user.companyId);
+    const { id } = req.params;
+
+    try {
+      // Verify sales order exists
+      const salesOrder = await db('sales_orders')
+        .where('id', id)
+        .first();
+
+      if (!salesOrder) {
+        return res.status(404).json({
+          success: false,
+          error: 'Sales order not found'
+        });
+      }
+
+      // Get all attachments for this sales order
+      const attachments = await salesOrderAttachments.findByReferenceId(db, id);
+
+      // Add presigned download URLs
+      const attachmentsWithUrls = await Promise.all(
+        attachments.map(async (attachment) => {
+          const downloadUrl = await storageService.getPresignedUrl(attachment.storage_key);
+          return {
+            id: attachment.id,
+            originalFilename: attachment.original_filename,
+            contentType: attachment.content_type,
+            fileSize: attachment.file_size,
+            downloadUrl,
+            uploadedBy: attachment.uploaded_by,
+            uploaderName: attachment.uploader_name,
+            uploadedAt: attachment.uploaded_at
+          };
+        })
+      );
+
+      res.json({
+        success: true,
+        data: attachmentsWithUrls
+      });
+
+    } catch (error) {
+      logger.error('Error fetching sales order attachments', {
+        error: error.message,
+        salesOrderId: id,
+        userId: req.user.userId
+      });
+      res.status(500).json({
+        success: false,
+        error: 'Failed to fetch attachments'
+      });
+    }
+  }
+);
+
+/**
+ * DELETE /sales-orders/:id/attachments/:fileId
+ * Delete an attachment from a sales order
+ */
+router.delete('/:id/attachments/:fileId',
+  requirePermission('CREATE_SALES'),
+  async (req, res) => {
+    const db = getDbConnection(req.user.companyId);
+    const { id, fileId } = req.params;
+
+    try {
+      // Verify sales order exists
+      const salesOrder = await db('sales_orders')
+        .where('id', id)
+        .first();
+
+      if (!salesOrder) {
+        return res.status(404).json({
+          success: false,
+          error: 'Sales order not found'
+        });
+      }
+
+      // Get the attachment
+      const attachment = await salesOrderAttachments.findById(db, fileId);
+
+      if (!attachment) {
+        return res.status(404).json({
+          success: false,
+          error: 'Attachment not found'
+        });
+      }
+
+      // Verify attachment belongs to this sales order
+      if (attachment.sales_order_id !== parseInt(id)) {
+        return res.status(403).json({
+          success: false,
+          error: 'Attachment does not belong to this sales order'
+        });
+      }
+
+      // Delete from S3
+      await storageService.deleteFile(attachment.storage_key);
+
+      // Delete from database
+      await salesOrderAttachments.delete(db, fileId);
+
+      logger.info('Sales order attachment deleted', {
+        salesOrderId: id,
+        attachmentId: fileId,
+        userId: req.user.userId
+      });
+
+      res.json({
+        success: true,
+        message: 'Attachment deleted successfully'
+      });
+
+    } catch (error) {
+      logger.error('Error deleting sales order attachment', {
+        error: error.message,
+        salesOrderId: id,
+        attachmentId: fileId,
+        userId: req.user.userId
+      });
+      res.status(500).json({
+        success: false,
+        error: 'Failed to delete attachment'
       });
     }
   }

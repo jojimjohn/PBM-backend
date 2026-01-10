@@ -10,7 +10,8 @@ module.exports = {
       password: process.env.DB_PASSWORD,
       database: process.env.AL_RAMRAMI_DB, // Default to Al Ramrami for migrations
       charset: 'utf8mb4',
-      timezone: 'UTC'
+      // Keep dates as strings to prevent timezone conversion issues
+      dateStrings: true
     },
     pool: {
       min: 2,
@@ -34,7 +35,8 @@ module.exports = {
       password: process.env.DB_PASSWORD,
       database: process.env.AL_RAMRAMI_DB,
       charset: 'utf8mb4',
-      timezone: 'UTC'
+      // Keep dates as strings to prevent timezone conversion issues
+      dateStrings: true
     },
     pool: {
       min: 2,

@@ -3,6 +3,9 @@ const { validate, validateParams, sanitize, schemas } = require('../middleware/v
 const { requirePermission, requireCompanyAccess } = require('../middleware/auth');
 const { logger, auditLog } = require('../utils/logger');
 const { getDbConnection } = require('../config/database');
+const { uploadMultipleToS3, requireFiles } = require('../middleware/upload');
+const storageService = require('../services/storageService');
+const { customerAttachments } = require('../repositories/AttachmentRepository');
 const Joi = require('joi');
 
 const router = express.Router();
@@ -443,6 +446,206 @@ router.patch('/:id/status',
       res.status(500).json({
         success: false,
         error: 'Failed to update customer status'
+      });
+    }
+  }
+);
+
+// ============================================================================
+// ATTACHMENT ROUTES (S3/MinIO)
+// ============================================================================
+
+// POST /api/customers/:id/attachments - Upload attachments to customer
+router.post('/:id/attachments',
+  validateParams(Joi.object({ id: Joi.number().integer().positive().required() })),
+  requirePermission('MANAGE_CUSTOMERS'),
+  uploadMultipleToS3,
+  requireFiles,
+  async (req, res) => {
+    try {
+      const { id } = req.params;
+      const { companyId, userId } = req.user;
+      const db = getDbConnection(companyId);
+
+      // Check if customer exists
+      const customer = await db('customers').where({ id }).first();
+
+      if (!customer) {
+        // Delete uploaded S3 files if customer doesn't exist
+        if (req.files && req.files.length > 0) {
+          await Promise.all(req.files.map(file =>
+            storageService.deleteFile(file.key).catch(err =>
+              logger.warn('Failed to delete orphaned S3 file', { key: file.key, error: err.message })
+            )
+          ));
+        }
+        return res.status(404).json({
+          success: false,
+          error: 'Customer not found'
+        });
+      }
+
+      // Save attachment metadata to database
+      const savedAttachments = [];
+      for (const file of req.files) {
+        const attachment = await customerAttachments.create(db, {
+          customer_id: id,
+          file_key: file.key,
+          file_name: file.originalname,
+          file_size: file.size,
+          mime_type: file.mimetype,
+          uploaded_by: userId
+        });
+        savedAttachments.push(attachment);
+      }
+
+      auditLog('CUSTOMER_ATTACHMENTS_UPLOADED', userId, {
+        customerId: id,
+        customerName: customer.name,
+        filesCount: req.files.length,
+        attachmentIds: savedAttachments.map(a => a.id)
+      });
+
+      res.json({
+        success: true,
+        data: savedAttachments,
+        message: `${req.files.length} file(s) uploaded successfully`
+      });
+
+    } catch (error) {
+      logger.error('Error uploading customer attachments', {
+        error: error.message,
+        customerId: req.params.id,
+        userId: req.user.userId
+      });
+      res.status(500).json({
+        success: false,
+        error: 'Failed to upload attachments'
+      });
+    }
+  }
+);
+
+// GET /api/customers/:id/attachments - Get attachments for customer
+router.get('/:id/attachments',
+  validateParams(Joi.object({ id: Joi.number().integer().positive().required() })),
+  requirePermission('VIEW_CUSTOMERS'),
+  async (req, res) => {
+    try {
+      const { id } = req.params;
+      const { companyId } = req.user;
+      const db = getDbConnection(companyId);
+
+      // Verify customer exists
+      const customer = await db('customers').where({ id }).first();
+
+      if (!customer) {
+        return res.status(404).json({
+          success: false,
+          error: 'Customer not found'
+        });
+      }
+
+      // Get attachments from repository
+      const attachments = await customerAttachments.findByEntity(db, id);
+
+      // Generate presigned URLs for each attachment
+      const attachmentsWithUrls = await Promise.all(
+        attachments.map(async (attachment) => {
+          try {
+            const url = await storageService.getPresignedUrl(attachment.file_key);
+            return { ...attachment, url };
+          } catch (err) {
+            logger.warn('Failed to generate presigned URL', {
+              attachmentId: attachment.id,
+              fileKey: attachment.file_key,
+              error: err.message
+            });
+            return { ...attachment, url: null };
+          }
+        })
+      );
+
+      res.json({
+        success: true,
+        data: attachmentsWithUrls
+      });
+
+    } catch (error) {
+      logger.error('Error fetching customer attachments', {
+        error: error.message,
+        customerId: req.params.id,
+        userId: req.user.userId
+      });
+      res.status(500).json({
+        success: false,
+        error: 'Failed to fetch attachments'
+      });
+    }
+  }
+);
+
+// DELETE /api/customers/:id/attachments/:fileId - Delete attachment from customer
+router.delete('/:id/attachments/:fileId',
+  validateParams(Joi.object({
+    id: Joi.number().integer().positive().required(),
+    fileId: Joi.number().integer().positive().required()
+  })),
+  requirePermission('MANAGE_CUSTOMERS'),
+  async (req, res) => {
+    try {
+      const { id, fileId } = req.params;
+      const { companyId, userId } = req.user;
+      const db = getDbConnection(companyId);
+
+      // Verify customer exists
+      const customer = await db('customers').where({ id }).first();
+
+      if (!customer) {
+        return res.status(404).json({
+          success: false,
+          error: 'Customer not found'
+        });
+      }
+
+      // Get attachment record from repository
+      const attachment = await customerAttachments.findById(db, fileId);
+
+      if (!attachment || attachment.customer_id !== parseInt(id)) {
+        return res.status(404).json({
+          success: false,
+          error: 'Attachment not found'
+        });
+      }
+
+      // Delete file from S3
+      await storageService.deleteFile(attachment.file_key);
+
+      // Delete record from database
+      await customerAttachments.delete(db, fileId);
+
+      auditLog('CUSTOMER_ATTACHMENT_DELETED', userId, {
+        customerId: id,
+        customerName: customer.name,
+        attachmentId: fileId,
+        fileName: attachment.file_name
+      });
+
+      res.json({
+        success: true,
+        message: 'Attachment deleted successfully'
+      });
+
+    } catch (error) {
+      logger.error('Error deleting customer attachment', {
+        error: error.message,
+        customerId: req.params.id,
+        fileId: req.params.fileId,
+        userId: req.user.userId
+      });
+      res.status(500).json({
+        success: false,
+        error: 'Failed to delete attachment'
       });
     }
   }

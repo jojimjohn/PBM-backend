@@ -2,8 +2,11 @@ const express = require('express');
 const router = express.Router();
 const { getDbConnection } = require('../config/database');
 const { requirePermission } = require('../middleware/auth');
-const { validate } = require('../middleware/validation');
+const { validate, validateParams } = require('../middleware/validation');
 const { getRepositoryFactory } = require('../repositories/RepositoryFactory');
+const { uploadMultipleToS3, requireFiles } = require('../middleware/upload');
+const storageService = require('../services/storageService');
+const { projectAttachments } = require('../repositories/AttachmentRepository');
 const Joi = require('joi');
 const winston = require('winston');
 
@@ -603,5 +606,206 @@ router.get('/:id/check-access/:userId', async (req, res) => {
     });
   }
 });
+
+// ============================================================================
+// ATTACHMENT ROUTES (S3/MinIO)
+// ============================================================================
+
+// POST /api/projects/:id/attachments - Upload attachments to project
+router.post('/:id/attachments',
+  validateParams(Joi.object({ id: Joi.number().integer().positive().required() })),
+  requirePermission('MANAGE_PROJECTS'),
+  uploadMultipleToS3,
+  requireFiles,
+  async (req, res) => {
+    try {
+      const { id } = req.params;
+      const { companyId, userId } = req.user;
+      const db = getDbConnection(companyId);
+
+      // Check if project exists
+      const project = await db('projects').where({ id }).first();
+
+      if (!project) {
+        // Delete uploaded S3 files if project doesn't exist
+        if (req.files && req.files.length > 0) {
+          await Promise.all(req.files.map(file =>
+            storageService.deleteFile(file.key).catch(err =>
+              winston.warn('Failed to delete orphaned S3 file', { key: file.key, error: err.message })
+            )
+          ));
+        }
+        return res.status(404).json({
+          success: false,
+          error: 'Project not found'
+        });
+      }
+
+      // Save attachment metadata to database
+      const savedAttachments = [];
+      for (const file of req.files) {
+        const attachment = await projectAttachments.create(db, {
+          project_id: id,
+          file_key: file.key,
+          file_name: file.originalname,
+          file_size: file.size,
+          mime_type: file.mimetype,
+          uploaded_by: userId
+        });
+        savedAttachments.push(attachment);
+      }
+
+      winston.info('Project attachments uploaded', {
+        projectId: id,
+        projectCode: project.code,
+        filesCount: req.files.length,
+        userId
+      });
+
+      res.json({
+        success: true,
+        data: savedAttachments,
+        message: `${req.files.length} file(s) uploaded successfully`
+      });
+
+    } catch (error) {
+      winston.error('Error uploading project attachments', {
+        error: error.message,
+        projectId: req.params.id,
+        userId: req.user.userId
+      });
+      res.status(500).json({
+        success: false,
+        error: 'Failed to upload attachments'
+      });
+    }
+  }
+);
+
+// GET /api/projects/:id/attachments - Get attachments for project
+router.get('/:id/attachments',
+  validateParams(Joi.object({ id: Joi.number().integer().positive().required() })),
+  requirePermission('VIEW_PROJECTS'),
+  async (req, res) => {
+    try {
+      const { id } = req.params;
+      const { companyId } = req.user;
+      const db = getDbConnection(companyId);
+
+      // Verify project exists
+      const project = await db('projects').where({ id }).first();
+
+      if (!project) {
+        return res.status(404).json({
+          success: false,
+          error: 'Project not found'
+        });
+      }
+
+      // Get attachments from repository
+      const attachments = await projectAttachments.findByEntity(db, id);
+
+      // Generate presigned URLs for each attachment
+      const attachmentsWithUrls = await Promise.all(
+        attachments.map(async (attachment) => {
+          try {
+            const url = await storageService.getPresignedUrl(attachment.file_key);
+            return { ...attachment, url };
+          } catch (err) {
+            winston.warn('Failed to generate presigned URL', {
+              attachmentId: attachment.id,
+              fileKey: attachment.file_key,
+              error: err.message
+            });
+            return { ...attachment, url: null };
+          }
+        })
+      );
+
+      res.json({
+        success: true,
+        data: attachmentsWithUrls
+      });
+
+    } catch (error) {
+      winston.error('Error fetching project attachments', {
+        error: error.message,
+        projectId: req.params.id,
+        userId: req.user.userId
+      });
+      res.status(500).json({
+        success: false,
+        error: 'Failed to fetch attachments'
+      });
+    }
+  }
+);
+
+// DELETE /api/projects/:id/attachments/:fileId - Delete attachment from project
+router.delete('/:id/attachments/:fileId',
+  validateParams(Joi.object({
+    id: Joi.number().integer().positive().required(),
+    fileId: Joi.number().integer().positive().required()
+  })),
+  requirePermission('MANAGE_PROJECTS'),
+  async (req, res) => {
+    try {
+      const { id, fileId } = req.params;
+      const { companyId, userId } = req.user;
+      const db = getDbConnection(companyId);
+
+      // Verify project exists
+      const project = await db('projects').where({ id }).first();
+
+      if (!project) {
+        return res.status(404).json({
+          success: false,
+          error: 'Project not found'
+        });
+      }
+
+      // Get attachment record from repository
+      const attachment = await projectAttachments.findById(db, fileId);
+
+      if (!attachment || attachment.project_id !== parseInt(id)) {
+        return res.status(404).json({
+          success: false,
+          error: 'Attachment not found'
+        });
+      }
+
+      // Delete file from S3
+      await storageService.deleteFile(attachment.file_key);
+
+      // Delete record from database
+      await projectAttachments.delete(db, fileId);
+
+      winston.info('Project attachment deleted', {
+        projectId: id,
+        projectCode: project.code,
+        attachmentId: fileId,
+        fileName: attachment.file_name,
+        userId
+      });
+
+      res.json({
+        success: true,
+        message: 'Attachment deleted successfully'
+      });
+
+    } catch (error) {
+      winston.error('Error deleting project attachment', {
+        error: error.message,
+        projectId: req.params.id,
+        fileId: req.params.fileId,
+        userId: req.user.userId
+      });
+      res.status(500).json({
+        success: false,
+        error: 'Failed to delete attachment'
+      });
+    }
+  }
+);
 
 module.exports = router;

@@ -18,6 +18,7 @@ const {
   MAX_FILE_SIZE,
   isS3Available,
   generateReceiptKey,
+  generateAttachmentKey,
   isValidFileType,
 } = require('../config/s3.config');
 const { logger } = require('../utils/logger');
@@ -89,6 +90,63 @@ class StorageService {
       expenseNumber: String(expenseNumber),
       uploadedBy: String(uploadedBy),
     });
+  }
+
+  /**
+   * Upload an attachment for any module (generic version)
+   *
+   * @param {Buffer} buffer - File buffer
+   * @param {string} originalName - Original filename
+   * @param {string} contentType - MIME type
+   * @param {Object} options - Upload options
+   * @param {string} options.companyId - Company identifier (e.g., 'al-ramrami')
+   * @param {string} options.module - Module name (e.g., 'sales-orders', 'customers')
+   * @param {string} options.referenceCode - Reference code (e.g., 'SO-2025-0001', 'CUST-001')
+   * @param {number|string} options.uploadedBy - User ID who uploaded
+   * @param {string|Date} [options.referenceDate] - Reference date for year folder (defaults to current date)
+   * @returns {Promise<{key: string, size: number, contentType: string, originalName: string}>}
+   *
+   * @example
+   * // Upload sales order attachment
+   * await storageService.uploadAttachment(buffer, 'invoice.pdf', 'application/pdf', {
+   *   companyId: 'al-ramrami',
+   *   module: 'sales-orders',
+   *   referenceCode: 'SO-2025-0001',
+   *   uploadedBy: 5
+   * });
+   */
+  async uploadAttachment(buffer, originalName, contentType, options) {
+    const { companyId, module, referenceCode, uploadedBy, referenceDate = null } = options;
+
+    // Validate required options
+    if (!companyId || !module || !referenceCode) {
+      throw new Error('Missing required options: companyId, module, and referenceCode are required');
+    }
+
+    // Validate file type
+    if (!isValidFileType(contentType, originalName)) {
+      throw new Error('Invalid file type. Only JPG, PNG, and PDF files are allowed.');
+    }
+
+    // Validate file size
+    if (buffer.length > MAX_FILE_SIZE) {
+      throw new Error(`File too large. Maximum size is ${MAX_FILE_SIZE / 1024 / 1024}MB.`);
+    }
+
+    const key = generateAttachmentKey(companyId, module, referenceCode, originalName, referenceDate);
+
+    const result = await this.uploadFile(buffer, key, contentType, {
+      originalName,
+      companyId,
+      module,
+      referenceCode,
+      uploadedBy: uploadedBy ? String(uploadedBy) : undefined,
+    });
+
+    return {
+      ...result,
+      originalName,
+    };
   }
 
   /**

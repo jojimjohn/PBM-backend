@@ -14,6 +14,10 @@ const dbConfig = {
     connectTimeout: 60000,
     supportBigNumbers: true,
     bigNumberStrings: true,
+    // IMPORTANT: Keep dates as strings to prevent timezone conversion issues
+    // Without this, mysql2 converts date strings to JavaScript Date objects,
+    // which causes UTC timezone shifts (dates saved as -1 day)
+    dateStrings: true,
   },
   pool: {
     min: 2,

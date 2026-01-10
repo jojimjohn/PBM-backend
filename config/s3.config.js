@@ -91,6 +91,56 @@ function isValidFileType(mimeType, filename) {
   return ALLOWED_MIME_TYPES.includes(mimeType) && ALLOWED_EXTENSIONS.includes(ext);
 }
 
+/**
+ * Generate S3 key for any module attachments (generic version)
+ * Path structure: {companyId}/{year}/{module}/{referenceCode}/{filename-timestamp}.{ext}
+ *
+ * @param {string} companyId - Company identifier (e.g., 'al-ramrami', 'pride-muscat')
+ * @param {string} module - Module name (e.g., 'sales-orders', 'purchase-orders', 'customers')
+ * @param {string} referenceCode - Reference code (e.g., 'SO-2025-0001', 'CUST-001')
+ * @param {string} filename - Original filename
+ * @param {string|Date|null} referenceDate - Reference date for year folder (defaults to current date)
+ * @returns {string} S3 object key
+ *
+ * @example
+ * // Sales order attachment
+ * generateAttachmentKey('al-ramrami', 'sales-orders', 'SO-2025-0001', 'invoice.pdf')
+ * // Returns: al-ramrami/2025/sales-orders/SO-2025-0001/invoice-1704067200000.pdf
+ *
+ * @example
+ * // Customer document
+ * generateAttachmentKey('al-ramrami', 'customers', 'CUST-001', 'contract.pdf')
+ * // Returns: al-ramrami/2025/customers/CUST-001/contract-1704067200000.pdf
+ */
+function generateAttachmentKey(companyId, module, referenceCode, filename, referenceDate = null) {
+  const timestamp = Date.now();
+
+  // Extract file extension
+  const lastDotIndex = filename.lastIndexOf('.');
+  const ext = lastDotIndex !== -1 ? filename.substring(lastDotIndex) : '';
+  const baseName = lastDotIndex !== -1 ? filename.substring(0, lastDotIndex) : filename;
+
+  // Sanitize base name: remove special characters, replace spaces with dashes
+  const sanitizedBaseName = baseName
+    .toLowerCase()
+    .replace(/[^a-z0-9\-_]/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^-|-$/g, '')
+    .substring(0, 50); // Limit length to prevent overly long keys
+
+  // Determine year from reference date, falling back to current year
+  let year;
+  if (referenceDate) {
+    const date = referenceDate instanceof Date ? referenceDate : new Date(referenceDate);
+    year = date.getFullYear();
+  } else {
+    year = new Date().getFullYear();
+  }
+
+  // Build the S3 key: companyId/year/module/referenceCode/sanitizedName-timestamp.ext
+  return `${companyId}/${year}/${module}/${referenceCode}/${sanitizedBaseName}-${timestamp}${ext}`;
+}
+
 module.exports = {
   s3Client,
   BUCKET_NAME,
@@ -99,5 +149,6 @@ module.exports = {
   ALLOWED_EXTENSIONS,
   isS3Available,
   generateReceiptKey,
+  generateAttachmentKey,
   isValidFileType,
 };

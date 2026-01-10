@@ -4,7 +4,9 @@ const { requirePermission } = require('../middleware/auth');
 const { projectFilter, applyProjectFilter } = require('../middleware/projectFilter');
 const { logger, auditLog } = require('../utils/logger');
 const { getDbConnection } = require('../config/database');
-const { uploadMultiple, deleteFile, fileExists } = require('../middleware/upload');
+const { uploadMultiple, deleteFile, fileExists, uploadMultipleToS3, requireFiles } = require('../middleware/upload');
+const storageService = require('../services/storageService');
+const { purchaseOrderAttachments } = require('../repositories/AttachmentRepository');
 const { createBatch } = require('../utils/fifoAllocator');
 const path = require('path');
 const Joi = require('joi');
@@ -1449,16 +1451,12 @@ router.get('/contract-rate/:supplierId/:materialId',
   }
 );
 
-// POST /api/purchase-orders/:id/attachments - Upload attachments to purchase order
+// POST /api/purchase-orders/:id/attachments - Upload attachments to purchase order (S3/MinIO)
 router.post('/:id/attachments',
   validateParams(Joi.object({ id: Joi.number().integer().positive().required() })),
   requirePermission('CREATE_PURCHASE'),
-  (req, res, next) => {
-    // Set upload type for multer destination
-    req.params.type = 'purchase-orders';
-    next();
-  },
-  uploadMultiple,
+  uploadMultipleToS3,
+  requireFiles,
   async (req, res) => {
     try {
       const { id } = req.params;
@@ -1471,11 +1469,13 @@ router.post('/:id/attachments',
         .first();
 
       if (!order) {
-        // Delete uploaded files if order doesn't exist
+        // Delete uploaded S3 files if order doesn't exist
         if (req.files && req.files.length > 0) {
-          req.files.forEach(file => {
-            deleteFile(`purchase-orders/${file.filename}`);
-          });
+          await Promise.all(req.files.map(file =>
+            storageService.deleteFile(file.key).catch(err =>
+              logger.warn('Failed to delete orphaned S3 file', { key: file.key, error: err.message })
+            )
+          ));
         }
         return res.status(404).json({
           success: false,
@@ -1483,48 +1483,30 @@ router.post('/:id/attachments',
         });
       }
 
-      // Get existing attachments
-      let attachments = [];
-      if (order.attachments) {
-        try {
-          attachments = JSON.parse(order.attachments);
-        } catch (e) {
-          attachments = [];
-        }
-      }
-
-      // Add new attachments
-      if (req.files && req.files.length > 0) {
-        req.files.forEach(file => {
-          attachments.push({
-            filename: file.filename,
-            originalName: file.originalname,
-            mimetype: file.mimetype,
-            size: file.size,
-            path: `purchase-orders/${file.filename}`,
-            uploadedAt: new Date().toISOString(),
-            uploadedBy: userId
-          });
+      // Save attachment metadata to database
+      const savedAttachments = [];
+      for (const file of req.files) {
+        const attachment = await purchaseOrderAttachments.create(db, {
+          purchase_order_id: id,
+          file_key: file.key,
+          file_name: file.originalname,
+          file_size: file.size,
+          mime_type: file.mimetype,
+          uploaded_by: userId
         });
+        savedAttachments.push(attachment);
       }
-
-      // Update purchase order with new attachments
-      await db('purchase_orders')
-        .where({ id })
-        .update({
-          attachments: JSON.stringify(attachments),
-          updated_at: new Date()
-        });
 
       auditLog('PURCHASE_ORDER_ATTACHMENTS_UPLOADED', userId, {
         purchaseOrderId: id,
         orderNumber: order.orderNumber,
-        filesCount: req.files.length
+        filesCount: req.files.length,
+        attachmentIds: savedAttachments.map(a => a.id)
       });
 
       res.json({
         success: true,
-        data: attachments,
+        data: savedAttachments,
         message: `${req.files.length} file(s) uploaded successfully`
       });
 
@@ -1542,7 +1524,7 @@ router.post('/:id/attachments',
   }
 );
 
-// GET /api/purchase-orders/:id/attachments - Get attachments for purchase order
+// GET /api/purchase-orders/:id/attachments - Get attachments for purchase order (S3/MinIO)
 router.get('/:id/attachments',
   validateParams(Joi.object({ id: Joi.number().integer().positive().required() })),
   requirePermission('VIEW_PURCHASE'),
@@ -1552,8 +1534,8 @@ router.get('/:id/attachments',
       const { companyId } = req.user;
       const db = getDbConnection(companyId);
 
+      // Verify purchase order exists
       const order = await db('purchase_orders')
-        .select('attachments')
         .where({ id })
         .first();
 
@@ -1564,18 +1546,29 @@ router.get('/:id/attachments',
         });
       }
 
-      let attachments = [];
-      if (order.attachments) {
-        try {
-          attachments = JSON.parse(order.attachments);
-        } catch (e) {
-          attachments = [];
-        }
-      }
+      // Get attachments from repository
+      const attachments = await purchaseOrderAttachments.findByEntity(db, id);
+
+      // Generate presigned URLs for each attachment
+      const attachmentsWithUrls = await Promise.all(
+        attachments.map(async (attachment) => {
+          try {
+            const url = await storageService.getPresignedUrl(attachment.file_key);
+            return { ...attachment, url };
+          } catch (err) {
+            logger.warn('Failed to generate presigned URL', {
+              attachmentId: attachment.id,
+              fileKey: attachment.file_key,
+              error: err.message
+            });
+            return { ...attachment, url: null };
+          }
+        })
+      );
 
       res.json({
         success: true,
-        data: attachments
+        data: attachmentsWithUrls
       });
 
     } catch (error) {
@@ -1592,19 +1585,20 @@ router.get('/:id/attachments',
   }
 );
 
-// DELETE /api/purchase-orders/:id/attachments/:filename - Delete attachment from purchase order
-router.delete('/:id/attachments/:filename',
+// DELETE /api/purchase-orders/:id/attachments/:fileId - Delete attachment from purchase order (S3/MinIO)
+router.delete('/:id/attachments/:fileId',
   validateParams(Joi.object({
     id: Joi.number().integer().positive().required(),
-    filename: Joi.string().required()
+    fileId: Joi.number().integer().positive().required()
   })),
   requirePermission('CREATE_PURCHASE'),
   async (req, res) => {
     try {
-      const { id, filename } = req.params;
+      const { id, fileId } = req.params;
       const { companyId, userId } = req.user;
       const db = getDbConnection(companyId);
 
+      // Verify purchase order exists
       const order = await db('purchase_orders')
         .where({ id })
         .first();
@@ -1616,43 +1610,27 @@ router.delete('/:id/attachments/:filename',
         });
       }
 
-      let attachments = [];
-      if (order.attachments) {
-        try {
-          attachments = JSON.parse(order.attachments);
-        } catch (e) {
-          attachments = [];
-        }
-      }
+      // Get attachment record from repository
+      const attachment = await purchaseOrderAttachments.findById(db, fileId);
 
-      // Find and remove the attachment
-      const attachmentIndex = attachments.findIndex(att => att.filename === filename);
-
-      if (attachmentIndex === -1) {
+      if (!attachment || attachment.purchase_order_id !== parseInt(id)) {
         return res.status(404).json({
           success: false,
           error: 'Attachment not found'
         });
       }
 
-      const removedAttachment = attachments[attachmentIndex];
-      attachments.splice(attachmentIndex, 1);
+      // Delete file from S3
+      await storageService.deleteFile(attachment.file_key);
 
-      // Delete the file from disk
-      deleteFile(`purchase-orders/${filename}`);
-
-      // Update database
-      await db('purchase_orders')
-        .where({ id })
-        .update({
-          attachments: JSON.stringify(attachments),
-          updated_at: new Date()
-        });
+      // Delete record from database
+      await purchaseOrderAttachments.delete(db, fileId);
 
       auditLog('PURCHASE_ORDER_ATTACHMENT_DELETED', userId, {
         purchaseOrderId: id,
         orderNumber: order.orderNumber,
-        filename: removedAttachment.originalName
+        attachmentId: fileId,
+        fileName: attachment.file_name
       });
 
       res.json({
@@ -1664,7 +1642,7 @@ router.delete('/:id/attachments/:filename',
       logger.error('Error deleting purchase order attachment', {
         error: error.message,
         purchaseOrderId: req.params.id,
-        filename: req.params.filename,
+        fileId: req.params.fileId,
         userId: req.user.userId
       });
       res.status(500).json({

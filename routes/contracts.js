@@ -3,12 +3,80 @@ const { validate, validateParams, sanitize } = require('../middleware/validation
 const { requirePermission } = require('../middleware/auth');
 const { logger, auditLog } = require('../utils/logger');
 const { getDbConnection } = require('../config/database');
+const { uploadMultipleToS3, requireFiles } = require('../middleware/upload');
+const storageService = require('../services/storageService');
+const { contractAttachments } = require('../repositories/AttachmentRepository');
 const Joi = require('joi');
 
 const router = express.Router();
 
 // Apply sanitization to all routes
 router.use(sanitize);
+
+/**
+ * Compute effective contract status based on dates
+ * This overrides the stored status if the contract has expired or not yet started
+ * @param {Object} contract - Contract object with status, startDate, endDate
+ * @returns {string} Effective status
+ */
+function getEffectiveStatus(contract) {
+  const today = new Date();
+  today.setHours(0, 0, 0, 0); // Normalize to start of day
+
+  const endDate = new Date(contract.endDate);
+  endDate.setHours(23, 59, 59, 999); // End of day for end date
+
+  const startDate = new Date(contract.startDate);
+  startDate.setHours(0, 0, 0, 0);
+
+  // If terminated or renewed, respect that status
+  if (contract.status === 'terminated' || contract.status === 'renewed') {
+    return contract.status;
+  }
+
+  // Check if contract has expired based on end date
+  if (endDate < today) {
+    return 'expired';
+  }
+
+  // Check if contract hasn't started yet
+  if (startDate > today) {
+    return contract.status === 'draft' ? 'draft' : 'pending';
+  }
+
+  // Contract is currently within valid date range
+  // Return 'active' if it was set to active or draft and dates are valid
+  if (contract.status === 'active' || contract.status === 'draft') {
+    return 'active';
+  }
+
+  // For any other status, return as-is
+  return contract.status;
+}
+
+/**
+ * Apply effective status to a contract or array of contracts
+ * @param {Object|Array} data - Contract or array of contracts
+ * @returns {Object|Array} Data with effectiveStatus added
+ */
+function applyEffectiveStatus(data) {
+  if (Array.isArray(data)) {
+    return data.map(contract => ({
+      ...contract,
+      effectiveStatus: getEffectiveStatus(contract),
+      // Keep original status for reference
+      storedStatus: contract.status,
+      // Replace status with effective status for backward compatibility
+      status: getEffectiveStatus(contract)
+    }));
+  }
+  return {
+    ...data,
+    effectiveStatus: getEffectiveStatus(data),
+    storedStatus: data.status,
+    status: getEffectiveStatus(data)
+  };
+}
 
 /**
  * Generate a unique contract number
@@ -183,6 +251,9 @@ router.get('/', requirePermission('VIEW_CONTRACTS'), async (req, res) => {
       .limit(limit)
       .offset(offset);
 
+    // Apply effective status based on dates (expired contracts show as 'expired')
+    const contractsWithEffectiveStatus = applyEffectiveStatus(contracts);
+
     auditLog('CONTRACTS_VIEWED', req.user.userId, {
       companyId,
       count: contracts.length,
@@ -191,7 +262,7 @@ router.get('/', requirePermission('VIEW_CONTRACTS'), async (req, res) => {
 
     res.json({
       success: true,
-      data: contracts,
+      data: contractsWithEffectiveStatus,
       pagination: {
         page: parseInt(page),
         limit: parseInt(limit),
@@ -269,6 +340,9 @@ router.get('/:id',
         )
         .where('contract_location_rates.contractId', id);
 
+      // Apply effective status based on dates
+      const contractWithEffectiveStatus = applyEffectiveStatus(contract);
+
       auditLog('CONTRACT_VIEWED', req.user.userId, {
         contractId: id,
         contractNumber: contract.contractNumber,
@@ -278,7 +352,7 @@ router.get('/:id',
       res.json({
         success: true,
         data: {
-          ...contract,
+          ...contractWithEffectiveStatus,
           rates
         }
       });
@@ -922,6 +996,206 @@ router.put('/:id/pricing/:materialId',
       res.status(500).json({
         success: false,
         error: 'Failed to update contract pricing'
+      });
+    }
+  }
+);
+
+// ============================================================================
+// ATTACHMENT ROUTES (S3/MinIO)
+// ============================================================================
+
+// POST /api/contracts/:id/attachments - Upload attachments to contract
+router.post('/:id/attachments',
+  validateParams(Joi.object({ id: Joi.number().integer().positive().required() })),
+  requirePermission('MANAGE_CONTRACTS'),
+  uploadMultipleToS3,
+  requireFiles,
+  async (req, res) => {
+    try {
+      const { id } = req.params;
+      const { companyId, userId } = req.user;
+      const db = getDbConnection(companyId);
+
+      // Check if contract exists
+      const contract = await db('contracts').where({ id }).first();
+
+      if (!contract) {
+        // Delete uploaded S3 files if contract doesn't exist
+        if (req.files && req.files.length > 0) {
+          await Promise.all(req.files.map(file =>
+            storageService.deleteFile(file.key).catch(err =>
+              logger.warn('Failed to delete orphaned S3 file', { key: file.key, error: err.message })
+            )
+          ));
+        }
+        return res.status(404).json({
+          success: false,
+          error: 'Contract not found'
+        });
+      }
+
+      // Save attachment metadata to database
+      const savedAttachments = [];
+      for (const file of req.files) {
+        const attachment = await contractAttachments.create(db, {
+          contract_id: id,
+          file_key: file.key,
+          file_name: file.originalname,
+          file_size: file.size,
+          mime_type: file.mimetype,
+          uploaded_by: userId
+        });
+        savedAttachments.push(attachment);
+      }
+
+      auditLog('CONTRACT_ATTACHMENTS_UPLOADED', userId, {
+        contractId: id,
+        contractName: contract.name,
+        filesCount: req.files.length,
+        attachmentIds: savedAttachments.map(a => a.id)
+      });
+
+      res.json({
+        success: true,
+        data: savedAttachments,
+        message: `${req.files.length} file(s) uploaded successfully`
+      });
+
+    } catch (error) {
+      logger.error('Error uploading contract attachments', {
+        error: error.message,
+        contractId: req.params.id,
+        userId: req.user.userId
+      });
+      res.status(500).json({
+        success: false,
+        error: 'Failed to upload attachments'
+      });
+    }
+  }
+);
+
+// GET /api/contracts/:id/attachments - Get attachments for contract
+router.get('/:id/attachments',
+  validateParams(Joi.object({ id: Joi.number().integer().positive().required() })),
+  requirePermission('VIEW_CONTRACTS'),
+  async (req, res) => {
+    try {
+      const { id } = req.params;
+      const { companyId } = req.user;
+      const db = getDbConnection(companyId);
+
+      // Verify contract exists
+      const contract = await db('contracts').where({ id }).first();
+
+      if (!contract) {
+        return res.status(404).json({
+          success: false,
+          error: 'Contract not found'
+        });
+      }
+
+      // Get attachments from repository
+      const attachments = await contractAttachments.findByEntity(db, id);
+
+      // Generate presigned URLs for each attachment
+      const attachmentsWithUrls = await Promise.all(
+        attachments.map(async (attachment) => {
+          try {
+            const url = await storageService.getPresignedUrl(attachment.file_key);
+            return { ...attachment, url };
+          } catch (err) {
+            logger.warn('Failed to generate presigned URL', {
+              attachmentId: attachment.id,
+              fileKey: attachment.file_key,
+              error: err.message
+            });
+            return { ...attachment, url: null };
+          }
+        })
+      );
+
+      res.json({
+        success: true,
+        data: attachmentsWithUrls
+      });
+
+    } catch (error) {
+      logger.error('Error fetching contract attachments', {
+        error: error.message,
+        contractId: req.params.id,
+        userId: req.user.userId
+      });
+      res.status(500).json({
+        success: false,
+        error: 'Failed to fetch attachments'
+      });
+    }
+  }
+);
+
+// DELETE /api/contracts/:id/attachments/:fileId - Delete attachment from contract
+router.delete('/:id/attachments/:fileId',
+  validateParams(Joi.object({
+    id: Joi.number().integer().positive().required(),
+    fileId: Joi.number().integer().positive().required()
+  })),
+  requirePermission('MANAGE_CONTRACTS'),
+  async (req, res) => {
+    try {
+      const { id, fileId } = req.params;
+      const { companyId, userId } = req.user;
+      const db = getDbConnection(companyId);
+
+      // Verify contract exists
+      const contract = await db('contracts').where({ id }).first();
+
+      if (!contract) {
+        return res.status(404).json({
+          success: false,
+          error: 'Contract not found'
+        });
+      }
+
+      // Get attachment record from repository
+      const attachment = await contractAttachments.findById(db, fileId);
+
+      if (!attachment || attachment.contract_id !== parseInt(id)) {
+        return res.status(404).json({
+          success: false,
+          error: 'Attachment not found'
+        });
+      }
+
+      // Delete file from S3
+      await storageService.deleteFile(attachment.file_key);
+
+      // Delete record from database
+      await contractAttachments.delete(db, fileId);
+
+      auditLog('CONTRACT_ATTACHMENT_DELETED', userId, {
+        contractId: id,
+        contractName: contract.name,
+        attachmentId: fileId,
+        fileName: attachment.file_name
+      });
+
+      res.json({
+        success: true,
+        message: 'Attachment deleted successfully'
+      });
+
+    } catch (error) {
+      logger.error('Error deleting contract attachment', {
+        error: error.message,
+        contractId: req.params.id,
+        fileId: req.params.fileId,
+        userId: req.user.userId
+      });
+      res.status(500).json({
+        success: false,
+        error: 'Failed to delete attachment'
       });
     }
   }

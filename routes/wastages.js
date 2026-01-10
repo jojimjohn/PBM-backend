@@ -2,8 +2,11 @@ const express = require('express');
 const router = express.Router();
 const { getDbConnection } = require('../config/database');
 const { requirePermission } = require('../middleware/auth');
-const { validate } = require('../middleware/validation');
+const { validate, validateParams } = require('../middleware/validation');
 const { getRepositoryFactory } = require('../repositories/RepositoryFactory');
+const { uploadMultipleToS3, requireFiles } = require('../middleware/upload');
+const storageService = require('../services/storageService');
+const { wastageAttachments } = require('../repositories/AttachmentRepository');
 const Joi = require('joi');
 const winston = require('winston');
 
@@ -642,5 +645,204 @@ router.get('/analytics/summary', requirePermission('VIEW_WASTAGE'), async (req, 
     });
   }
 });
+
+// ============================================================================
+// ATTACHMENT ROUTES (S3/MinIO)
+// ============================================================================
+
+// POST /api/wastages/:id/attachments - Upload attachments to wastage
+router.post('/:id/attachments',
+  validateParams(Joi.object({ id: Joi.number().integer().positive().required() })),
+  requirePermission('CREATE_WASTAGE'),
+  uploadMultipleToS3,
+  requireFiles,
+  async (req, res) => {
+    try {
+      const { id } = req.params;
+      const { companyId, userId } = req.user;
+      const db = getDbConnection(companyId);
+
+      // Check if wastage exists
+      const wastage = await db('wastages').where({ id }).first();
+
+      if (!wastage) {
+        // Delete uploaded S3 files if wastage doesn't exist
+        if (req.files && req.files.length > 0) {
+          await Promise.all(req.files.map(file =>
+            storageService.deleteFile(file.key).catch(err =>
+              winston.warn('Failed to delete orphaned S3 file', { key: file.key, error: err.message })
+            )
+          ));
+        }
+        return res.status(404).json({
+          success: false,
+          error: 'Wastage record not found'
+        });
+      }
+
+      // Save attachment metadata to database
+      const savedAttachments = [];
+      for (const file of req.files) {
+        const attachment = await wastageAttachments.create(db, {
+          wastage_id: id,
+          file_key: file.key,
+          file_name: file.originalname,
+          file_size: file.size,
+          mime_type: file.mimetype,
+          uploaded_by: userId
+        });
+        savedAttachments.push(attachment);
+      }
+
+      winston.info('Wastage attachments uploaded', {
+        wastageId: id,
+        filesCount: req.files.length,
+        userId
+      });
+
+      res.json({
+        success: true,
+        data: savedAttachments,
+        message: `${req.files.length} file(s) uploaded successfully`
+      });
+
+    } catch (error) {
+      winston.error('Error uploading wastage attachments', {
+        error: error.message,
+        wastageId: req.params.id,
+        userId: req.user.userId
+      });
+      res.status(500).json({
+        success: false,
+        error: 'Failed to upload attachments'
+      });
+    }
+  }
+);
+
+// GET /api/wastages/:id/attachments - Get attachments for wastage
+router.get('/:id/attachments',
+  validateParams(Joi.object({ id: Joi.number().integer().positive().required() })),
+  requirePermission('VIEW_WASTAGE'),
+  async (req, res) => {
+    try {
+      const { id } = req.params;
+      const { companyId } = req.user;
+      const db = getDbConnection(companyId);
+
+      // Verify wastage exists
+      const wastage = await db('wastages').where({ id }).first();
+
+      if (!wastage) {
+        return res.status(404).json({
+          success: false,
+          error: 'Wastage record not found'
+        });
+      }
+
+      // Get attachments from repository
+      const attachments = await wastageAttachments.findByEntity(db, id);
+
+      // Generate presigned URLs for each attachment
+      const attachmentsWithUrls = await Promise.all(
+        attachments.map(async (attachment) => {
+          try {
+            const url = await storageService.getPresignedUrl(attachment.file_key);
+            return { ...attachment, url };
+          } catch (err) {
+            winston.warn('Failed to generate presigned URL', {
+              attachmentId: attachment.id,
+              fileKey: attachment.file_key,
+              error: err.message
+            });
+            return { ...attachment, url: null };
+          }
+        })
+      );
+
+      res.json({
+        success: true,
+        data: attachmentsWithUrls
+      });
+
+    } catch (error) {
+      winston.error('Error fetching wastage attachments', {
+        error: error.message,
+        wastageId: req.params.id,
+        userId: req.user.userId
+      });
+      res.status(500).json({
+        success: false,
+        error: 'Failed to fetch attachments'
+      });
+    }
+  }
+);
+
+// DELETE /api/wastages/:id/attachments/:fileId - Delete attachment from wastage
+router.delete('/:id/attachments/:fileId',
+  validateParams(Joi.object({
+    id: Joi.number().integer().positive().required(),
+    fileId: Joi.number().integer().positive().required()
+  })),
+  requirePermission('CREATE_WASTAGE'),
+  async (req, res) => {
+    try {
+      const { id, fileId } = req.params;
+      const { companyId, userId } = req.user;
+      const db = getDbConnection(companyId);
+
+      // Verify wastage exists
+      const wastage = await db('wastages').where({ id }).first();
+
+      if (!wastage) {
+        return res.status(404).json({
+          success: false,
+          error: 'Wastage record not found'
+        });
+      }
+
+      // Get attachment record from repository
+      const attachment = await wastageAttachments.findById(db, fileId);
+
+      if (!attachment || attachment.wastage_id !== parseInt(id)) {
+        return res.status(404).json({
+          success: false,
+          error: 'Attachment not found'
+        });
+      }
+
+      // Delete file from S3
+      await storageService.deleteFile(attachment.file_key);
+
+      // Delete record from database
+      await wastageAttachments.delete(db, fileId);
+
+      winston.info('Wastage attachment deleted', {
+        wastageId: id,
+        attachmentId: fileId,
+        fileName: attachment.file_name,
+        userId
+      });
+
+      res.json({
+        success: true,
+        message: 'Attachment deleted successfully'
+      });
+
+    } catch (error) {
+      winston.error('Error deleting wastage attachment', {
+        error: error.message,
+        wastageId: req.params.id,
+        fileId: req.params.fileId,
+        userId: req.user.userId
+      });
+      res.status(500).json({
+        success: false,
+        error: 'Failed to delete attachment'
+      });
+    }
+  }
+);
 
 module.exports = router;
