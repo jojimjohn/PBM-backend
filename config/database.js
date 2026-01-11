@@ -21,12 +21,13 @@ const dbConfig = {
   },
   pool: {
     min: 2,
-    max: 20, // Increased from 5 to handle concurrent requests
+    max: 50, // Increased from 20 to handle higher concurrent load
     createTimeoutMillis: 10000,
     acquireTimeoutMillis: 30000, // Reduced from 60s to fail faster
-    idleTimeoutMillis: 30000, // Reduced from 600s to release idle connections quicker
-    reapIntervalMillis: 10000,
+    idleTimeoutMillis: 20000, // Release idle connections after 20s
+    reapIntervalMillis: 5000, // Check for idle connections every 5s
     createRetryIntervalMillis: 500,
+    propagateCreateError: false, // Don't propagate create errors to all pending acquires
   },
   migrations: {
     tableName: 'knex_migrations',

@@ -238,17 +238,21 @@ router.get('/me', async (req, res) => {
 // Login endpoint
 router.post('/login', authRateLimit, validate(schemas.login), async (req, res) => {
   try {
-    const { email, password, companyId } = req.body;
+    const { email: identifier, password, companyId } = req.body;
     const db = getDbConnection(companyId);
 
-    // Find user in database
+    // Find user by email OR username in database
+    // The 'identifier' can be either an email address or username
     const user = await db('users')
-      .where({ email, companyId })
+      .where(function() {
+        this.where({ email: identifier, companyId })
+          .orWhere({ username: identifier, companyId });
+      })
       .first();
 
     if (!user) {
       auditLog('LOGIN_FAILED', null, {
-        email,
+        identifier,
         companyId,
         reason: 'user_not_found',
         ip: req.ip,
@@ -257,14 +261,15 @@ router.post('/login', authRateLimit, validate(schemas.login), async (req, res) =
 
       return res.status(401).json({
         success: false,
-        error: 'Invalid email or password'
+        error: 'Invalid email/username or password'
       });
     }
 
     // Check if user is active
     if (!user.isActive) {
       auditLog('LOGIN_FAILED', user.id, {
-        email,
+        email: user.email,
+        loginIdentifier: identifier,
         companyId,
         reason: 'account_disabled',
         ip: req.ip,
@@ -282,7 +287,7 @@ router.post('/login', authRateLimit, validate(schemas.login), async (req, res) =
 
     if (!isValidPassword) {
       auditLog('LOGIN_FAILED', user.id, {
-        email,
+        identifier,
         companyId,
         reason: 'invalid_password',
         ip: req.ip,
@@ -291,7 +296,7 @@ router.post('/login', authRateLimit, validate(schemas.login), async (req, res) =
 
       return res.status(401).json({
         success: false,
-        error: 'Invalid email or password'
+        error: 'Invalid email/username or password'
       });
     }
 
@@ -299,7 +304,8 @@ router.post('/login', authRateLimit, validate(schemas.login), async (req, res) =
     if (user.mfa_enabled && user.mfa_verified_at) {
       // MFA is required - don't complete login yet
       auditLog('LOGIN_MFA_REQUIRED', user.id, {
-        email,
+        email: user.email,
+        loginIdentifier: identifier,
         companyId,
         ip: req.ip,
         userAgent: req.get('User-Agent')
@@ -355,7 +361,8 @@ router.post('/login', authRateLimit, validate(schemas.login), async (req, res) =
       });
 
     auditLog('LOGIN_SUCCESS', user.id, {
-      email,
+      email: user.email,
+      loginIdentifier: identifier, // Could be email or username
       companyId,
       role: user.role,
       mfaEnabled: false,

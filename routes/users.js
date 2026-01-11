@@ -145,24 +145,29 @@ router.get('/',
       };
       const validCompanyIds = companyIdVariants[companyId] || [companyId];
 
-      // Query users with enhanced fields (including role_id for database-driven roles)
+      // Query users with enhanced fields (including role from roles table)
+      // LEFT JOIN with roles table to get role name from database-driven roles system
       let query = db('users')
+        .leftJoin('roles', 'users.role_id', 'roles.id')
         .select(
-          'id',
-          'email',
-          'firstName',
-          'lastName',
-          'role',
-          'role_id as roleId',
-          'isActive',
-          'lastLoginAt',
-          'lastLoginIp',
-          'mfa_enabled as mfaEnabled',
-          'force_password_change as forcePasswordChange',
-          'created_at as createdAt',
-          'created_by as createdBy'
+          'users.id',
+          'users.email',
+          'users.firstName',
+          'users.lastName',
+          'users.role_id as roleId',
+          // Use role name from roles table, fallback to legacy role column
+          db.raw('COALESCE(roles.slug, users.role) as role'),
+          db.raw('COALESCE(roles.name, users.role) as roleName'),
+          'roles.hierarchy_level as roleHierarchyLevel',
+          'users.isActive',
+          'users.lastLoginAt',
+          'users.lastLoginIp',
+          'users.mfa_enabled as mfaEnabled',
+          'users.force_password_change as forcePasswordChange',
+          'users.created_at as createdAt',
+          'users.created_by as createdBy'
         )
-        .whereIn('companyId', validCompanyIds);
+        .whereIn('users.companyId', validCompanyIds);
 
       // Super admins see all users, others only see manageable roles
       // Use getRoleLevel to determine if user is super-admin regardless of format
@@ -176,23 +181,27 @@ router.get('/',
       const { role, isActive, search } = req.query;
 
       if (role) {
-        query = query.where('role', role);
+        // Filter by role slug from roles table or legacy role column
+        query = query.where(function() {
+          this.where('roles.slug', role)
+            .orWhere('users.role', role);
+        });
       }
 
       // Only filter by isActive if explicitly set to 'true' or 'false'
       if (isActive === 'true' || isActive === 'false') {
-        query = query.where('isActive', isActive === 'true' ? 1 : 0);
+        query = query.where('users.isActive', isActive === 'true' ? 1 : 0);
       }
 
       if (search) {
         query = query.where(function() {
-          this.where('email', 'like', `%${search}%`)
-            .orWhere('firstName', 'like', `%${search}%`)
-            .orWhere('lastName', 'like', `%${search}%`);
+          this.where('users.email', 'like', `%${search}%`)
+            .orWhere('users.firstName', 'like', `%${search}%`)
+            .orWhere('users.lastName', 'like', `%${search}%`);
         });
       }
 
-      const users = await query.orderBy('firstName', 'asc');
+      const users = await query.orderBy('users.firstName', 'asc');
 
       // Get online status from Redis for all users
       const userIds = users.map(u => u.id);
@@ -228,7 +237,8 @@ router.get('/',
       const formattedUsers = users.map(user => ({
         ...user,
         fullName: `${user.firstName} ${user.lastName}`,
-        roleDisplayName: getRoleDisplayName(user.role),
+        // Use roleName from joined roles table, fallback to getRoleDisplayName for legacy
+        roleDisplayName: user.roleName || getRoleDisplayName(user.role),
         canManage: canManageRole(actorRole, user.role) && user.id !== actorId,
         canChangeRole: canAssignRole(actorRole, user.role),
         isOnline: !!onlineMap[user.id]
@@ -354,7 +364,7 @@ router.post('/',
   async (req, res) => {
     try {
       const { companyId, userId: actorId, role: actorRole, email: actorEmail, roleId: actorRoleId } = req.user;
-      const { email, firstName, lastName, roleId, sendWelcomeEmail = true, createPettyCashAccount = true } = req.body;
+      const { email, username, firstName, lastName, roleId, sendWelcomeEmail = true, createPettyCashAccount = true } = req.body;
       const db = getDbConnection(companyId);
 
       // Look up the target role from the database
@@ -401,6 +411,21 @@ router.post('/',
         });
       }
 
+      // Check if username already exists in this company (if provided)
+      if (username) {
+        const existingUsername = await db('users')
+          .where({ username: username.toLowerCase(), companyId })
+          .first();
+
+        if (existingUsername) {
+          return res.status(409).json({
+            success: false,
+            error: 'Username already taken',
+            code: 'USERNAME_EXISTS'
+          });
+        }
+      }
+
       // Generate temporary password
       const tempPassword = generateTempPassword();
       const hashedPassword = await bcrypt.hash(tempPassword, 12);
@@ -408,6 +433,7 @@ router.post('/',
       // Create user with both role_id and legacy role slug for backward compatibility
       const [userId] = await db('users').insert({
         email,
+        username: username ? username.toLowerCase() : null, // Optional username for login
         password: hashedPassword,
         firstName,
         lastName,

@@ -42,6 +42,7 @@ const createUserSchema = Joi.object({
 });
 
 const updateUserSchema = Joi.object({
+  cardId: Joi.number().integer().positive().optional(),
   name: Joi.string().min(2).max(100).optional(),
   phone: Joi.string().max(20).allow('', null).optional(),
   department: Joi.string().max(100).allow('', null).optional(),
@@ -362,7 +363,7 @@ router.put(
     try {
       const db = getDbConnection(req.user.companyId);
       const { id } = req.params;
-      const { name, phone, department, employeeId, isActive } = req.body;
+      const { cardId, name, phone, department, employeeId, isActive } = req.body;
 
       // Check if user exists
       const existingUser = await db('petty_cash_users').where('id', id).first();
@@ -378,6 +379,34 @@ router.put(
       const updateData = {
         updated_at: new Date(),
       };
+
+      // Handle card reassignment if cardId is provided and different
+      if (cardId !== undefined && cardId !== existingUser.card_id) {
+        // Verify new card exists
+        const newCard = await db('petty_cash_cards').where('id', cardId).first();
+
+        if (!newCard) {
+          return res.status(400).json({
+            success: false,
+            error: 'Petty cash card not found',
+          });
+        }
+
+        // Check if new card is already assigned to another user
+        const cardInUse = await db('petty_cash_users')
+          .where('card_id', cardId)
+          .whereNot('id', id) // Exclude current user
+          .first();
+
+        if (cardInUse) {
+          return res.status(400).json({
+            success: false,
+            error: 'This card is already assigned to another petty cash user',
+          });
+        }
+
+        updateData.card_id = cardId;
+      }
 
       if (name !== undefined) updateData.name = name;
       if (phone !== undefined) updateData.phone = phone || null;
@@ -396,6 +425,7 @@ router.put(
 
       winston.info('Petty cash user updated', {
         pcUserId: id,
+        cardChanged: updateData.card_id !== undefined,
         companyId: req.user.companyId,
         updatedBy: req.user.userId,
       });

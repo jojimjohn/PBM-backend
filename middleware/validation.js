@@ -36,12 +36,13 @@ const validate = (schema) => {
 const schemas = {
   // Authentication schemas
   login: Joi.object({
+    // Accept either email or username as login identifier
     email: Joi.string()
-      .email()
-      .required()
       .max(255)
       .lowercase()
-      .trim(),
+      .trim()
+      .required()
+      .description('Email address or username for login'),
     password: Joi.string()
       .min(8)
       .max(128)
@@ -177,6 +178,16 @@ const schemas = {
       .max(255)
       .lowercase()
       .trim(),
+    username: Joi.string()
+      .min(3)
+      .max(30)
+      .lowercase()
+      .trim()
+      .pattern(/^[a-z0-9_]+$/)
+      .message('Username can only contain lowercase letters, numbers, and underscores')
+      .allow('', null)
+      .optional()
+      .description('Optional username for login (alternative to email)'),
     firstName: Joi.string()
       .min(2)
       .max(50)
@@ -198,7 +209,10 @@ const schemas = {
       .description('Database ID of the role to assign'),
     sendWelcomeEmail: Joi.boolean()
       .default(true)
-      .description('Send welcome email with temporary password')
+      .description('Send welcome email with temporary password'),
+    createPettyCashAccount: Joi.boolean()
+      .default(true)
+      .description('Create a petty cash account for the user')
   }),
 
   // Update user - for editing existing users
