@@ -75,7 +75,7 @@ const authenticateToken = async (req, res, next) => {
       role: decoded.role,
       companyId: decoded.companyId,
       permissions: decoded.permissions || [],
-      role_id: decoded.roleId
+      roleId: decoded.roleId  // Use camelCase to match JWT payload and route expectations
     };
 
     // Store token for potential logout blacklisting

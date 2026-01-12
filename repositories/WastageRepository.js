@@ -55,6 +55,29 @@ class WastageRepository extends BaseRepository {
         query = query.where('wastages.wastageDate', '<=', filters.dateTo);
       }
 
+      // Apply project-based filtering
+      // Uses same logic as applyProjectFilter in projectFilter.js middleware
+      if (filters.projectFilter && filters.projectFilter.isFiltered) {
+        const { projectIds, selectedProjectId } = filters.projectFilter;
+        if (projectIds === null) {
+          // No filter - show all
+        } else if (projectIds.length === 0) {
+          // User has no projects - show nothing
+          query = query.whereRaw('1 = 0');
+        } else if (selectedProjectId) {
+          // STRICT mode: specific project selected - exclude NULLs
+          // This ensures new projects don't show unrelated data
+          query = query.whereIn('wastages.project_id', projectIds);
+        } else {
+          // INCLUSIVE mode: viewing all assigned projects - include NULLs
+          // This helps users see "unassigned" records that need project assignment
+          query = query.where(function() {
+            this.whereIn('wastages.project_id', projectIds)
+              .orWhereNull('wastages.project_id');
+          });
+        }
+      }
+
       // Get total count
       const totalQuery = query.clone();
       const [{ count }] = await totalQuery.clearSelect().clearOrder().count('wastages.id as count');

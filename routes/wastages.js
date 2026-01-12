@@ -4,6 +4,7 @@ const { getDbConnection } = require('../config/database');
 const { requirePermission } = require('../middleware/auth');
 const { validate, validateParams } = require('../middleware/validation');
 const { getRepositoryFactory } = require('../repositories/RepositoryFactory');
+const { projectFilter } = require('../middleware/projectFilter');
 const { uploadMultipleToS3, requireFiles } = require('../middleware/upload');
 const storageService = require('../services/storageService');
 const { wastageAttachments } = require('../repositories/AttachmentRepository');
@@ -55,18 +56,20 @@ function generateWastageNumber(companyId) {
 }
 
 // GET /wastages - List all wastages with filtering and pagination
-router.get('/', requirePermission('VIEW_WASTAGE'), async (req, res) => {
+router.get('/', requirePermission('VIEW_WASTAGE'), projectFilter, async (req, res) => {
   try {
     const repositoryFactory = getRepositoryFactory(req.user.companyId);
     const wastageRepository = repositoryFactory.getWastagesRepository();
-    
+
     const filters = {
       materialId: req.query.materialId,
       wasteType: req.query.wasteType,
       status: req.query.status,
       reportedBy: req.query.reportedBy,
       dateFrom: req.query.dateFrom,
-      dateTo: req.query.dateTo
+      dateTo: req.query.dateTo,
+      // Project filtering
+      projectFilter: req.projectFilter
     };
     
     const pagination = {

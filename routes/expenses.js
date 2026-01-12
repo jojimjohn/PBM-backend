@@ -1,6 +1,7 @@
 const express = require('express');
 const { validate, validateParams, sanitize } = require('../middleware/validation');
 const { requirePermission } = require('../middleware/auth');
+const { projectFilter, applyProjectFilter } = require('../middleware/projectFilter');
 const { logger, auditLog } = require('../utils/logger');
 const { getDbConnection } = require('../config/database');
 const Joi = require('joi');
@@ -68,15 +69,15 @@ const bulkExpenseSchema = Joi.object({
 });
 
 // GET /api/expenses - List all expenses with filtering
-router.get('/', requirePermission('VIEW_PURCHASE'), async (req, res) => {
+router.get('/', requirePermission('VIEW_PURCHASE'), projectFilter, async (req, res) => {
   try {
     const { companyId } = req.user;
     const db = getDbConnection(companyId);
-    
-    const { 
-      page = 1, 
-      limit = 50, 
-      search = '', 
+
+    const {
+      page = 1,
+      limit = 50,
+      search = '',
       expenseType = '',
       referenceId = '',
       category = '',
@@ -85,7 +86,7 @@ router.get('/', requirePermission('VIEW_PURCHASE'), async (req, res) => {
     } = req.query;
 
     const offset = (page - 1) * limit;
-    
+
     let query = db('unified_expenses')
       .leftJoin('purchase_orders', function() {
         this.on('unified_expenses.referenceId', '=', 'purchase_orders.id')
@@ -104,6 +105,9 @@ router.get('/', requirePermission('VIEW_PURCHASE'), async (req, res) => {
         'suppliers.name as supplierName',
         'supplier_locations.locationName as locationName'
       );
+
+    // Apply project filter (filters by unified_expenses.project_id)
+    query = applyProjectFilter(query, req.projectFilter, 'unified_expenses.project_id');
 
     // Search filter
     if (search) {
@@ -151,8 +155,8 @@ router.get('/', requirePermission('VIEW_PURCHASE'), async (req, res) => {
       .offset(offset)
       .limit(parseInt(limit));
 
-    // Calculate summary
-    const summaryQuery = db('unified_expenses')
+    // Calculate summary (also respecting project filter)
+    let summaryQuery = db('unified_expenses')
       .select(
         db.raw('SUM(amount) as totalAmount'),
         db.raw('COUNT(*) as totalCount'),
@@ -161,13 +165,16 @@ router.get('/', requirePermission('VIEW_PURCHASE'), async (req, res) => {
         db.raw('SUM(CASE WHEN expenseType = ? THEN amount ELSE 0 END) as collectionTotal', ['collection'])
       );
 
+    // Apply same project filter to summary
+    summaryQuery = applyProjectFilter(summaryQuery, req.projectFilter, 'project_id');
+
     if (expenseType) {
       summaryQuery.where('expenseType', expenseType);
     }
     if (referenceId) {
       summaryQuery.where('referenceId', referenceId);
     }
-    
+
     const summary = await summaryQuery.first();
 
     res.json({
@@ -277,12 +284,16 @@ router.post('/', requirePermission('CREATE_PURCHASE'), validate(bulkExpenseSchem
         throw new Error(`${referenceType.replace('_', ' ')} not found`);
       }
 
-      // Create expense entries
+      // Get project_id from reference order
+      const projectId = referenceOrder.project_id || null;
+
+      // Create expense entries with project_id inherited from reference order
       const expenseEntries = expenses.map(expense => ({
         ...expense,
         referenceId,
         referenceType,
         expenseType,
+        project_id: projectId,  // Inherit project from PO/Collection order
         createdBy: userId,
         updatedBy: userId,
         createdAt: new Date(),

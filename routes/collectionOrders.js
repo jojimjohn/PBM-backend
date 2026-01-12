@@ -164,7 +164,7 @@ router.post('/callouts',
 );
 
 // GET /api/collection-orders/callouts - List callouts (collection orders with status 'callout')
-router.get('/callouts', requirePermission('VIEW_COLLECTIONS'), async (req, res) => {
+router.get('/callouts', requirePermission('VIEW_COLLECTIONS'), projectFilter, async (req, res) => {
   try {
     const { companyId } = req.user;
     const db = getDbConnection(companyId);
@@ -207,6 +207,9 @@ router.get('/callouts', requirePermission('VIEW_COLLECTIONS'), async (req, res) 
         'purchase_orders.orderNumber as purchaseOrderNumber',
         'purchase_orders.totalAmount as purchaseOrderTotal'
       );
+
+    // Apply project filter (if user has project restrictions)
+    query = applyProjectFilter(query, req.projectFilter, 'collection_orders.project_id');
 
     // Status filter - supports comma-separated values for multiple statuses
     // Example: status=in_transit,collecting to get both

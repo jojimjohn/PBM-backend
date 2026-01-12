@@ -308,8 +308,12 @@ router.post('/', requirePermission('MANAGE_ROLES'), async (req, res) => {
     }
 
     // Check hierarchy: user can only create roles below their level
+    // Include system roles (company_id IS NULL) for proper hierarchy lookup
     const userRole = await db('roles')
-      .where({ id: req.user.role_id, company_id: companyId })
+      .where({ id: req.user.roleId })
+      .where(function() {
+        this.where('company_id', companyId).orWhereNull('company_id');
+      })
       .first();
 
     if (userRole && hierarchy_level >= userRole.hierarchy_level) {
@@ -443,8 +447,12 @@ router.put('/:id', requirePermission('MANAGE_ROLES'), async (req, res) => {
     }
 
     // Check hierarchy: can only edit roles below user's level
+    // Include system roles (company_id IS NULL) for proper hierarchy lookup
     const userRole = await db('roles')
-      .where({ id: req.user.role_id, company_id: companyId })
+      .where({ id: req.user.roleId })
+      .where(function() {
+        this.where('company_id', companyId).orWhereNull('company_id');
+      })
       .first();
 
     if (userRole && existingRole.hierarchy_level >= userRole.hierarchy_level) {
@@ -598,8 +606,12 @@ router.delete('/:id', requirePermission('MANAGE_ROLES'), async (req, res) => {
     }
 
     // Check hierarchy
+    // Include system roles (company_id IS NULL) for proper hierarchy lookup
     const userRole = await db('roles')
-      .where({ id: req.user.role_id, company_id: companyId })
+      .where({ id: req.user.roleId })
+      .where(function() {
+        this.where('company_id', companyId).orWhereNull('company_id');
+      })
       .first();
 
     if (userRole && existingRole.hierarchy_level >= userRole.hierarchy_level) {

@@ -152,6 +152,7 @@ router.get('/',
         .select(
           'users.id',
           'users.email',
+          'users.username',
           'users.firstName',
           'users.lastName',
           'users.role_id as roleId',
@@ -368,8 +369,12 @@ router.post('/',
       const db = getDbConnection(companyId);
 
       // Look up the target role from the database
+      // Include both company-specific roles AND system roles (company_id IS NULL)
       const targetRole = await db('roles')
-        .where({ id: roleId, company_id: companyId, is_active: true })
+        .where({ id: roleId, is_active: true })
+        .where(function() {
+          this.where('company_id', companyId).orWhereNull('company_id');
+        })
         .first();
 
       if (!targetRole) {
@@ -633,8 +638,12 @@ router.put('/:id',
       // Validate role change if roleId provided
       if (updates.roleId) {
         // Look up the new role from database
+        // Include both company-specific roles AND system roles (company_id IS NULL)
         const newRole = await db('roles')
-          .where({ id: updates.roleId, company_id: companyId, is_active: true })
+          .where({ id: updates.roleId, is_active: true })
+          .where(function() {
+            this.where('company_id', companyId).orWhereNull('company_id');
+          })
           .first();
 
         if (!newRole) {

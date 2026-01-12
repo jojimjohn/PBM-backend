@@ -13,8 +13,9 @@
 const { getDbConnection } = require('../config/database');
 const { logger } = require('../utils/logger');
 
-// Role hierarchy levels (matching frontend config)
-const ADMIN_HIERARCHY_LEVEL = 5;
+// Role hierarchy levels - Admins (Company Admin: 9, Super Admin: 10) can view all projects
+// Managers (5) and below are restricted to assigned projects
+const ADMIN_HIERARCHY_LEVEL = 9;
 
 /**
  * Project filter middleware
@@ -161,28 +162,47 @@ const projectFilter = async (req, res, next) => {
 };
 
 /**
- * Helper to get user's hierarchy level
+ * Helper to get user's hierarchy level from roles table
  */
 async function getUserHierarchyLevel(db, userId) {
   try {
-    const user = await db('users')
-      .select('role')
-      .where('id', userId)
+    // Look up user's role_id and get hierarchy_level from roles table
+    const userWithRole = await db('users')
+      .leftJoin('roles', 'users.role_id', 'roles.id')
+      .select('roles.hierarchy_level', 'roles.name as roleName')
+      .where('users.id', userId)
       .first();
 
-    if (!user) return 0;
+    if (!userWithRole || !userWithRole.hierarchy_level) {
+      // Fallback: try legacy role column mapping
+      const user = await db('users')
+        .select('role')
+        .where('id', userId)
+        .first();
 
-    // Map roles to hierarchy levels (matching frontend ROLE_HIERARCHY)
-    const roleHierarchy = {
-      'SUPER_ADMIN': 6,
-      'COMPANY_ADMIN': 5,
-      'MANAGER': 4,
-      'SALES_STAFF': 3,
-      'PURCHASE_STAFF': 3,
-      'ACCOUNTS_STAFF': 3
-    };
+      if (!user) return 0;
 
-    return roleHierarchy[user.role] || 0;
+      // Legacy mapping for backwards compatibility
+      const roleHierarchy = {
+        'super-admin': 10,
+        'company-admin': 9,
+        'manager': 5,
+        'sales-staff': 3,
+        'purchase-staff': 3,
+        'accounts-staff': 3,
+        // Also support screaming snake case (old format)
+        'SUPER_ADMIN': 10,
+        'COMPANY_ADMIN': 9,
+        'MANAGER': 5,
+        'SALES_STAFF': 3,
+        'PURCHASE_STAFF': 3,
+        'ACCOUNTS_STAFF': 3
+      };
+
+      return roleHierarchy[user.role] || 0;
+    }
+
+    return userWithRole.hierarchy_level;
   } catch (error) {
     logger.error('Error getting user hierarchy level', { error: error.message, userId });
     return 0;
@@ -196,6 +216,11 @@ async function getUserHierarchyLevel(db, userId) {
  * @param {Object} projectFilter - The req.projectFilter object
  * @param {string} projectColumn - The column name for project_id (default: 'project_id')
  * @returns {Knex.QueryBuilder} - Modified query with project filter applied
+ *
+ * Behavior:
+ * - When a SPECIFIC project is selected: show ONLY records with that project_id (strict mode)
+ * - When NO project is selected (viewing all): include records with NULL project_id
+ * - This ensures new projects don't show unrelated data
  */
 const applyProjectFilter = (query, projectFilter, projectColumn = 'project_id') => {
   if (!projectFilter || !projectFilter.isFiltered) {
@@ -212,8 +237,15 @@ const applyProjectFilter = (query, projectFilter, projectColumn = 'project_id') 
     return query.whereRaw('1 = 0');
   }
 
-  // Filter by allowed project IDs
-  // Include records with NULL project_id OR matching project_id
+  // When a SPECIFIC project is selected, use strict filtering (exclude NULLs)
+  // This ensures new projects don't show data from other projects
+  if (projectFilter.selectedProjectId) {
+    // Strict mode: only matching project_id, no NULLs
+    return query.whereIn(projectColumn, projectFilter.projectIds);
+  }
+
+  // When viewing multiple projects (no specific selection), include NULLs
+  // This helps users see "unassigned" records that need project assignment
   return query.where(function() {
     this.whereIn(projectColumn, projectFilter.projectIds)
       .orWhereNull(projectColumn);

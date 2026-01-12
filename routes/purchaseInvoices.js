@@ -1,6 +1,7 @@
 const express = require('express');
 const { validate, validateParams, sanitize } = require('../middleware/validation');
 const { requirePermission } = require('../middleware/auth');
+const { projectFilter, applyProjectFilter } = require('../middleware/projectFilter');
 const { logger, auditLog } = require('../utils/logger');
 const { getDbConnection } = require('../config/database');
 const { uploadSingle, deleteFile } = require('../middleware/upload');
@@ -120,7 +121,7 @@ const paymentSchema = Joi.object({
 }).options({ stripUnknown: true });
 
 // GET /api/purchase-invoices - List all purchase invoices
-router.get('/', requirePermission('VIEW_PURCHASE'), async (req, res) => {
+router.get('/', requirePermission('VIEW_PURCHASE'), projectFilter, async (req, res) => {
   try {
     const { companyId } = req.user;
     const db = getDbConnection(companyId);
@@ -150,6 +151,9 @@ router.get('/', requirePermission('VIEW_PURCHASE'), async (req, res) => {
         'suppliers.name as supplierName',
         'branches.name as branchName'
       );
+
+    // Apply project filter (filters by purchase_invoices.project_id)
+    query = applyProjectFilter(query, req.projectFilter, 'purchase_invoices.project_id');
 
     // Search filter
     if (search) {
@@ -494,6 +498,23 @@ router.post('/',
         dueDate.setDate(dueDate.getDate() + invoiceData.paymentTermsDays);
       }
 
+      // Determine project_id from linked PO or company bills
+      let projectId = null;
+      if (billType === 'company' && purchaseOrder) {
+        projectId = purchaseOrder.project_id;
+      } else if (billType === 'vendor') {
+        // For vendor bills, get project_id from first linked company bill or PO
+        if (invoiceData.coversCompanyBills && invoiceData.coversCompanyBills.length > 0) {
+          const firstCompanyBill = await db('purchase_invoices')
+            .where('id', invoiceData.coversCompanyBills[0])
+            .select('project_id')
+            .first();
+          projectId = firstCompanyBill?.project_id || null;
+        } else if (purchaseOrders.length > 0) {
+          projectId = purchaseOrders[0].project_id;
+        }
+      }
+
       // Create invoice
       const [invoiceId] = await db('purchase_invoices').insert({
         invoice_number: invoiceNumber,  // Uses prefixed invoice number (CB-/VB-)
@@ -507,6 +528,7 @@ router.post('/',
           : null,
         supplier_id: invoiceData.supplierId,
         branch_id: branchId,
+        project_id: projectId,  // Inherit project from linked PO
         invoice_date: invoiceData.invoiceDate,
         due_date: dueDate,
         payment_status: billType === 'vendor' ? 'unpaid' : null,  // Only vendor bills have payment_status
