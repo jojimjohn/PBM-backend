@@ -150,7 +150,7 @@ router.get('/pending-actions',
       // ============================================
       // 2. Purchase Orders Awaiting Receipt
       // ============================================
-      const pendingReceipt = await db('purchase_orders as po')
+      let pendingReceiptQuery = db('purchase_orders as po')
         .leftJoin('suppliers as s', 'po.supplierId', 's.id')
         .select(
           'po.id',
@@ -166,6 +166,8 @@ router.get('/pending-actions',
         )
         .whereIn('po.status', ['approved', 'sent'])
         .orderBy('po.expectedDeliveryDate', 'asc');
+      pendingReceiptQuery = applyProjectFilter(pendingReceiptQuery, req.projectFilter, 'po.project_id');
+      const pendingReceipt = await pendingReceiptQuery;
 
       pendingReceipt.forEach(po => {
         const isOverdue = po.daysUntilExpected < 0;
@@ -197,7 +199,7 @@ router.get('/pending-actions',
       // ============================================
       // 3. Received POs Without Company Bills
       // ============================================
-      const pendingBills = await db('purchase_orders as po')
+      let pendingBillsQuery = db('purchase_orders as po')
         .leftJoin('suppliers as s', 'po.supplierId', 's.id')
         .leftJoin('purchase_invoices as pi', function() {
           this.on('po.id', '=', 'pi.purchase_order_id')
@@ -217,6 +219,8 @@ router.get('/pending-actions',
         .whereNull('pi.id')
         .whereNotNull('po.actualDeliveryDate')
         .orderBy('po.actualDeliveryDate', 'asc');
+      pendingBillsQuery = applyProjectFilter(pendingBillsQuery, req.projectFilter, 'po.project_id');
+      const pendingBills = await pendingBillsQuery;
 
       pendingBills.forEach(po => {
         addAction({
@@ -505,7 +509,7 @@ router.get('/pending-actions',
       // 9. Wastage Pending Approval
       // ============================================
       try {
-        const pendingWastages = await db('wastages as w')
+        let pendingWastagesQuery = db('wastages as w')
           .leftJoin('materials as m', 'w.materialId', 'm.id')
           .leftJoin('users as u', 'w.reportedBy', 'u.id')
           .select(
@@ -523,6 +527,8 @@ router.get('/pending-actions',
           .where('w.status', 'pending')
           .orderBy('w.wastageDate', 'asc')
           .limit(20);
+        pendingWastagesQuery = applyProjectFilter(pendingWastagesQuery, req.projectFilter, 'w.project_id');
+        const pendingWastages = await pendingWastagesQuery;
 
         logger.info('Pending wastages found:', { count: pendingWastages.length, userRole, hasApprovePermission: hasPermission('APPROVE_WASTAGE') });
 
@@ -556,7 +562,7 @@ router.get('/pending-actions',
       // 10. Sales Orders Pending Delivery
       // ============================================
       try {
-        const pendingSales = await db('sales_orders as so')
+        let pendingSalesQuery = db('sales_orders as so')
           .leftJoin('customers as c', 'so.customerId', 'c.id')
           .select(
             'so.id',
@@ -572,6 +578,8 @@ router.get('/pending-actions',
           .whereIn('so.status', ['confirmed', 'processing'])
           .orderBy('so.expectedDeliveryDate', 'asc')
           .limit(10);
+        pendingSalesQuery = applyProjectFilter(pendingSalesQuery, req.projectFilter, 'so.project_id');
+        const pendingSales = await pendingSalesQuery;
 
         pendingSales.forEach(so => {
           const isOverdue = so.daysUntilExpected !== null && so.daysUntilExpected < 0;
@@ -606,7 +614,7 @@ router.get('/pending-actions',
       // 11. Customer Payments Due Soon (Receivables)
       // ============================================
       try {
-        const pendingReceivables = await db('sales_orders as so')
+        let pendingReceivablesQuery = db('sales_orders as so')
           .leftJoin('customers as c', 'so.customerId', 'c.id')
           .select(
             'so.id',
@@ -624,6 +632,8 @@ router.get('/pending-actions',
           .havingRaw('daysUntilDue <= 7 AND daysUntilDue >= 0')
           .orderByRaw('daysUntilDue ASC')
           .limit(10);
+        pendingReceivablesQuery = applyProjectFilter(pendingReceivablesQuery, req.projectFilter, 'so.project_id');
+        const pendingReceivables = await pendingReceivablesQuery;
 
         pendingReceivables.forEach(so => {
           addAction({
@@ -733,6 +743,7 @@ router.get('/pending-actions',
  * Shows last N actions across ALL modules
  */
 router.get('/activity',
+  projectFilter,
   requirePermission('VIEW_PURCHASE'),
   async (req, res) => {
     const user = req.user;
@@ -744,7 +755,7 @@ router.get('/activity',
       const activities = [];
 
       // 1. Recent WCN Finalizations
-      const recentWCNs = await db('collection_orders as co')
+      let recentWCNsQuery = db('collection_orders as co')
         .leftJoin('contracts as c', 'co.contractId', 'c.id')
         .leftJoin('suppliers as s', 'c.supplierId', 's.id')
         .leftJoin('purchase_orders as po', 'co.purchase_order_id', 'po.id')
@@ -763,6 +774,8 @@ router.get('/activity',
         .whereNotNull('co.finalized_at')
         .orderBy('co.finalized_at', 'desc')
         .limit(limit);
+      recentWCNsQuery = applyProjectFilter(recentWCNsQuery, req.projectFilter, 'co.project_id');
+      const recentWCNs = await recentWCNsQuery;
 
       recentWCNs.forEach(wcn => {
         activities.push({
@@ -783,7 +796,7 @@ router.get('/activity',
       });
 
       // 2. Recent PO Receipts
-      const recentReceipts = await db('purchase_orders as po')
+      let recentReceiptsQuery = db('purchase_orders as po')
         .leftJoin('suppliers as s', 'po.supplierId', 's.id')
         .select(
           'po.id',
@@ -797,6 +810,8 @@ router.get('/activity',
         .whereNotNull('po.actualDeliveryDate')
         .orderBy('po.actualDeliveryDate', 'desc')
         .limit(limit);
+      recentReceiptsQuery = applyProjectFilter(recentReceiptsQuery, req.projectFilter, 'po.project_id');
+      const recentReceipts = await recentReceiptsQuery;
 
       recentReceipts.forEach(po => {
         activities.push({
@@ -876,7 +891,7 @@ router.get('/activity',
 
       // 5. Recent Wastage Approvals
       try {
-        const recentWastages = await db('wastages as w')
+        let recentWastagesQuery = db('wastages as w')
           .join('materials as m', 'w.materialId', 'm.id')
           .leftJoin('users as u', 'w.approvedBy', 'u.id')
           .select(
@@ -893,6 +908,8 @@ router.get('/activity',
           .whereNotNull('w.updated_at')
           .orderBy('w.updated_at', 'desc')
           .limit(Math.floor(limit / 5));
+        recentWastagesQuery = applyProjectFilter(recentWastagesQuery, req.projectFilter, 'w.project_id');
+        const recentWastages = await recentWastagesQuery;
 
         recentWastages.forEach(w => {
           activities.push({
@@ -951,7 +968,7 @@ router.get('/activity',
 
       // 7. Recent Sales Deliveries
       try {
-        const recentSales = await db('sales_orders as so')
+        let recentSalesQuery = db('sales_orders as so')
           .leftJoin('customers as c', 'so.customerId', 'c.id')
           .select(
             'so.id',
@@ -964,6 +981,8 @@ router.get('/activity',
           .whereNotNull('so.updated_at')
           .orderBy('so.updated_at', 'desc')
           .limit(Math.floor(limit / 5));
+        recentSalesQuery = applyProjectFilter(recentSalesQuery, req.projectFilter, 'so.project_id');
+        const recentSales = await recentSalesQuery;
 
         recentSales.forEach(so => {
           activities.push({
@@ -1057,6 +1076,7 @@ router.get('/activity',
  * Covers ALL modules
  */
 router.get('/stats',
+  projectFilter,
   requirePermission('VIEW_PURCHASE'),
   async (req, res) => {
     const companyId = req.user.companyId;
@@ -1066,14 +1086,15 @@ router.get('/stats',
       const stats = {};
 
       // Collections stats
-      const collectionsStats = await db('collection_orders')
+      let collectionsStatsQuery = db('collection_orders as co')
         .select(
           db.raw('COUNT(*) as total'),
-          db.raw('SUM(CASE WHEN status = "completed" AND is_finalized = 0 THEN 1 ELSE 0 END) as pendingWCN'),
-          db.raw('SUM(CASE WHEN is_finalized = 1 THEN 1 ELSE 0 END) as finalized'),
-          db.raw('SUM(CASE WHEN status IN ("scheduled", "in_transit", "collecting") THEN 1 ELSE 0 END) as inProgress')
-        )
-        .first();
+          db.raw('SUM(CASE WHEN co.status = "completed" AND co.is_finalized = 0 THEN 1 ELSE 0 END) as pendingWCN'),
+          db.raw('SUM(CASE WHEN co.is_finalized = 1 THEN 1 ELSE 0 END) as finalized'),
+          db.raw('SUM(CASE WHEN co.status IN ("scheduled", "in_transit", "collecting") THEN 1 ELSE 0 END) as inProgress')
+        );
+      collectionsStatsQuery = applyProjectFilter(collectionsStatsQuery, req.projectFilter, 'co.project_id');
+      const collectionsStats = await collectionsStatsQuery.first();
 
       stats.collections = {
         total: parseInt(collectionsStats?.total) || 0,
@@ -1083,15 +1104,16 @@ router.get('/stats',
       };
 
       // Purchase Orders stats
-      const poStats = await db('purchase_orders')
+      let poStatsQuery = db('purchase_orders as po')
         .select(
           db.raw('COUNT(*) as total'),
-          db.raw('SUM(CASE WHEN status IN ("approved", "sent") THEN 1 ELSE 0 END) as pendingReceipt'),
-          db.raw('SUM(CASE WHEN status IN ("received", "completed") THEN 1 ELSE 0 END) as received'),
-          db.raw('SUM(CASE WHEN source_type = "wcn_auto" THEN 1 ELSE 0 END) as autoGenerated'),
-          db.raw('SUM(CASE WHEN status = "draft" THEN 1 ELSE 0 END) as draft')
-        )
-        .first();
+          db.raw('SUM(CASE WHEN po.status IN ("approved", "sent") THEN 1 ELSE 0 END) as pendingReceipt'),
+          db.raw('SUM(CASE WHEN po.status IN ("received", "completed") THEN 1 ELSE 0 END) as received'),
+          db.raw('SUM(CASE WHEN po.source_type = "wcn_auto" THEN 1 ELSE 0 END) as autoGenerated'),
+          db.raw('SUM(CASE WHEN po.status = "draft" THEN 1 ELSE 0 END) as draft')
+        );
+      poStatsQuery = applyProjectFilter(poStatsQuery, req.projectFilter, 'po.project_id');
+      const poStats = await poStatsQuery.first();
 
       stats.purchaseOrders = {
         total: parseInt(poStats?.total) || 0,
@@ -1182,14 +1204,15 @@ router.get('/stats',
 
       // Wastage stats
       try {
-        const wastageStats = await db('wastages')
+        let wastageStatsQuery = db('wastages as w')
           .select(
             db.raw('COUNT(*) as total'),
-            db.raw('SUM(CASE WHEN status = "pending" THEN 1 ELSE 0 END) as pending'),
-            db.raw('SUM(CASE WHEN status = "approved" THEN 1 ELSE 0 END) as approved'),
-            db.raw('COALESCE(SUM(CASE WHEN status = "approved" THEN estimatedValue ELSE 0 END), 0) as totalLoss')
-          )
-          .first();
+            db.raw('SUM(CASE WHEN w.status = "pending" THEN 1 ELSE 0 END) as pending'),
+            db.raw('SUM(CASE WHEN w.status = "approved" THEN 1 ELSE 0 END) as approved'),
+            db.raw('COALESCE(SUM(CASE WHEN w.status = "approved" THEN w.estimatedValue ELSE 0 END), 0) as totalLoss')
+          );
+        wastageStatsQuery = applyProjectFilter(wastageStatsQuery, req.projectFilter, 'w.project_id');
+        const wastageStats = await wastageStatsQuery.first();
 
         stats.wastage = {
           total: parseInt(wastageStats?.total) || 0,
@@ -1203,14 +1226,15 @@ router.get('/stats',
 
       // Sales stats
       try {
-        const salesStats = await db('sales_orders')
+        let salesStatsQuery = db('sales_orders as so')
           .select(
             db.raw('COUNT(*) as total'),
-            db.raw('SUM(CASE WHEN status IN ("confirmed", "processing") THEN 1 ELSE 0 END) as pendingDelivery'),
-            db.raw('SUM(CASE WHEN status = "delivered" THEN 1 ELSE 0 END) as delivered'),
-            db.raw('COALESCE(SUM(totalAmount), 0) as totalRevenue')
-          )
-          .first();
+            db.raw('SUM(CASE WHEN so.status IN ("confirmed", "processing") THEN 1 ELSE 0 END) as pendingDelivery'),
+            db.raw('SUM(CASE WHEN so.status = "delivered" THEN 1 ELSE 0 END) as delivered'),
+            db.raw('COALESCE(SUM(so.totalAmount), 0) as totalRevenue')
+          );
+        salesStatsQuery = applyProjectFilter(salesStatsQuery, req.projectFilter, 'so.project_id');
+        const salesStats = await salesStatsQuery.first();
 
         stats.sales = {
           total: parseInt(salesStats?.total) || 0,
@@ -1224,7 +1248,7 @@ router.get('/stats',
 
       // Receivables stats (customer payments owed to us)
       try {
-        const receivablesStats = await db('sales_orders as so')
+        let receivablesStatsQuery = db('sales_orders as so')
           .leftJoin('customers as c', 'so.customerId', 'c.id')
           .select(
             db.raw('COUNT(*) as totalDelivered'),
@@ -1238,8 +1262,9 @@ router.get('/stats',
               AND DATE_ADD(so.actualDeliveryDate, INTERVAL COALESCE(c.paymentTermDays, 30) DAY) < NOW()
               THEN so.totalAmount ELSE 0 END) as overdueAmount`)
           )
-          .where('so.status', 'delivered')
-          .first();
+          .where('so.status', 'delivered');
+        receivablesStatsQuery = applyProjectFilter(receivablesStatsQuery, req.projectFilter, 'so.project_id');
+        const receivablesStats = await receivablesStatsQuery.first();
 
         stats.receivables = {
           totalDelivered: parseInt(receivablesStats?.totalDelivered) || 0,
@@ -1302,6 +1327,7 @@ router.get('/stats',
  * Condensed summary of urgent items across all modules
  */
 router.get('/notifications',
+  projectFilter,
   requirePermission('VIEW_PURCHASE'),
   async (req, res) => {
     const user = req.user;
@@ -1335,14 +1361,14 @@ router.get('/notifications',
       // 2. Overdue customer receivables (RECEIVABLES - money CUSTOMERS owe to us)
       // Due date = actualDeliveryDate + customer.paymentTermDays (default 30)
       try {
-        const overdueReceivables = await db('sales_orders as so')
+        let overdueReceivablesQuery = db('sales_orders as so')
           .leftJoin('customers as c', 'so.customerId', 'c.id')
           .where('so.status', 'delivered')
           .where('so.paymentStatus', '!=', 'paid')
           .whereNotNull('so.actualDeliveryDate')
-          .whereRaw('DATE_ADD(so.actualDeliveryDate, INTERVAL COALESCE(c.paymentTermDays, 30) DAY) < NOW()')
-          .count('* as count')
-          .first();
+          .whereRaw('DATE_ADD(so.actualDeliveryDate, INTERVAL COALESCE(c.paymentTermDays, 30) DAY) < NOW()');
+        overdueReceivablesQuery = applyProjectFilter(overdueReceivablesQuery, req.projectFilter, 'so.project_id');
+        const overdueReceivables = await overdueReceivablesQuery.count('* as count').first();
 
         if (overdueReceivables?.count > 0) {
           notifications.push({
@@ -1380,11 +1406,11 @@ router.get('/notifications',
       }
 
       // 3. Pending WCN finalizations
-      const pendingWCNs = await db('collection_orders')
-        .where('status', 'completed')
-        .where('is_finalized', 0)
-        .count('* as count')
-        .first();
+      let pendingWCNsQuery = db('collection_orders as co')
+        .where('co.status', 'completed')
+        .where('co.is_finalized', 0);
+      pendingWCNsQuery = applyProjectFilter(pendingWCNsQuery, req.projectFilter, 'co.project_id');
+      const pendingWCNs = await pendingWCNsQuery.count('* as count').first();
 
       if (pendingWCNs?.count > 0) {
         notifications.push({
@@ -1442,10 +1468,10 @@ router.get('/notifications',
 
       // 6. Pending wastage approvals
       try {
-        const pendingWastages = await db('wastages')
-          .where('status', 'pending')
-          .count('* as count')
-          .first();
+        let pendingWastagesQuery = db('wastages as w')
+          .where('w.status', 'pending');
+        pendingWastagesQuery = applyProjectFilter(pendingWastagesQuery, req.projectFilter, 'w.project_id');
+        const pendingWastages = await pendingWastagesQuery.count('* as count').first();
 
         if (pendingWastages?.count > 0) {
           notifications.push({
