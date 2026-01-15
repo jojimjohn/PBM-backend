@@ -38,6 +38,14 @@ const projectFilter = async (req, res, next) => {
     const { userId, companyId, role } = req.user;
     const db = getDbConnection(companyId);
 
+    // Debug logging
+    logger.info('ProjectFilter middleware - Input:', {
+      userId,
+      role,
+      queryProjectId: req.query.project_id,
+      path: req.path
+    });
+
     // Check if user_projects table exists
     const tableExists = await db.schema.hasTable('user_projects');
     if (!tableExists) {
@@ -66,6 +74,7 @@ const projectFilter = async (req, res, next) => {
         canViewAll: true,
         isFiltered: false
       };
+      logger.info('ProjectFilter - Admin selected ALL:', { projectFilter: req.projectFilter });
       return next();
     }
 
@@ -81,6 +90,7 @@ const projectFilter = async (req, res, next) => {
           canViewAll: true,
           isFiltered: true
         };
+        logger.info('ProjectFilter - Admin selected specific project:', { projectFilter: req.projectFilter });
         return next();
       }
 
@@ -102,6 +112,7 @@ const projectFilter = async (req, res, next) => {
         canViewAll: false,
         isFiltered: true
       };
+      logger.info('ProjectFilter - Non-admin selected specific project:', { projectFilter: req.projectFilter });
       return next();
     }
 
@@ -114,6 +125,7 @@ const projectFilter = async (req, res, next) => {
         canViewAll: true,
         isFiltered: false
       };
+      logger.info('ProjectFilter - Admin with no selection:', { projectFilter: req.projectFilter });
       return next();
     }
 
@@ -141,6 +153,12 @@ const projectFilter = async (req, res, next) => {
       canViewAll: false,
       isFiltered: true
     };
+
+    // Debug logging - final result
+    logger.info('ProjectFilter middleware - Result:', {
+      projectFilter: req.projectFilter,
+      userId
+    });
 
     next();
   } catch (error) {
@@ -223,17 +241,28 @@ async function getUserHierarchyLevel(db, userId) {
  * - This ensures new projects don't show unrelated data
  */
 const applyProjectFilter = (query, projectFilter, projectColumn = 'project_id') => {
+  // Debug logging - using info level to ensure visibility
+  logger.info('applyProjectFilter called:', {
+    isFiltered: projectFilter?.isFiltered,
+    projectIds: projectFilter?.projectIds,
+    selectedProjectId: projectFilter?.selectedProjectId,
+    column: projectColumn
+  });
+
   if (!projectFilter || !projectFilter.isFiltered) {
+    logger.info('applyProjectFilter - NOT filtering (isFiltered=false or no filter)');
     return query;
   }
 
   if (projectFilter.projectIds === null) {
     // No filter - show all
+    logger.info('applyProjectFilter - NOT filtering (projectIds=null)');
     return query;
   }
 
   if (projectFilter.projectIds.length === 0) {
     // User has no projects - show nothing
+    logger.info('applyProjectFilter - User has no projects, returning EMPTY');
     return query.whereRaw('1 = 0');
   }
 
@@ -241,11 +270,16 @@ const applyProjectFilter = (query, projectFilter, projectColumn = 'project_id') 
   // This ensures new projects don't show data from other projects
   if (projectFilter.selectedProjectId) {
     // Strict mode: only matching project_id, no NULLs
+    logger.info('applyProjectFilter - Applying STRICT filter:', {
+      column: projectColumn,
+      projectIds: projectFilter.projectIds
+    });
     return query.whereIn(projectColumn, projectFilter.projectIds);
   }
 
   // When viewing multiple projects (no specific selection), include NULLs
   // This helps users see "unassigned" records that need project assignment
+  logger.info('applyProjectFilter - Applying inclusive filter with NULLs');
   return query.where(function() {
     this.whereIn(projectColumn, projectFilter.projectIds)
       .orWhereNull(projectColumn);

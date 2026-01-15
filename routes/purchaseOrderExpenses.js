@@ -14,13 +14,10 @@ const { logger } = require('../utils/logger');
  */
 
 // Validation schemas
-// Category values must match the database enum in unified_expenses table
+// Category is validated dynamically against expense_categories table
+// Accepts both 'purchase' and 'operational' type categories for flexibility
 const expenseSchema = Joi.object({
-  category: Joi.string().valid(
-    'transportation', 'loading_unloading', 'customs_duty', 'inspection',
-    'storage', 'insurance', 'documentation', 'fuel', 'permits_fees',
-    'equipment_rental', 'meals_accommodation', 'maintenance', 'other'
-  ).required(),
+  category: Joi.string().trim().max(50).required(),
   description: Joi.string().trim().max(500).required(),
   amount: Joi.number().min(0).precision(3).required(),
   expenseDate: Joi.date().required(),
@@ -29,6 +26,34 @@ const expenseSchema = Joi.object({
   notes: Joi.string().trim().max(1000).allow('').optional(),
   receiptPhoto: Joi.string().allow(null, '').optional() // Base64 encoded image/PDF
 }).options({ stripUnknown: true });
+
+/**
+ * Validate category against expense_categories table
+ * @param {object} db - Database connection
+ * @param {string} categoryCode - Category code to validate
+ * @param {string} companyId - Company ID for isolation
+ * @returns {Promise<{valid: boolean, error?: string}>}
+ */
+async function validateCategoryCode(db, categoryCode, companyId) {
+  // Accept both purchase and operational categories for PO expenses
+  const validTypes = ['purchase', 'operational'];
+
+  const category = await db('expense_categories')
+    .where('company_id', companyId)
+    .where('code', categoryCode.toUpperCase())
+    .whereIn('type', validTypes)
+    .where('is_active', true)
+    .first();
+
+  if (!category) {
+    return {
+      valid: false,
+      error: `Invalid category code: ${categoryCode}. Must be an active purchase or operational category.`
+    };
+  }
+
+  return { valid: true, category };
+}
 
 /**
  * GET /api/purchase-orders/:id/expenses
@@ -107,12 +132,23 @@ router.post('/:id/expenses',
         });
       }
 
+      // Validate category against expense_categories table
+      const categoryValidation = await validateCategoryCode(db, req.body.category, companyId);
+      if (!categoryValidation.valid) {
+        return res.status(400).json({
+          success: false,
+          error: categoryValidation.error
+        });
+      }
+
       // Create expense record
       // Note: unified_expenses table doesn't have approval columns - expenses are auto-approved
       // Required fields: referenceId, referenceType, expenseType, category, description, amount, expenseDate, createdBy, updatedBy
       // Column mapping: frontend 'referenceNumber' -> database 'receiptNumber'
+      // Category is normalized to uppercase for consistency with expense_categories table
+      // project_id is inherited from the purchase order for proper filtering
       const expenseData = {
-        category: req.body.category,
+        category: req.body.category.toUpperCase(),
         description: req.body.description,
         amount: req.body.amount,
         expenseDate: req.body.expenseDate,
@@ -123,6 +159,7 @@ router.post('/:id/expenses',
         referenceType: 'purchase_order',
         referenceId: id,
         expenseType: 'purchase', // Required: 'purchase' or 'collection'
+        project_id: po.project_id || null, // Inherit project from PO for filtering consistency
         createdBy: userId,
         updatedBy: userId
         // createdAt and updatedAt have DEFAULT CURRENT_TIMESTAMP
@@ -190,10 +227,20 @@ router.put('/expenses/:expenseId',
         });
       }
 
+      // Validate category against expense_categories table
+      const categoryValidation = await validateCategoryCode(db, req.body.category, companyId);
+      if (!categoryValidation.valid) {
+        return res.status(400).json({
+          success: false,
+          error: categoryValidation.error
+        });
+      }
+
       // Update expense - only allow specific fields to be updated
       // Column mapping: frontend 'referenceNumber' -> database 'receiptNumber'
+      // Category is normalized to uppercase for consistency with expense_categories table
       const updateData = {
-        category: req.body.category,
+        category: req.body.category.toUpperCase(),
         description: req.body.description,
         amount: req.body.amount,
         expenseDate: req.body.expenseDate,

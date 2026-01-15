@@ -12,19 +12,13 @@ const router = express.Router();
 router.use(sanitize);
 
 // Unified expense validation schema
+// Note: Category is validated dynamically against expense_categories table
+// Accepts both 'purchase' and 'operational' type categories for flexibility
 const unifiedExpenseSchema = Joi.object({
   referenceId: Joi.number().integer().positive().required(),
   referenceType: Joi.string().valid('purchase_order', 'collection_order').required(),
   expenseType: Joi.string().valid('purchase', 'collection').required(),
-  category: Joi.string().valid(
-    // Purchase expense categories
-    'transportation', 'loading_unloading', 'customs_duty', 'inspection',
-    'storage', 'insurance', 'documentation',
-    // Collection expense categories (additional)
-    'fuel', 'permits_fees', 'equipment_rental', 'meals_accommodation', 'maintenance',
-    // Common category
-    'other'
-  ).required(),
+  category: Joi.string().trim().max(50).required(), // Dynamic validation against DB
   description: Joi.string().trim().min(1).max(500).required(),
   amount: Joi.number().min(0.01).precision(3).required(),
   currency: Joi.string().length(3).default('OMR'),
@@ -37,22 +31,46 @@ const unifiedExpenseSchema = Joi.object({
   notes: Joi.string().trim().max(1000).allow('').optional()
 });
 
+/**
+ * Validate category against expense_categories table
+ * @param {object} db - Database connection
+ * @param {string} categoryCode - Category code to validate
+ * @param {string} companyId - Company ID for isolation
+ * @param {string} expenseType - Type of expense ('purchase' or 'collection')
+ * @returns {Promise<{valid: boolean, error?: string}>}
+ */
+async function validateCategoryCode(db, categoryCode, companyId, expenseType = 'purchase') {
+  // Accept purchase, operational, and collection categories
+  const validTypes = expenseType === 'collection'
+    ? ['collection', 'operational']
+    : ['purchase', 'operational'];
+
+  const category = await db('expense_categories')
+    .where('company_id', companyId)
+    .where('code', categoryCode.toUpperCase())
+    .whereIn('type', validTypes)
+    .where('is_active', true)
+    .first();
+
+  if (!category) {
+    return {
+      valid: false,
+      error: `Invalid category code: ${categoryCode}. Must be an active ${expenseType} or operational category.`
+    };
+  }
+
+  return { valid: true, category };
+}
+
 // Bulk expense creation schema
+// Note: Category is validated dynamically against expense_categories table
 const bulkExpenseSchema = Joi.object({
   referenceId: Joi.number().integer().positive().required(),
   referenceType: Joi.string().valid('purchase_order', 'collection_order').required(),
   expenseType: Joi.string().valid('purchase', 'collection').required(),
   expenses: Joi.array().items(
     Joi.object({
-      category: Joi.string().valid(
-        // Purchase expense categories
-        'transportation', 'loading_unloading', 'customs_duty', 'inspection',
-        'storage', 'insurance', 'documentation',
-        // Collection expense categories (additional)
-        'fuel', 'permits_fees', 'equipment_rental', 'meals_accommodation', 'maintenance',
-        // Common category
-        'other'
-      ).required(),
+      category: Joi.string().trim().max(50).required(), // Dynamic validation against DB
       description: Joi.string().trim().min(1).max(500).required(),
       amount: Joi.number().min(0.01).precision(3).required(),
       currency: Joi.string().length(3).default('OMR'),
@@ -262,12 +280,23 @@ router.post('/', requirePermission('CREATE_PURCHASE'), validate(bulkExpenseSchem
   const db = getDbConnection(companyId);
 
   try {
+    // Validate all expense categories against database
+    for (const expense of expenses) {
+      const categoryValidation = await validateCategoryCode(db, expense.category, companyId, expenseType);
+      if (!categoryValidation.valid) {
+        return res.status(400).json({
+          success: false,
+          error: categoryValidation.error
+        });
+      }
+    }
+
     // Start transaction
     await db.transaction(async (trx) => {
       // Verify reference exists and belongs to company
       let referenceOrder;
       let orderNumberField;
-      
+
       if (referenceType === 'purchase_order') {
         referenceOrder = await trx('purchase_orders')
           .where({ id: referenceId })
@@ -288,8 +317,10 @@ router.post('/', requirePermission('CREATE_PURCHASE'), validate(bulkExpenseSchem
       const projectId = referenceOrder.project_id || null;
 
       // Create expense entries with project_id inherited from reference order
+      // Category is normalized to uppercase for consistency with expense_categories table
       const expenseEntries = expenses.map(expense => ({
         ...expense,
+        category: expense.category.toUpperCase(), // Normalize to uppercase
         referenceId,
         referenceType,
         expenseType,
@@ -389,17 +420,10 @@ router.post('/', requirePermission('CREATE_PURCHASE'), validate(bulkExpenseSchem
   }
 });
 
-// PUT /api/expenses/:id - Update expense  
+// PUT /api/expenses/:id - Update expense
+// Note: Category is validated dynamically against expense_categories table
 const updateExpenseSchema = Joi.object({
-  category: Joi.string().valid(
-    // Purchase expense categories
-    'transportation', 'loading_unloading', 'customs_duty', 'inspection',
-    'storage', 'insurance', 'documentation',
-    // Collection expense categories (additional)
-    'fuel', 'permits_fees', 'equipment_rental', 'meals_accommodation', 'maintenance',
-    // Common category
-    'other'
-  ).required(),
+  category: Joi.string().trim().max(50).required(), // Dynamic validation against DB
   description: Joi.string().trim().min(1).max(500).required(),
   amount: Joi.number().min(0.01).precision(3).required(),
   currency: Joi.string().length(3).default('OMR'),
@@ -431,11 +455,21 @@ router.put('/:id', requirePermission('EDIT_PURCHASE'), validateParams(['id']), v
       });
     }
 
-    // Update expense
+    // Validate category against expense_categories table
+    const categoryValidation = await validateCategoryCode(db, updateData.category, companyId, existingExpense.expenseType);
+    if (!categoryValidation.valid) {
+      return res.status(400).json({
+        success: false,
+        error: categoryValidation.error
+      });
+    }
+
+    // Update expense - normalize category to uppercase
     await db('unified_expenses')
       .where({ id })
       .update({
         ...updateData,
+        category: updateData.category.toUpperCase(), // Normalize to uppercase
         updatedBy: userId,
         updatedAt: new Date()
       });

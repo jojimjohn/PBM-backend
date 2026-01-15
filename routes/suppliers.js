@@ -662,18 +662,18 @@ router.get('/:id/attachments',
       }
 
       // Get attachments from repository
-      const attachments = await supplierAttachments.findByEntity(db, id);
+      const attachments = await supplierAttachments.findByReferenceId(db, id);
 
       // Generate presigned URLs for each attachment
       const attachmentsWithUrls = await Promise.all(
         attachments.map(async (attachment) => {
           try {
-            const url = await storageService.getPresignedUrl(attachment.file_key);
+            const url = await storageService.getPresignedUrl(attachment.storageKey);
             return { ...attachment, url };
           } catch (err) {
             logger.warn('Failed to generate presigned URL', {
               attachmentId: attachment.id,
-              fileKey: attachment.file_key,
+              fileKey: attachment.storageKey,
               error: err.message
             });
             return { ...attachment, url: null };

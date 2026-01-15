@@ -105,7 +105,7 @@ class AttachmentRepository {
           `${this.tableName}.uploaded_by as uploadedBy`,
           `${this.tableName}.uploaded_at as uploadedAt`,
           `${this.tableName}.is_archived as isArchived`,
-          'users.name as uploaderName'
+          db.raw("CONCAT(users.firstName, ' ', users.lastName) as uploaderName")
         )
         .leftJoin('users', `${this.tableName}.uploaded_by`, 'users.id')
         .where(`${this.tableName}.${this.foreignKeyColumn}`, referenceId);
@@ -146,7 +146,7 @@ class AttachmentRepository {
           `${this.tableName}.uploaded_by as uploadedBy`,
           `${this.tableName}.uploaded_at as uploadedAt`,
           `${this.tableName}.is_archived as isArchived`,
-          'users.name as uploaderName'
+          db.raw("CONCAT(users.firstName, ' ', users.lastName) as uploaderName")
         )
         .leftJoin('users', `${this.tableName}.uploaded_by`, 'users.id')
         .where(`${this.tableName}.id`, id)

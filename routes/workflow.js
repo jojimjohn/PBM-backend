@@ -39,6 +39,14 @@ router.get('/pending-actions',
     const userPermissions = user.permissions || [];
     const userRole = user.role || '';
 
+    // Debug logging for project filter
+    logger.info('Pending actions - Project filter state:', {
+      projectFilter: req.projectFilter,
+      queryProjectId: req.query.project_id,
+      userId: user.userId,
+      userRole
+    });
+
     // Check if user has a specific permission
     const hasPermission = (permission) => {
       // Super admins and company admins see all
@@ -247,7 +255,7 @@ router.get('/pending-actions',
       // ============================================
       // 4. Invoices with Upcoming/Overdue Payments
       // ============================================
-      const pendingPayments = await db('purchase_invoices as pi')
+      let pendingPaymentsQuery = db('purchase_invoices as pi')
         .leftJoin('purchase_orders as po', 'pi.purchase_order_id', 'po.id')
         .leftJoin('suppliers as s', 'pi.supplier_id', 's.id')
         .select(
@@ -266,6 +274,9 @@ router.get('/pending-actions',
         .whereNotNull('pi.due_date')
         .where('pi.due_date', '<=', db.raw('DATE_ADD(NOW(), INTERVAL 7 DAY)'))
         .orderBy('pi.due_date', 'asc');
+      // Apply project filter via joined purchase_orders table
+      pendingPaymentsQuery = applyProjectFilter(pendingPaymentsQuery, req.projectFilter, 'po.project_id');
+      const pendingPayments = await pendingPaymentsQuery;
 
       pendingPayments.forEach(invoice => {
         const isOverdue = invoice.daysOverdue > 0;
@@ -1340,12 +1351,14 @@ router.get('/notifications',
 
       // 1. Overdue vendor bills (PAYABLES - money WE owe to suppliers)
       // Only count vendor bills as overdue (company bills are internal records)
-      const overduePayables = await db('purchase_invoices')
-        .where('bill_type', 'vendor')  // Only vendor bills are payable
-        .where('payment_status', '!=', 'paid')
-        .where('due_date', '<', db.raw('NOW()'))
-        .count('* as count')
-        .first();
+      // Filter through purchase_orders since purchase_invoices doesn't have project_id
+      let overduePayablesQuery = db('purchase_invoices as pi')
+        .leftJoin('purchase_orders as po', 'pi.purchase_order_id', 'po.id')
+        .where('pi.bill_type', 'vendor')  // Only vendor bills are payable
+        .where('pi.payment_status', '!=', 'paid')
+        .where('pi.due_date', '<', db.raw('NOW()'));
+      overduePayablesQuery = applyProjectFilter(overduePayablesQuery, req.projectFilter, 'po.project_id');
+      const overduePayables = await overduePayablesQuery.count('* as count').first();
 
       if (overduePayables?.count > 0) {
         notifications.push({
