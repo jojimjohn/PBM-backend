@@ -157,6 +157,57 @@ class InMemoryFallback {
     this.expirations.delete(key);
   }
 
+  /**
+   * Multi/transaction support for in-memory fallback
+   * Returns a chainable object that collects commands and executes them
+   */
+  multi() {
+    const self = this;
+    const commands = [];
+
+    const chainable = {
+      get(key) {
+        commands.push({ cmd: 'get', args: [key] });
+        return chainable;
+      },
+      set(key, value, ...args) {
+        commands.push({ cmd: 'set', args: [key, value, ...args] });
+        return chainable;
+      },
+      setex(key, seconds, value) {
+        commands.push({ cmd: 'setex', args: [key, seconds, value] });
+        return chainable;
+      },
+      del(key) {
+        commands.push({ cmd: 'del', args: [key] });
+        return chainable;
+      },
+      exists(key) {
+        commands.push({ cmd: 'exists', args: [key] });
+        return chainable;
+      },
+      expire(key, seconds) {
+        commands.push({ cmd: 'expire', args: [key, seconds] });
+        return chainable;
+      },
+      async exec() {
+        // Execute all commands and return results in ioredis format: [[null, result], ...]
+        const results = [];
+        for (const { cmd, args } of commands) {
+          try {
+            const result = await self[cmd](...args);
+            results.push([null, result]);
+          } catch (error) {
+            results.push([error, null]);
+          }
+        }
+        return results;
+      }
+    };
+
+    return chainable;
+  }
+
   // Connection status methods
   get status() {
     return 'ready';
@@ -417,6 +468,21 @@ class ResilientRedisClient {
       return await client.ping();
     } catch (error) {
       return 'PONG (fallback)';
+    }
+  }
+
+  /**
+   * Multi/transaction support
+   * Returns the underlying client's multi() or fallback's multi()
+   * This enables atomic operations in session management
+   */
+  multi() {
+    try {
+      const client = this._getClient();
+      return client.multi();
+    } catch (error) {
+      logger.error('Redis multi failed, using fallback', { error: error.message });
+      return this.fallback.multi();
     }
   }
 
