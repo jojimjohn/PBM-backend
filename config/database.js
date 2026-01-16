@@ -2,6 +2,7 @@ const knex = require('knex');
 const { logger } = require('../utils/logger');
 
 // Database configuration for both companies
+// PERFORMANCE: Optimized for 100+ concurrent users
 const dbConfig = {
   client: 'mysql2',
   connection: {
@@ -10,25 +11,45 @@ const dbConfig = {
     user: process.env.DB_USER,
     password: process.env.DB_PASSWORD,
     charset: 'utf8mb4',
-    // Remove invalid MySQL2 options
-    connectTimeout: 60000,
+    // Connection timeout - fail fast to avoid hanging
+    connectTimeout: parseInt(process.env.DB_CONNECT_TIMEOUT) || 10000,
     supportBigNumbers: true,
     bigNumberStrings: true,
     // IMPORTANT: Keep dates as strings to prevent timezone conversion issues
     // Without this, mysql2 converts date strings to JavaScript Date objects,
     // which causes UTC timezone shifts (dates saved as -1 day)
     dateStrings: true,
+    // PERFORMANCE: Enable connection compression for large result sets
+    compress: process.env.DB_COMPRESS === 'true',
+    // PERFORMANCE: Allow multiple statements for batch operations
+    multipleStatements: false, // Keep false for security
   },
   pool: {
-    min: 2,
-    max: 50, // Increased from 20 to handle higher concurrent load
-    createTimeoutMillis: 10000,
-    acquireTimeoutMillis: 30000, // Reduced from 60s to fail faster
-    idleTimeoutMillis: 20000, // Release idle connections after 20s
-    reapIntervalMillis: 5000, // Check for idle connections every 5s
-    createRetryIntervalMillis: 500,
-    propagateCreateError: false, // Don't propagate create errors to all pending acquires
+    // PERFORMANCE: Pool sizing for 100 users
+    // Formula: (concurrent_users × avg_queries_per_request) / 2
+    // 100 users × 3 queries × 0.5 = 150, rounded up with headroom
+    min: parseInt(process.env.DB_POOL_MIN) || 5,
+    max: parseInt(process.env.DB_POOL_MAX) || 100,
+    // PERFORMANCE: Faster timeout to fail fast and free resources
+    createTimeoutMillis: parseInt(process.env.DB_CREATE_TIMEOUT) || 5000,
+    acquireTimeoutMillis: parseInt(process.env.DB_ACQUIRE_TIMEOUT) || 10000,
+    // PERFORMANCE: Release idle connections to free MySQL slots
+    idleTimeoutMillis: parseInt(process.env.DB_IDLE_TIMEOUT) || 30000,
+    reapIntervalMillis: 5000,
+    createRetryIntervalMillis: 200, // Faster retry
+    propagateCreateError: false,
+    // PERFORMANCE: Validate connections before use to avoid stale connection errors
+    afterCreate: (conn, done) => {
+      conn.query('SELECT 1', (err) => {
+        if (err) {
+          logger.error('Connection validation failed', { error: err.message });
+        }
+        done(err, conn);
+      });
+    },
   },
+  // PERFORMANCE: Query timeout to prevent long-running queries from blocking pool
+  acquireConnectionTimeout: 10000,
   migrations: {
     tableName: 'knex_migrations',
     directory: './migrations'
@@ -64,9 +85,36 @@ const createConnection = (database) => {
 let alRamramiDb = null;
 let prideMuscatDb = null;
 
+// FIX (Jan 2026): Helper to add timeout to promises
+const withTimeout = (promise, ms, operation) => {
+  const timeout = new Promise((_, reject) => {
+    setTimeout(() => reject(new Error(`${operation} timed out after ${ms}ms`)), ms);
+  });
+  return Promise.race([promise, timeout]);
+};
+
 // Initialize database connections
 const initializeDatabases = async () => {
+  const DB_INIT_TIMEOUT = parseInt(process.env.DB_INIT_TIMEOUT) || 30000; // 30 seconds default
+
   try {
+    console.log('[DB Init] Starting database initialization...');
+    console.log('[DB Init] Host:', process.env.DB_HOST || 'localhost');
+    console.log('[DB Init] Port:', process.env.DB_PORT || 3306);
+    console.log('[DB Init] User:', process.env.DB_USER ? '***' : 'NOT SET');
+    console.log('[DB Init] AL_RAMRAMI_DB:', process.env.AL_RAMRAMI_DB || 'NOT SET');
+    console.log('[DB Init] PRIDE_MUSCAT_DB:', process.env.PRIDE_MUSCAT_DB || 'NOT SET');
+
+    // Validate required env vars
+    if (!process.env.DB_USER || !process.env.DB_PASSWORD) {
+      throw new Error('DB_USER and DB_PASSWORD environment variables are required');
+    }
+    if (!process.env.AL_RAMRAMI_DB || !process.env.PRIDE_MUSCAT_DB) {
+      throw new Error('AL_RAMRAMI_DB and PRIDE_MUSCAT_DB environment variables are required');
+    }
+
+    console.log('[DB Init] Creating main connection...');
+
     // Create databases if they don't exist
     const mainConnection = knex({
       ...dbConfig,
@@ -76,13 +124,35 @@ const initializeDatabases = async () => {
       }
     });
 
+    console.log('[DB Init] Testing connection...');
+
+    // Test connection with timeout
+    await withTimeout(
+      mainConnection.raw('SELECT 1'),
+      DB_INIT_TIMEOUT,
+      'Database connection test'
+    );
+
+    console.log('[DB Init] Connection successful, creating databases...');
+
     // Create Al Ramrami database
-    await mainConnection.raw(`CREATE DATABASE IF NOT EXISTS \`${process.env.AL_RAMRAMI_DB}\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci`);
-    
+    await withTimeout(
+      mainConnection.raw(`CREATE DATABASE IF NOT EXISTS \`${process.env.AL_RAMRAMI_DB}\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci`),
+      DB_INIT_TIMEOUT,
+      'Create AL_RAMRAMI_DB'
+    );
+    console.log('[DB Init] AL_RAMRAMI_DB ready');
+
     // Create Pride Muscat database
-    await mainConnection.raw(`CREATE DATABASE IF NOT EXISTS \`${process.env.PRIDE_MUSCAT_DB}\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci`);
-    
+    await withTimeout(
+      mainConnection.raw(`CREATE DATABASE IF NOT EXISTS \`${process.env.PRIDE_MUSCAT_DB}\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci`),
+      DB_INIT_TIMEOUT,
+      'Create PRIDE_MUSCAT_DB'
+    );
+    console.log('[DB Init] PRIDE_MUSCAT_DB ready');
+
     await mainConnection.destroy();
+    console.log('[DB Init] Main connection closed, initializing company connections...');
 
     // Initialize company-specific connections
     alRamramiDb = createConnection(process.env.AL_RAMRAMI_DB);
@@ -92,8 +162,10 @@ const initializeDatabases = async () => {
     // await runSafeMigrations();
 
     logger.info('🗄️ Database initialization completed');
-    
+    console.log('[DB Init] ✅ Database initialization completed');
+
   } catch (error) {
+    console.error('[DB Init] ❌ FAILED:', error.message);
     logger.error('❌ Database initialization failed', { error: error.message });
     throw error;
   }

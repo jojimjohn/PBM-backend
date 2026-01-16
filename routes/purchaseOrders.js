@@ -8,6 +8,7 @@ const { uploadMultiple, deleteFile, fileExists, uploadMultipleToS3, requireFiles
 const storageService = require('../services/storageService');
 const { purchaseOrderAttachments } = require('../repositories/AttachmentRepository');
 const { createBatch } = require('../utils/fifoAllocator');
+const { cacheService } = require('../utils/cache');
 const path = require('path');
 const Joi = require('joi');
 
@@ -97,6 +98,8 @@ router.get('/', requirePermission('VIEW_PURCHASE'), projectFilter, async (req, r
 
     const offset = (page - 1) * limit;
 
+    // PERFORMANCE: Removed N+1 correlated subquery for itemCount
+    // Item counts will be batch loaded after fetching main results
     let query = db('purchase_orders')
       .leftJoin('suppliers', 'purchase_orders.supplierId', 'suppliers.id')
       .leftJoin('collection_orders', 'purchase_orders.collection_order_id', 'collection_orders.id')
@@ -105,8 +108,7 @@ router.get('/', requirePermission('VIEW_PURCHASE'), projectFilter, async (req, r
         'suppliers.name as supplierName',
         'suppliers.specialization',
         'collection_orders.orderNumber as collectionOrderNumber',
-        'collection_orders.wcn_number',
-        db.raw('(SELECT COUNT(*) FROM purchase_order_items WHERE purchase_order_items.purchaseOrderId = purchase_orders.id) as itemCount')
+        'collection_orders.wcn_number'
       )
       .whereNot('purchase_orders.status', 'cancelled');
 
@@ -151,25 +153,29 @@ router.get('/', requirePermission('VIEW_PURCHASE'), projectFilter, async (req, r
       .limit(limit)
       .offset(offset);
 
-    // Convert DECIMAL strings to numbers for consistent JSON format
+    // PERFORMANCE: Batch load item counts in single query instead of N+1 subquery
+    const orderIds = orders.map(o => o.id);
+    let itemCountMap = new Map();
+    if (orderIds.length > 0) {
+      const itemCounts = await db('purchase_order_items')
+        .select('purchaseOrderId')
+        .count('* as count')
+        .whereIn('purchaseOrderId', orderIds)
+        .groupBy('purchaseOrderId');
+      itemCountMap = new Map(itemCounts.map(ic => [ic.purchaseOrderId, parseInt(ic.count)]));
+    }
+
+    // Convert DECIMAL strings to numbers and add item counts
     const formattedOrders = orders.map(order => ({
       ...order,
       subtotal: parseFloat(order.subtotal) || 0,
       taxAmount: parseFloat(order.taxAmount) || 0,
       totalAmount: parseFloat(order.totalAmount) || 0,
-      shippingCost: parseFloat(order.shippingCost) || 0
+      shippingCost: parseFloat(order.shippingCost) || 0,
+      itemCount: itemCountMap.get(order.id) || 0
     }));
 
-    // Log financial values from first order for debugging
-    if (formattedOrders.length > 0) {
-      logger.info('💰 Sample PO financial values from list:', {
-        orderNumber: formattedOrders[0].orderNumber,
-        subtotal: formattedOrders[0].subtotal,
-        taxAmount: formattedOrders[0].taxAmount,
-        totalAmount: formattedOrders[0].totalAmount,
-        shippingCost: formattedOrders[0].shippingCost
-      });
-    }
+    // PERFORMANCE: Removed debug logging that ran on every list request
 
     auditLog('PURCHASE_ORDERS_VIEWED', req.user.userId, {
       companyId,
@@ -914,25 +920,41 @@ router.put('/:id/receive',
 
       // Manual PO - process inventory updates
       await db.transaction(async (trx) => {
+        // PERFORMANCE: Batch load all order items for this PO
+        const itemIds = receivedItems.map(ri => ri.itemId);
+        const allOrderItems = await trx('purchase_order_items')
+          .whereIn('id', itemIds)
+          .where({ purchaseOrderId: id });
+        const orderItemMap = new Map(allOrderItems.map(item => [item.id, item]));
+
+        // PERFORMANCE: Batch load all material compositions in single query
+        const materialIds = [...new Set(allOrderItems.map(item => item.materialId))];
+        const allCompositions = await trx('material_compositions')
+          .leftJoin('materials', 'material_compositions.component_material_id', 'materials.id')
+          .select(
+            'material_compositions.*',
+            'materials.name as component_material_name',
+            'materials.code as component_material_code'
+          )
+          .whereIn('material_compositions.composite_material_id', materialIds)
+          .where('material_compositions.is_active', 1);
+
+        // Group compositions by composite_material_id for O(1) lookup
+        const compositionMap = new Map();
+        for (const comp of allCompositions) {
+          const existing = compositionMap.get(comp.composite_material_id) || [];
+          existing.push(comp);
+          compositionMap.set(comp.composite_material_id, existing);
+        }
+
         for (const receivedItem of receivedItems) {
-          // Get the order item details
-          const orderItem = await trx('purchase_order_items')
-            .where({ id: receivedItem.itemId, purchaseOrderId: id })
-            .first();
+          // PERFORMANCE: O(1) lookup from pre-loaded map
+          const orderItem = orderItemMap.get(receivedItem.itemId);
 
           if (!orderItem) continue;
 
-          // Check if this material is composite
-          const compositions = await trx('material_compositions')
-            .leftJoin('materials', 'material_compositions.component_material_id', 'materials.id')
-            .select(
-              'material_compositions.*',
-              'materials.name as component_material_name',
-              'materials.code as component_material_code'
-            )
-            .where('material_compositions.composite_material_id', orderItem.materialId)
-            .where('material_compositions.is_active', 1);
-
+          // PERFORMANCE: O(1) lookup from pre-loaded compositions map
+          const compositions = compositionMap.get(orderItem.materialId) || [];
           const isComposite = compositions.length > 0;
 
           if (isComposite) {
@@ -1344,8 +1366,9 @@ router.get('/pending',
 );
 
 // GET /api/purchase-orders/contract-rate/:supplierId/:materialId - Get contract rate for supplier and material
+// PERFORMANCE: Cached for 2 minutes to reduce repeated DB queries when adding items to PO
 router.get('/contract-rate/:supplierId/:materialId',
-  validateParams(Joi.object({ 
+  validateParams(Joi.object({
     supplierId: Joi.number().integer().positive().required(),
     materialId: Joi.number().integer().positive().required()
   })),
@@ -1354,6 +1377,14 @@ router.get('/contract-rate/:supplierId/:materialId',
     try {
       const { supplierId, materialId } = req.params;
       const { companyId } = req.user;
+
+      // PERFORMANCE: Check cache first for contract rate lookups
+      const cacheKey = `${companyId}:supplier:${supplierId}:material:${materialId}`;
+      const cached = await cacheService.get('default', cacheKey);
+      if (cached) {
+        return res.json(cached);
+      }
+
       const db = getDbConnection(companyId);
 
       // Get material standard price
@@ -1386,7 +1417,7 @@ router.get('/contract-rate/:supplierId/:materialId',
         .first();
 
       if (!contractRate) {
-        return res.json({
+        const noContractResponse = {
           success: true,
           data: {
             hasContractRate: false,
@@ -1394,7 +1425,10 @@ router.get('/contract-rate/:supplierId/:materialId',
             effectivePrice: material.standardPrice,
             material
           }
-        });
+        };
+        // PERFORMANCE: Cache for 2 minutes (120 seconds)
+        await cacheService.set('default', cacheKey, noContractResponse, 120);
+        return res.json(noContractResponse);
       }
 
       // Calculate effective price based on contract type
@@ -1422,7 +1456,7 @@ router.get('/contract-rate/:supplierId/:materialId',
           break;
       }
 
-      res.json({
+      const contractResponse = {
         success: true,
         data: {
           hasContractRate: true,
@@ -1434,7 +1468,10 @@ router.get('/contract-rate/:supplierId/:materialId',
           material,
           isExpiringSoon: new Date(contractRate.contractEndDate) < new Date(Date.now() + 30 * 24 * 60 * 60 * 1000)
         }
-      });
+      };
+      // PERFORMANCE: Cache for 2 minutes (120 seconds)
+      await cacheService.set('default', cacheKey, contractResponse, 120);
+      res.json(contractResponse);
 
     } catch (error) {
       logger.error('Error fetching purchase contract rate', { 

@@ -6,6 +6,7 @@ const { getDbConnection } = require('../config/database');
 const { uploadMultipleToS3, requireFiles } = require('../middleware/upload');
 const storageService = require('../services/storageService');
 const { materialAttachments } = require('../repositories/AttachmentRepository');
+const { cacheService, generateCacheKey } = require('../utils/cache');
 const Joi = require('joi');
 
 const router = express.Router();
@@ -200,20 +201,27 @@ router.get('/regions', requirePermission('VIEW_SUPPLIERS'), async (req, res) => 
   }
 });
 
-// GET /api/materials/material-categories - Get available material categories  
+// GET /api/materials/material-categories - Get available material categories
+// PERFORMANCE: Uses caching since categories rarely change
 router.get('/material-categories', async (req, res) => {
   try {
-    console.log('Material categories endpoint hit - user:', req.user?.userId, 'company:', req.user?.companyId, 'query:', req.query);
     const { companyId } = req.user;
     const db = getDbConnection(companyId);
-    
-    const { 
+
+    const {
       business_type = '',
       isActive = 'true'
     } = req.query;
-    
+
+    // PERFORMANCE: Check cache first
+    const cacheKey = `${companyId}:categories:${business_type}:${isActive}`;
+    const cached = await cacheService.get('categories', cacheKey);
+    if (cached) {
+      return res.json(cached);
+    }
+
     let query = db('material_categories').select('*');
-    
+
     // Filter by business type if specified
     if (business_type) {
       query = query.where(function() {
@@ -221,30 +229,28 @@ router.get('/material-categories', async (req, res) => {
             .orWhere('business_type', 'both');
       });
     }
-    
+
     // Filter by active status
     if (isActive !== '') {
       query = query.where('isActive', isActive === 'true');
     }
-    
+
     const categories = await query.orderBy('sort_order', 'asc');
 
-    auditLog('MATERIAL_CATEGORIES_VIEWED', req.user.userId, {
-      companyId,
-      categoriesCount: categories.length,
-      business_type
-    });
-
-    res.json({
+    const response = {
       success: true,
       data: categories,
       message: 'Material categories retrieved successfully'
-    });
+    };
+
+    // PERFORMANCE: Cache for 10 minutes (categories rarely change)
+    await cacheService.set('categories', cacheKey, response);
+
+    res.json(response);
 
   } catch (error) {
-    console.error('Material categories endpoint error:', error);
-    logger.error('Error fetching material categories', { 
-      error: error.message, 
+    logger.error('Error fetching material categories', {
+      error: error.message,
       userId: req.user?.userId,
       companyId: req.user?.companyId
     });
@@ -255,20 +261,27 @@ router.get('/material-categories', async (req, res) => {
   }
 });
 
-// GET /api/materials/categories - Get available material categories  
+// GET /api/materials/categories - Get available material categories
+// PERFORMANCE: Uses caching since categories rarely change (alias endpoint)
 router.get('/categories', async (req, res) => {
   try {
-    console.log('Categories endpoint hit - user:', req.user?.userId, 'company:', req.user?.companyId, 'query:', req.query);
     const { companyId } = req.user;
     const db = getDbConnection(companyId);
-    
-    const { 
+
+    const {
       business_type = '',
       isActive = 'true'
     } = req.query;
-    
+
+    // PERFORMANCE: Check cache first (same cache key as material-categories)
+    const cacheKey = `${companyId}:categories:${business_type}:${isActive}`;
+    const cached = await cacheService.get('categories', cacheKey);
+    if (cached) {
+      return res.json(cached);
+    }
+
     let query = db('material_categories').select('*');
-    
+
     // Filter by business type if specified
     if (business_type) {
       query = query.where(function() {
@@ -276,30 +289,28 @@ router.get('/categories', async (req, res) => {
             .orWhere('business_type', 'both');
       });
     }
-    
+
     // Filter by active status
     if (isActive !== '') {
       query = query.where('isActive', isActive === 'true');
     }
-    
+
     const categories = await query.orderBy('sort_order', 'asc');
 
-    auditLog('MATERIAL_CATEGORIES_VIEWED', req.user.userId, {
-      companyId,
-      categoriesCount: categories.length,
-      business_type
-    });
-
-    res.json({
+    const response = {
       success: true,
       data: categories,
       message: 'Material categories retrieved successfully'
-    });
+    };
+
+    // PERFORMANCE: Cache for 10 minutes
+    await cacheService.set('categories', cacheKey, response);
+
+    res.json(response);
 
   } catch (error) {
-    console.error('Categories endpoint error:', error);
-    logger.error('Error fetching material categories', { 
-      error: error.message, 
+    logger.error('Error fetching material categories', {
+      error: error.message,
       userId: req.user?.userId,
       companyId: req.user?.companyId
     });

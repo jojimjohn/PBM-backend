@@ -39,6 +39,51 @@ const COOKIE_OPTIONS = {
 const ACCESS_TOKEN_MAX_AGE = 15 * 60 * 1000;        // 15 minutes
 const REFRESH_TOKEN_MAX_AGE = 7 * 24 * 60 * 60 * 1000; // 7 days
 
+// Role hierarchy for project filtering (PERFORMANCE: cached in JWT to avoid DB lookups)
+const ROLE_HIERARCHY = {
+  'super-admin': 10,
+  'company-admin': 9,
+  'manager': 5,
+  'sales-staff': 3,
+  'purchase-staff': 3,
+  'accounts-staff': 3,
+  'SUPER_ADMIN': 10,
+  'COMPANY_ADMIN': 9,
+  'MANAGER': 5,
+  'SALES_STAFF': 3,
+  'PURCHASE_STAFF': 3,
+  'ACCOUNTS_STAFF': 3
+};
+
+/**
+ * Get user's hierarchy level for project filtering
+ * This is cached in JWT to avoid DB lookups on every request
+ * @param {Object} db - Database connection
+ * @param {number} userId - User ID
+ * @param {string} role - User's role string (legacy)
+ * @param {number} roleId - User's role_id from roles table
+ * @returns {number} Hierarchy level (0-10, 9+ = admin)
+ */
+const getHierarchyLevel = async (db, userId, role, roleId) => {
+  // Try database roles table first
+  if (roleId) {
+    try {
+      const dbRole = await db('roles')
+        .select('hierarchy_level')
+        .where('id', roleId)
+        .first();
+      if (dbRole?.hierarchy_level) {
+        return dbRole.hierarchy_level;
+      }
+    } catch (e) {
+      logger.debug('Could not get hierarchy from roles table', { roleId });
+    }
+  }
+
+  // Fallback to legacy role string mapping
+  return ROLE_HIERARCHY[role] || 0;
+};
+
 /**
  * Set authentication cookies (JWT tokens + CSRF token)
  * @param {Response} res - Express response object
@@ -342,6 +387,9 @@ router.post('/login', authRateLimit, validate(schemas.login), async (req, res) =
     // Get user permissions - prefer role_id from DB, fallback to legacy role string
     const permissions = await getUserPermissions(user.role_id || mappedRole, companyId, db);
 
+    // PERFORMANCE: Get hierarchy level for project filtering (cached in JWT)
+    const hierarchyLevel = await getHierarchyLevel(db, user.id, user.role, user.role_id);
+
     // Generate tokens
     const tokens = generateTokenPair(
       user.id,
@@ -349,7 +397,8 @@ router.post('/login', authRateLimit, validate(schemas.login), async (req, res) =
       mappedRole,
       user.companyId,
       permissions,
-      user.role_id
+      user.role_id,
+      hierarchyLevel
     );
 
     // Update last login
@@ -494,41 +543,51 @@ router.post('/register',
 });
 
 // Refresh token endpoint - SECURITY: Uses cookie-based refresh with token rotation
+// RACE CONDITION FIX: Uses mutex lock to prevent concurrent refresh attempts
 router.post('/refresh', async (req, res) => {
+  const tokenBlacklist = require('../utils/tokenBlacklist');
+
+  // Extract refresh token from cookie first, then body (for migration)
+  let refreshToken = req.cookies?.refreshToken;
+  let tokenSource = 'cookie';
+
+  if (!refreshToken && req.body?.refreshToken) {
+    refreshToken = req.body.refreshToken;
+    tokenSource = 'body';
+  }
+
+  if (!refreshToken) {
+    return res.status(401).json({
+      success: false,
+      error: 'Refresh token required',
+      code: 'NO_REFRESH_TOKEN'
+    });
+  }
+
+  // Verify token first to get userId for the lock
+  // This is done outside the lock because we need userId to acquire the lock
+  let decoded;
   try {
-    const tokenBlacklist = require('../utils/tokenBlacklist');
+    decoded = verifyRefreshToken(refreshToken);
+  } catch (error) {
+    logger.error('Token refresh error - invalid token', { error: error.message });
+    clearAuthCookies(res);
+    return res.status(401).json({
+      success: false,
+      error: 'Invalid refresh token',
+      code: 'INVALID_TOKEN'
+    });
+  }
 
-    // Extract refresh token from cookie first, then body (for migration)
-    let refreshToken = req.cookies?.refreshToken;
-    let tokenSource = 'cookie';
-
-    if (!refreshToken && req.body?.refreshToken) {
-      refreshToken = req.body.refreshToken;
-      tokenSource = 'body';
-    }
-
-    if (!refreshToken) {
-      return res.status(401).json({
-        success: false,
-        error: 'Refresh token required',
-        code: 'NO_REFRESH_TOKEN'
-      });
-    }
-
-    // Check if token is blacklisted before verification
+  // Use mutex lock to prevent race conditions when multiple requests try to refresh
+  // This prevents the scenario where two tabs both try to refresh and one blacklists
+  // the token before the other can use it
+  const lockResult = await tokenBlacklist.withRefreshLock(decoded.userId, async () => {
+    // Re-check blacklist inside the lock (token may have been blacklisted by concurrent request)
     const isBlacklisted = await tokenBlacklist.isBlacklisted(refreshToken);
     if (isBlacklisted) {
-      clearAuthCookies(res);
-      return res.status(401).json({
-        success: false,
-        error: 'Refresh token has been revoked',
-        code: 'TOKEN_REVOKED'
-      });
+      return { error: 'TOKEN_REVOKED', message: 'Refresh token has been revoked' };
     }
-
-    // Verify refresh token
-    const decoded = verifyRefreshToken(refreshToken);
-    const db = getDbConnection(decoded.companyId || 'al-ramrami');
 
     // Check if user was force logged out after this token was issued
     const wasForceLoggedOut = await tokenBlacklist.wasForceLoggedOut(
@@ -536,13 +595,10 @@ router.post('/refresh', async (req, res) => {
       decoded.iat
     );
     if (wasForceLoggedOut) {
-      clearAuthCookies(res);
-      return res.status(401).json({
-        success: false,
-        error: 'Session has been terminated',
-        code: 'FORCE_LOGOUT'
-      });
+      return { error: 'FORCE_LOGOUT', message: 'Session has been terminated' };
     }
+
+    const db = getDbConnection(decoded.companyId || 'al-ramrami');
 
     // Get user details
     const user = await db('users')
@@ -550,12 +606,7 @@ router.post('/refresh', async (req, res) => {
       .first();
 
     if (!user || !user.isActive) {
-      clearAuthCookies(res);
-      return res.status(401).json({
-        success: false,
-        error: 'Invalid refresh token',
-        code: 'USER_INVALID'
-      });
+      return { error: 'USER_INVALID', message: 'Invalid refresh token' };
     }
 
     // Convert backend role names to frontend format (same as login endpoint)
@@ -572,6 +623,9 @@ router.post('/refresh', async (req, res) => {
     // Get user permissions - prefer role_id from DB, fallback to legacy role string
     const permissions = await getUserPermissions(user.role_id || mappedRole, user.companyId, db);
 
+    // PERFORMANCE: Get hierarchy level for project filtering (cached in JWT)
+    const hierarchyLevel = await getHierarchyLevel(db, user.id, user.role, user.role_id);
+
     // Generate new tokens
     const tokens = generateTokenPair(
       user.id,
@@ -579,7 +633,8 @@ router.post('/refresh', async (req, res) => {
       mappedRole,
       user.companyId,
       permissions,
-      user.role_id
+      user.role_id,
+      hierarchyLevel
     );
 
     // SECURITY: Blacklist the old refresh token (token rotation)
@@ -594,35 +649,57 @@ router.post('/refresh', async (req, res) => {
       userAgent: req.get('User-Agent')
     });
 
-    // Set new cookies
-    setAuthCookies(res, tokens.accessToken, tokens.refreshToken);
-
-    res.json({
+    return {
       success: true,
-      message: 'Tokens refreshed successfully',
-      data: {
-        user: {
-          id: user.id,
-          email: user.email,
-          firstName: user.firstName,
-          lastName: user.lastName,
-          role: mappedRole,
-          companyId: user.companyId,
-          permissions
-        }
-        // NOTE: Tokens stored in HttpOnly cookies, not in response body
+      tokens,
+      user: {
+        id: user.id,
+        email: user.email,
+        firstName: user.firstName,
+        lastName: user.lastName,
+        role: mappedRole,
+        companyId: user.companyId,
+        permissions
       }
-    });
+    };
+  });
 
-  } catch (error) {
-    logger.error('Token refresh error', { error: error.message });
-    clearAuthCookies(res);
-    res.status(401).json({
+  // Handle lock acquisition failure (another refresh in progress)
+  if (!lockResult.success && lockResult.reason === 'REFRESH_IN_PROGRESS') {
+    // Another refresh is in progress - tell client to retry
+    // Use 429 (Too Many Requests) with Retry-After header - semantically correct
+    // 409 (Conflict) is for resource state conflicts, not rate limiting
+    res.set('Retry-After', '1'); // Standard header for 429
+    return res.status(429).json({
       success: false,
-      error: 'Invalid refresh token',
-      code: 'INVALID_TOKEN'
+      error: 'Token refresh already in progress, please retry',
+      code: 'REFRESH_IN_PROGRESS',
+      retryAfter: 1 // Also include in body for convenience
     });
   }
+
+  // Handle errors from within the locked operation
+  const result = lockResult.result;
+  if (result.error) {
+    clearAuthCookies(res);
+    return res.status(401).json({
+      success: false,
+      error: result.message,
+      code: result.error
+    });
+  }
+
+  // Success - set new cookies and respond
+  setAuthCookies(res, result.tokens.accessToken, result.tokens.refreshToken);
+
+  res.json({
+    success: true,
+    message: 'Tokens refreshed successfully',
+    data: {
+      user: result.user
+      // NOTE: Tokens stored in HttpOnly cookies, not in response body
+    }
+  });
 });
 
 // Token migration endpoint - Converts header-based auth to cookie-based auth
@@ -683,6 +760,9 @@ router.post('/migrate-to-cookies', async (req, res) => {
     // Get current permissions - prefer role_id from DB, fallback to legacy role string
     const permissions = await getUserPermissions(user.role_id || mappedRole, user.companyId, db);
 
+    // PERFORMANCE: Get hierarchy level for project filtering (cached in JWT)
+    const hierarchyLevel = await getHierarchyLevel(db, user.id, user.role, user.role_id);
+
     // Generate fresh tokens
     const tokens = generateTokenPair(
       user.id,
@@ -690,7 +770,8 @@ router.post('/migrate-to-cookies', async (req, res) => {
       mappedRole,
       user.companyId,
       permissions,
-      user.role_id
+      user.role_id,
+      hierarchyLevel
     );
 
     // Set cookies
@@ -813,15 +894,32 @@ router.post('/logout', async (req, res) => {
 
 // Session status endpoint - Returns remaining session time
 // Used by frontend to show timeout warning
+// SECURITY FIX (Jan 2026): Does NOT auto-initialize expired sessions
+// FIX (Jan 2026): Pass JWT claims for dev mode session tracking
 router.get('/session/status', authenticateToken, async (req, res) => {
   try {
-    const status = await getSessionStatus(req.user.userId, req.user.companyId);
+    // SECURITY FIX: Pass false for autoInitialize - expired sessions stay expired
+    // Pass req.user (JWT claims) so dev mode can use iat for session tracking
+    const status = await getSessionStatus(req.user.userId, req.user.companyId, false, req.user);
 
-    if (!status || !status.active) {
+    if (!status) {
+      return res.status(500).json({
+        success: false,
+        error: 'Failed to retrieve session status',
+        code: 'SESSION_ERROR'
+      });
+    }
+
+    // If session is not active, return 401 so frontend can handle it
+    if (!status.active) {
       return res.status(401).json({
         success: false,
-        error: 'Session not active',
-        code: 'SESSION_INACTIVE'
+        error: 'Session expired or not found',
+        code: 'SESSION_INACTIVE',
+        data: {
+          reason: status.reason || 'expired',
+          timeoutMinutes: status.timeoutMinutes
+        }
       });
     }
 
@@ -845,9 +943,30 @@ router.get('/session/status', authenticateToken, async (req, res) => {
 });
 
 // Extend session endpoint - "Stay logged in" functionality
+// This is the ONLY endpoint that should extend/reinitialize a session
 router.post('/session/extend', authenticateToken, async (req, res) => {
   try {
-    const success = await extendSession(req.user.userId, req.user.companyId);
+    // First check if session exists
+    const currentStatus = await getSessionStatus(req.user.userId, req.user.companyId, false);
+    const timeoutMinutes = await getSessionTimeoutForCompany(req.user.companyId);
+
+    let success;
+    let wasReinitialized = false;
+
+    // If session doesn't exist or is expired, reinitialize it
+    // This is the explicit "Stay logged in" action, so it's allowed
+    if (!currentStatus || !currentStatus.active) {
+      logger.info('Session extend: Reinitializing expired session', {
+        userId: req.user.userId,
+        companyId: req.user.companyId,
+        previousStatus: currentStatus?.reason || 'none'
+      });
+      success = await initializeSession(req.user.userId, req.user.companyId);
+      wasReinitialized = true;
+    } else {
+      // Session exists - just extend it
+      success = await extendSession(req.user.userId, req.user.companyId);
+    }
 
     if (!success) {
       return res.status(500).json({
@@ -856,21 +975,20 @@ router.post('/session/extend', authenticateToken, async (req, res) => {
       });
     }
 
-    // Get the per-company timeout for response
-    const timeoutMinutes = await getSessionTimeoutForCompany(req.user.companyId);
-
     auditLog('SESSION_EXTENDED', req.user.userId, {
       email: req.user.email,
       ip: req.ip,
-      timeoutMinutes
+      timeoutMinutes,
+      wasReinitialized
     });
 
     res.json({
       success: true,
-      message: 'Session extended successfully',
+      message: wasReinitialized ? 'Session reinitialized successfully' : 'Session extended successfully',
       data: {
         timeoutMinutes: timeoutMinutes,
-        expiresAt: Date.now() + (timeoutMinutes * 60 * 1000)
+        expiresAt: Date.now() + (timeoutMinutes * 60 * 1000),
+        wasReinitialized
       }
     });
   } catch (error) {
@@ -882,41 +1000,41 @@ router.post('/session/extend', authenticateToken, async (req, res) => {
   }
 });
 
-// Session heartbeat endpoint - Silent activity tracking
-// Called by frontend when user activity is detected (mouse/keyboard/scroll)
-// Unlike /session/extend, this is a lightweight call without detailed audit logging
+// Session heartbeat endpoint - Lightweight session status check
+// SECURITY FIX (Jan 2026): No longer extends session!
+// Session is extended by actual API activity, not heartbeats.
+// This endpoint only REPORTS status - it's truly passive now.
 router.post('/session/heartbeat', authenticateToken, async (req, res) => {
   try {
-    const success = await extendSession(req.user.userId, req.user.companyId);
+    // SECURITY FIX: Just get status, do NOT extend
+    // Real activity is tracked by the middleware on actual API calls
+    const status = await getSessionStatus(req.user.userId, req.user.companyId, false);
 
-    if (!success) {
-      return res.status(500).json({
+    if (!status) {
+      return res.status(401).json({
         success: false,
-        error: 'Failed to update session activity'
+        error: 'Session not found',
+        code: 'SESSION_NOT_FOUND'
       });
     }
 
-    // Get updated session status
-    const status = await getSessionStatus(req.user.userId, req.user.companyId);
-
-    // Debug log (not audit) - too frequent for audit trail
-    logger.debug('Session heartbeat', {
-      userId: req.user.userId,
-      remainingMinutes: status?.remainingMinutes
-    });
+    // Don't log every heartbeat - too noisy
+    // logger.debug('Session heartbeat', { userId: req.user.userId });
 
     res.json({
       success: true,
       data: {
-        remainingMinutes: status?.remainingMinutes || 0,
-        timeoutMinutes: status?.timeoutMinutes || 30
+        active: status.active,
+        remainingMinutes: status.remainingMinutes || 0,
+        timeoutMinutes: status.timeoutMinutes || 30,
+        mode: status.mode
       }
     });
   } catch (error) {
     logger.error('Session heartbeat error', { error: error.message });
     res.status(500).json({
       success: false,
-      error: 'Failed to update session'
+      error: 'Failed to get session status'
     });
   }
 });
@@ -1632,6 +1750,9 @@ router.post('/mfa/verify', async (req, res) => {
     // Get user permissions - prefer role_id from DB, fallback to legacy role string
     const permissions = await getUserPermissions(user.role_id || mappedRole, user.companyId);
 
+    // PERFORMANCE: Get hierarchy level for project filtering (cached in JWT)
+    const hierarchyLevel = await getHierarchyLevel(db, user.id, user.role, user.role_id);
+
     // Generate tokens (completing the login flow)
     const tokens = generateTokenPair(
       user.id,
@@ -1639,7 +1760,8 @@ router.post('/mfa/verify', async (req, res) => {
       mappedRole,
       user.companyId,
       permissions,
-      user.role_id
+      user.role_id,
+      hierarchyLevel
     );
 
     // Set cookies

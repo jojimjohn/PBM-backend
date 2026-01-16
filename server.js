@@ -50,9 +50,10 @@ const pettyCashUserPortalRoutes = require('./routes/pettyCashUserPortal');
 const projectsRoutes = require('./routes/projects');
 const expenseCategoriesRoutes = require('./routes/expenseCategories');
 const { authenticateToken } = require('./middleware/auth');
-const { checkSessionTimeout } = require('./middleware/sessionTimeout');
+const { checkSessionTimeout, _devSessionStore } = require('./middleware/sessionTimeout');
 const { validateCsrfToken, ensureCsrfToken } = require('./middleware/csrf');
 const { initializeDatabases, closeConnections, healthCheck } = require('./config/database');
+const tokenBlacklist = require('./utils/tokenBlacklist');
 
 const app = express();
 const PORT = process.env.PORT || 5000;
@@ -198,26 +199,50 @@ app.use(cookieParser());
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
-// Request logging middleware
+// PERFORMANCE: Request logging middleware with filtering
+// Skip high-frequency endpoints like health checks to reduce log volume
+const { shouldLogRequest, logRequest } = require('./utils/logger');
 app.use((req, res, next) => {
-  logger.info(`${req.method} ${req.path}`, {
-    ip: req.ip,
-    userAgent: req.get('User-Agent'),
-    timestamp: new Date().toISOString()
-  });
+  if (shouldLogRequest(req.path)) {
+    // PERFORMANCE: Only log essential info, defer full logging to async
+    logRequest(req.method, req.path, {
+      ip: req.ip,
+      timestamp: new Date().toISOString()
+    });
+  }
   next();
 });
 
-// Health check endpoint
+// Health check endpoint with comprehensive system stats
+// PERFORMANCE: Includes cache stats and connection pool info for monitoring
 app.get('/health', async (req, res) => {
   const dbHealth = await healthCheck();
-  res.json({ 
-    status: 'OK', 
+  const memUsage = process.memoryUsage();
+
+  // Get cache stats if available
+  let cacheStats = null;
+  try {
+    const { cacheService } = require('./utils/cache');
+    cacheStats = cacheService.getStats();
+  } catch (e) {
+    // Cache not available
+  }
+
+  res.json({
+    status: 'OK',
     timestamp: new Date().toISOString(),
     uptime: process.uptime(),
-    memory: process.memoryUsage(),
+    memory: {
+      heapUsed: Math.round(memUsage.heapUsed / 1024 / 1024) + 'MB',
+      heapTotal: Math.round(memUsage.heapTotal / 1024 / 1024) + 'MB',
+      rss: Math.round(memUsage.rss / 1024 / 1024) + 'MB',
+      external: Math.round(memUsage.external / 1024 / 1024) + 'MB'
+    },
     version: process.env.npm_package_version || '1.0.0',
-    database: dbHealth
+    database: dbHealth,
+    cache: cacheStats,
+    nodeVersion: process.version,
+    platform: process.platform
   });
 });
 
@@ -235,6 +260,7 @@ app.use('/api/pc-portal', pettyCashUserPortalRoutes);
 // Protected routes (require authentication + session timeout check + CSRF validation)
 app.use('/api', authenticateToken);
 app.use('/api', checkSessionTimeout);
+app.use('/api', ensureCsrfToken);    // FIXED: Set CSRF token cookie if not present (must be BEFORE validate)
 app.use('/api', validateCsrfToken);  // SECURITY: Validate CSRF token on POST/PUT/PATCH/DELETE
 
 // Business entity routes
@@ -250,7 +276,7 @@ app.use('/api/collection-orders', collectionOrdersRoutes);
 app.use('/api/sales-orders', salesOrdersRoutes);
 app.use('/api/purchase-orders', purchaseOrdersRoutes);
 app.use('/api/purchase-orders', purchaseOrderExpensesRoutes);
-app.use('/api/purchase-orders', purchaseOrderExpensesRoutes);
+// NOTE: Removed duplicate purchaseOrderExpensesRoutes registration (was line 277)
 app.use('/api/expenses', expensesRoutes);
 app.use('/api/wastages', wastagesRoutes);
 app.use('/api/petty-cash-cards', pettyCashCardsRoutes);
@@ -290,37 +316,91 @@ app.use('*', (req, res) => {
 // Global error handler
 app.use(errorHandler);
 
-// Graceful shutdown
-process.on('SIGTERM', async () => {
-  logger.info('SIGTERM received, shutting down gracefully');
-  await closeConnections();
-  logger.info('Database connections closed');
-  process.exit(0);
-});
+// FIXED: Graceful shutdown with timeouts to prevent hanging
+const SHUTDOWN_TIMEOUT_MS = 10000; // 10 second max for each operation
 
-process.on('SIGINT', async () => {
-  logger.info('SIGINT received, shutting down gracefully');
-  await closeConnections();
-  logger.info('Database connections closed');
+/**
+ * Wrap a promise with a timeout
+ * @param {Promise} promise - Promise to wrap
+ * @param {number} timeoutMs - Timeout in milliseconds
+ * @param {string} operationName - Name for logging
+ * @returns {Promise} - Resolves with result or rejects on timeout
+ */
+const withTimeout = (promise, timeoutMs, operationName) => {
+  return Promise.race([
+    promise,
+    new Promise((_, reject) =>
+      setTimeout(() => reject(new Error(`${operationName} timed out after ${timeoutMs}ms`)), timeoutMs)
+    )
+  ]);
+};
+
+const gracefulShutdown = async (signal) => {
+  logger.info(`${signal} received, shutting down gracefully`);
+
+  // 1. Stop dev session cleanup interval (sync, no timeout needed)
+  if (_devSessionStore && _devSessionStore.stopCleanup) {
+    _devSessionStore.stopCleanup();
+    logger.info('Dev session cleanup stopped');
+  }
+
+  // 2. Clear distributed locks in Redis (with timeout)
+  try {
+    const locksCleared = await withTimeout(
+      tokenBlacklist.clearAllLocks(),
+      5000, // 5 second timeout for locks (they auto-expire in 10s anyway)
+      'Lock cleanup'
+    );
+    logger.info('Refresh locks cleared', { count: locksCleared });
+  } catch (error) {
+    logger.warn('Lock cleanup skipped', { reason: error.message });
+  }
+
+  // 3. Close database connections (with timeout)
+  try {
+    await withTimeout(
+      closeConnections(),
+      SHUTDOWN_TIMEOUT_MS,
+      'Database connection close'
+    );
+    logger.info('Database connections closed');
+  } catch (error) {
+    logger.error('Database close timed out', { error: error.message });
+  }
+
+  logger.info('Graceful shutdown complete');
   process.exit(0);
-});
+};
+
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+process.on('SIGINT', () => gracefulShutdown('SIGINT'));
 
 // Initialize databases and start server
+// FIX (Jan 2026): Added progress logging to identify startup hang points
 const startServer = async () => {
+  console.log('[Startup] Starting server initialization...');
+  console.log('[Startup] NODE_ENV:', process.env.NODE_ENV || 'development');
+  console.log('[Startup] PORT:', PORT);
+
   try {
     // Initialize database connections
+    console.log('[Startup] Initializing database connections...');
     await initializeDatabases();
+    console.log('[Startup] ✅ Database connections initialized');
     logger.info('✅ Database connections initialized');
 
     // Start server
+    console.log('[Startup] Starting HTTP server...');
     app.listen(PORT, '0.0.0.0', () => {
+      console.log(`[Startup] ✅ Server listening on port ${PORT}`);
       logger.info(`🚀 Server running on port ${PORT}`, {
-        environment: process.env.NODE_ENV,
-        port: PORT,
-        timestamp: new Date().toISOString()
+        environment: process.env.NODE_ENV || 'DEVELOPMENT',
+        port: PORT
       });
     });
   } catch (error) {
+    console.error('[Startup] ❌ FAILED:', error.message);
+    console.error('[Startup] Stack:', error.stack);
     logger.error('❌ Failed to start server', { error: error.message, stack: error.stack });
     process.exit(1);
   }

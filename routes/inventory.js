@@ -3,6 +3,7 @@ const { validate, validateParams, sanitize } = require('../middleware/validation
 const { requirePermission } = require('../middleware/auth');
 const { logger, auditLog } = require('../utils/logger');
 const { getDbConnection } = require('../config/database');
+const { cacheService } = require('../utils/cache');
 const Joi = require('joi');
 
 const router = express.Router();
@@ -142,9 +143,18 @@ router.get('/', requirePermission('VIEW_INVENTORY'), async (req, res) => {
 });
 
 // GET /api/inventory/summary - Get inventory summary by material
+// PERFORMANCE: Cached endpoint - heavy aggregation query
 router.get('/summary', requirePermission('VIEW_INVENTORY'), async (req, res) => {
   try {
     const { companyId } = req.user;
+
+    // PERFORMANCE: Check cache first (2-minute TTL for inventory data)
+    const cacheKey = `${companyId}:summary`;
+    const cached = await cacheService.get('inventorySummary', cacheKey);
+    if (cached) {
+      return res.json(cached);
+    }
+
     const db = getDbConnection(companyId);
 
     const summary = await db('materials')
@@ -172,14 +182,19 @@ router.get('/summary', requirePermission('VIEW_INVENTORY'), async (req, res) => 
       .orderBy('materials.category')
       .orderBy('materials.name');
 
-    res.json({
+    const response = {
       success: true,
       data: summary
-    });
+    };
+
+    // PERFORMANCE: Cache the result
+    await cacheService.set('inventorySummary', cacheKey, response);
+
+    res.json(response);
 
   } catch (error) {
-    logger.error('Error fetching inventory summary', { 
-      error: error.message, 
+    logger.error('Error fetching inventory summary', {
+      error: error.message,
       userId: req.user.userId
     });
     res.status(500).json({
@@ -551,69 +566,94 @@ router.get('/movements', requirePermission('VIEW_INVENTORY'), async (req, res) =
       .limit(parseInt(limit))
       .offset(offset);
 
-    // Format movements with reference numbers
-    const formattedMovements = await Promise.all(
-      movements.map(async (m) => {
-        // Get reference number based on reference type
-        let referenceNumber = null;
-        if (m.referenceType && m.referenceId) {
-          switch (m.referenceType) {
-            case 'sales_order':
-              const so = await db('sales_orders').where({ id: m.referenceId }).select('orderNumber').first();
-              referenceNumber = so?.orderNumber || null;
-              break;
-            case 'purchase_order':
-              referenceNumber = m.purchaseOrderNumber;
-              break;
-            case 'wastage':
-              const w = await db('wastages').where({ id: m.referenceId }).select('id').first();
-              referenceNumber = w ? `WAS-${w.id}` : null;
-              break;
-            case 'manual_adjustment':
-              referenceNumber = `ADJ-${m.referenceId || m.id}`;
-              break;
-            case 'branch_transfer_out':
-            case 'branch_transfer_in':
-              referenceNumber = `TRF-${m.referenceId}`;
-              break;
-          }
+    // PERFORMANCE FIX: Batch load reference numbers instead of N+1 queries
+    // Collect unique reference IDs by type
+    const salesOrderIds = [];
+    const wastageIds = [];
+
+    movements.forEach(m => {
+      if (m.referenceType && m.referenceId) {
+        if (m.referenceType === 'sales_order') {
+          salesOrderIds.push(m.referenceId);
+        } else if (m.referenceType === 'wastage') {
+          wastageIds.push(m.referenceId);
         }
+      }
+    });
 
-        // Convert Date to ISO string for frontend compatibility
-        const movementDateStr = m.movementDate instanceof Date
-          ? m.movementDate.toISOString()
-          : m.movementDate;
+    // Batch fetch all referenced records in single queries
+    const [salesOrders, wastages] = await Promise.all([
+      salesOrderIds.length > 0
+        ? db('sales_orders').whereIn('id', [...new Set(salesOrderIds)]).select('id', 'orderNumber')
+        : Promise.resolve([]),
+      wastageIds.length > 0
+        ? db('wastages').whereIn('id', [...new Set(wastageIds)]).select('id')
+        : Promise.resolve([])
+    ]);
 
-        return {
-          id: m.id,
-          movementDate: movementDateStr,
-          movementType: m.movementType,
-          quantity: parseFloat(m.quantity) || 0,
-          materialId: m.materialId,
-          materialName: m.materialName,
-          materialUnit: m.materialUnit,
-          materialCategory: m.materialCategory,
-          batchId: m.batchId,
-          batchNumber: m.batchNumber,
-          unitCost: parseFloat(m.unitCost) || 0,
-          referenceType: m.referenceType,
-          referenceId: m.referenceId,
-          referenceNumber,
-          notes: m.notes,
-          supplierName: m.supplierName,
-          createdByName: `${m.createdByFirstName || ''} ${m.createdByLastName || ''}`.trim(),
-          createdAt: m.createdAt,
-          // Traceability (for receipt movements)
-          traceability: m.movementType === 'receipt' ? {
-            collectionOrderNumber: m.collectionOrderNumber || null,
-            wcnNumber: m.wcnNumber || null,
-            purchaseOrderNumber: m.purchaseOrderNumber || null,
-            sourceType: m.purchaseOrderSourceType || 'manual',
-            isManualReceipt: !m.collectionOrderNumber
-          } : null
-        };
-      })
-    );
+    // Create lookup maps for O(1) access
+    const salesOrderMap = new Map(salesOrders.map(so => [so.id, so.orderNumber]));
+    const wastageMap = new Map(wastages.map(w => [w.id, `WAS-${w.id}`]));
+
+    // Format movements with reference numbers (no additional queries!)
+    const formattedMovements = movements.map((m) => {
+      // Get reference number from pre-loaded maps
+      let referenceNumber = null;
+      if (m.referenceType && m.referenceId) {
+        switch (m.referenceType) {
+          case 'sales_order':
+            referenceNumber = salesOrderMap.get(m.referenceId) || null;
+            break;
+          case 'purchase_order':
+            referenceNumber = m.purchaseOrderNumber;
+            break;
+          case 'wastage':
+            referenceNumber = wastageMap.get(m.referenceId) || null;
+            break;
+          case 'manual_adjustment':
+            referenceNumber = `ADJ-${m.referenceId || m.id}`;
+            break;
+          case 'branch_transfer_out':
+          case 'branch_transfer_in':
+            referenceNumber = `TRF-${m.referenceId}`;
+            break;
+        }
+      }
+
+      // Convert Date to ISO string for frontend compatibility
+      const movementDateStr = m.movementDate instanceof Date
+        ? m.movementDate.toISOString()
+        : m.movementDate;
+
+      return {
+        id: m.id,
+        movementDate: movementDateStr,
+        movementType: m.movementType,
+        quantity: parseFloat(m.quantity) || 0,
+        materialId: m.materialId,
+        materialName: m.materialName,
+        materialUnit: m.materialUnit,
+        materialCategory: m.materialCategory,
+        batchId: m.batchId,
+        batchNumber: m.batchNumber,
+        unitCost: parseFloat(m.unitCost) || 0,
+        referenceType: m.referenceType,
+        referenceId: m.referenceId,
+        referenceNumber,
+        notes: m.notes,
+        supplierName: m.supplierName,
+        createdByName: `${m.createdByFirstName || ''} ${m.createdByLastName || ''}`.trim(),
+        createdAt: m.createdAt,
+        // Traceability (for receipt movements)
+        traceability: m.movementType === 'receipt' ? {
+          collectionOrderNumber: m.collectionOrderNumber || null,
+          wcnNumber: m.wcnNumber || null,
+          purchaseOrderNumber: m.purchaseOrderNumber || null,
+          sourceType: m.purchaseOrderSourceType || 'manual',
+          isManualReceipt: !m.collectionOrderNumber
+        } : null
+      };
+    });
 
     // Group movements by date for timeline display
     const groupedByDate = {};

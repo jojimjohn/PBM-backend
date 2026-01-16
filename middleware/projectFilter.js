@@ -1,8 +1,12 @@
 /**
- * Project Filter Middleware
+ * Project Filter Middleware - OPTIMIZED (Jan 2026)
  *
- * Loads user's assigned projects and injects project filtering capability
- * into the request object for downstream route handlers.
+ * PERFORMANCE FIXES:
+ * 1. Schema check cached at startup (not on every request)
+ * 2. User permissions cached in Redis (hierarchy level + project IDs)
+ * 3. JWT claims used when available (no DB lookup needed)
+ * 4. All debug logging changed from INFO to DEBUG
+ * 5. Cache invalidation on user/role changes
  *
  * Usage:
  * - Apply to routes that need project-based filtering
@@ -11,14 +15,214 @@
  */
 
 const { getDbConnection } = require('../config/database');
+const { redis, isRedisConnected } = require('../config/redis');
 const { logger } = require('../utils/logger');
 
 // Role hierarchy levels - Admins (Company Admin: 9, Super Admin: 10) can view all projects
-// Managers (5) and below are restricted to assigned projects
 const ADMIN_HIERARCHY_LEVEL = 9;
 
+// Cache configuration
+const PERMISSION_CACHE_PREFIX = 'user:permissions:';
+const PERMISSION_CACHE_TTL = 300; // 5 minutes
+const SCHEMA_CACHE_PREFIX = 'schema:user_projects:';
+const SCHEMA_CACHE_TTL = 3600; // 1 hour (schema rarely changes)
+
+// In-memory cache for schema checks (doesn't need Redis - same across all requests)
+const schemaCache = new Map();
+
+// Legacy role hierarchy mapping (for systems without roles table)
+const LEGACY_ROLE_HIERARCHY = {
+  'super-admin': 10,
+  'company-admin': 9,
+  'manager': 5,
+  'sales-staff': 3,
+  'purchase-staff': 3,
+  'accounts-staff': 3,
+  'SUPER_ADMIN': 10,
+  'COMPANY_ADMIN': 9,
+  'MANAGER': 5,
+  'SALES_STAFF': 3,
+  'PURCHASE_STAFF': 3,
+  'ACCOUNTS_STAFF': 3
+};
+
 /**
- * Project filter middleware
+ * Check if user_projects table exists (cached)
+ * Schema doesn't change at runtime, so we cache indefinitely in memory
+ */
+async function checkSchemaExists(db, companyId) {
+  const cacheKey = `schema:${companyId}`;
+
+  // Check in-memory cache first (fastest)
+  if (schemaCache.has(cacheKey)) {
+    return schemaCache.get(cacheKey);
+  }
+
+  // Check Redis cache (for multi-process environments)
+  if (isRedisConnected()) {
+    try {
+      const cached = await redis.get(`${SCHEMA_CACHE_PREFIX}${companyId}`);
+      if (cached !== null) {
+        const exists = cached === 'true';
+        schemaCache.set(cacheKey, exists);
+        return exists;
+      }
+    } catch (e) {
+      logger.debug('Redis schema cache miss', { companyId });
+    }
+  }
+
+  // Query database (only once per company per server lifetime)
+  const exists = await db.schema.hasTable('user_projects');
+
+  // Cache in memory
+  schemaCache.set(cacheKey, exists);
+
+  // Cache in Redis for other processes
+  if (isRedisConnected()) {
+    try {
+      await redis.setex(`${SCHEMA_CACHE_PREFIX}${companyId}`, SCHEMA_CACHE_TTL, exists.toString());
+    } catch (e) {
+      logger.debug('Failed to cache schema in Redis', { companyId });
+    }
+  }
+
+  logger.debug('Schema check performed (will be cached)', { companyId, exists });
+  return exists;
+}
+
+/**
+ * Get user permissions from cache or database
+ * Returns: { hierarchyLevel, canViewAll, projectIds }
+ */
+async function getUserPermissions(db, userId, companyId, jwtClaims = {}) {
+  const cacheKey = `${PERMISSION_CACHE_PREFIX}${companyId}:${userId}`;
+
+  // 1. Try JWT claims first (already validated, no network call needed)
+  if (jwtClaims.hierarchyLevel !== undefined) {
+    const hierarchyLevel = jwtClaims.hierarchyLevel;
+    const canViewAll = hierarchyLevel >= ADMIN_HIERARCHY_LEVEL;
+
+    // For admins, we don't need project IDs
+    if (canViewAll) {
+      return { hierarchyLevel, canViewAll, projectIds: null };
+    }
+
+    // For non-admins, we still need project IDs from cache/DB
+    // But at least we saved the hierarchy lookup
+  }
+
+  // 2. Try Redis cache
+  if (isRedisConnected()) {
+    try {
+      const cached = await redis.get(cacheKey);
+      if (cached) {
+        const permissions = JSON.parse(cached);
+        logger.debug('User permissions from cache', { userId, companyId });
+        return permissions;
+      }
+    } catch (e) {
+      logger.debug('Redis permission cache miss', { userId, companyId });
+    }
+  }
+
+  // 3. Fetch from database
+  const permissions = await fetchUserPermissionsFromDB(db, userId);
+
+  // 4. Cache in Redis
+  if (isRedisConnected()) {
+    try {
+      await redis.setex(cacheKey, PERMISSION_CACHE_TTL, JSON.stringify(permissions));
+      logger.debug('Cached user permissions in Redis', { userId, companyId, ttl: PERMISSION_CACHE_TTL });
+    } catch (e) {
+      logger.debug('Failed to cache permissions in Redis', { userId, companyId });
+    }
+  }
+
+  return permissions;
+}
+
+/**
+ * Fetch user permissions from database (called only on cache miss)
+ */
+async function fetchUserPermissionsFromDB(db, userId) {
+  // Get hierarchy level
+  let hierarchyLevel = 0;
+
+  try {
+    // Try roles table first
+    const userWithRole = await db('users')
+      .leftJoin('roles', 'users.role_id', 'roles.id')
+      .select('roles.hierarchy_level', 'users.role')
+      .where('users.id', userId)
+      .first();
+
+    if (userWithRole?.hierarchy_level) {
+      hierarchyLevel = userWithRole.hierarchy_level;
+    } else if (userWithRole?.role) {
+      // Fallback to legacy role mapping
+      hierarchyLevel = LEGACY_ROLE_HIERARCHY[userWithRole.role] || 0;
+    }
+  } catch (error) {
+    logger.warn('Error fetching user hierarchy', { userId, error: error.message });
+  }
+
+  const canViewAll = hierarchyLevel >= ADMIN_HIERARCHY_LEVEL;
+
+  // Admins don't need project IDs
+  if (canViewAll) {
+    return { hierarchyLevel, canViewAll, projectIds: null };
+  }
+
+  // Get user's assigned projects
+  let projectIds = [];
+  try {
+    const userProjects = await db('user_projects')
+      .select('project_id')
+      .where('user_id', userId);
+    projectIds = userProjects.map(p => p.project_id);
+  } catch (error) {
+    logger.warn('Error fetching user projects', { userId, error: error.message });
+  }
+
+  return { hierarchyLevel, canViewAll, projectIds };
+}
+
+/**
+ * Clear permission cache for a user (call when user's role or projects change)
+ */
+async function clearUserPermissionCache(userId, companyId) {
+  if (!isRedisConnected()) return;
+
+  const cacheKey = `${PERMISSION_CACHE_PREFIX}${companyId}:${userId}`;
+  try {
+    await redis.del(cacheKey);
+    logger.debug('Cleared user permission cache', { userId, companyId });
+  } catch (e) {
+    logger.warn('Failed to clear permission cache', { userId, companyId, error: e.message });
+  }
+}
+
+/**
+ * Clear all permission caches for a company (call on role changes)
+ */
+async function clearCompanyPermissionCache(companyId) {
+  if (!isRedisConnected()) return;
+
+  try {
+    const pattern = `${PERMISSION_CACHE_PREFIX}${companyId}:*`;
+    const keys = await redis.keys(pattern);
+    if (keys.length > 0) {
+      await redis.del(...keys);
+      logger.debug('Cleared company permission caches', { companyId, count: keys.length });
+    }
+  } catch (e) {
+    logger.warn('Failed to clear company permission cache', { companyId, error: e.message });
+  }
+}
+
+/**
+ * Project filter middleware - OPTIMIZED
  *
  * Injects project filtering info into req.projectFilter:
  * - projectIds: Array of project IDs user can access (null = all projects)
@@ -38,18 +242,17 @@ const projectFilter = async (req, res, next) => {
     const { userId, companyId, role } = req.user;
     const db = getDbConnection(companyId);
 
-    // Debug logging
-    logger.info('ProjectFilter middleware - Input:', {
+    // Debug logging (changed from INFO to DEBUG)
+    logger.debug('ProjectFilter middleware - Input:', {
       userId,
       role,
       queryProjectId: req.query.project_id,
       path: req.path
     });
 
-    // Check if user_projects table exists
-    const tableExists = await db.schema.hasTable('user_projects');
+    // OPTIMIZATION: Check schema from cache (not DB on every request)
+    const tableExists = await checkSchemaExists(db, companyId);
     if (!tableExists) {
-      // Projects feature not enabled, bypass filtering
       req.projectFilter = {
         projectIds: null,
         selectedProjectId: null,
@@ -59,11 +262,11 @@ const projectFilter = async (req, res, next) => {
       return next();
     }
 
-    // Get user's hierarchy level from role
-    const hierarchyLevel = await getUserHierarchyLevel(db, userId);
-    const canViewAll = hierarchyLevel >= ADMIN_HIERARCHY_LEVEL;
+    // OPTIMIZATION: Get permissions from cache (not DB on every request)
+    const permissions = await getUserPermissions(db, userId, companyId, req.user);
+    const { canViewAll, projectIds } = permissions;
 
-    // Check for project_id query parameter (explicit project selection)
+    // Check for project_id query parameter
     const selectedProjectId = req.query.project_id || req.query.projectId || null;
 
     // If "all" is selected and user is admin, don't filter
@@ -74,32 +277,27 @@ const projectFilter = async (req, res, next) => {
         canViewAll: true,
         isFiltered: false
       };
-      logger.info('ProjectFilter - Admin selected ALL:', { projectFilter: req.projectFilter });
+      logger.debug('ProjectFilter - Admin selected ALL');
       return next();
     }
 
-    // If specific project is selected, validate access and use it
+    // If specific project is selected, validate and use it
     if (selectedProjectId && selectedProjectId !== 'all') {
       const projectId = parseInt(selectedProjectId, 10);
 
       if (canViewAll) {
-        // Admin can view any project
         req.projectFilter = {
           projectIds: [projectId],
           selectedProjectId: projectId,
           canViewAll: true,
           isFiltered: true
         };
-        logger.info('ProjectFilter - Admin selected specific project:', { projectFilter: req.projectFilter });
+        logger.debug('ProjectFilter - Admin selected specific project', { projectId });
         return next();
       }
 
-      // For non-admin, verify they have access to the selected project
-      const hasAccess = await db('user_projects')
-        .where({ user_id: userId, project_id: projectId })
-        .first();
-
-      if (!hasAccess) {
+      // For non-admin, verify they have access
+      if (!projectIds || !projectIds.includes(projectId)) {
         return res.status(403).json({
           success: false,
           error: 'Access to selected project denied'
@@ -112,32 +310,24 @@ const projectFilter = async (req, res, next) => {
         canViewAll: false,
         isFiltered: true
       };
-      logger.info('ProjectFilter - Non-admin selected specific project:', { projectFilter: req.projectFilter });
+      logger.debug('ProjectFilter - Non-admin selected specific project', { projectId });
       return next();
     }
 
-    // No specific project selected - load user's assigned projects
+    // No specific project selected
     if (canViewAll) {
-      // Admin with no selection - show all
       req.projectFilter = {
         projectIds: null,
         selectedProjectId: null,
         canViewAll: true,
         isFiltered: false
       };
-      logger.info('ProjectFilter - Admin with no selection:', { projectFilter: req.projectFilter });
+      logger.debug('ProjectFilter - Admin with no selection');
       return next();
     }
 
-    // Non-admin: get assigned projects
-    const userProjects = await db('user_projects')
-      .select('project_id')
-      .where('user_id', userId);
-
-    const projectIds = userProjects.map(p => p.project_id);
-
-    // If user has no projects assigned, they see nothing
-    if (projectIds.length === 0) {
+    // Non-admin: use cached project IDs
+    if (!projectIds || projectIds.length === 0) {
       req.projectFilter = {
         projectIds: [],
         selectedProjectId: null,
@@ -154,10 +344,10 @@ const projectFilter = async (req, res, next) => {
       isFiltered: true
     };
 
-    // Debug logging - final result
-    logger.info('ProjectFilter middleware - Result:', {
-      projectFilter: req.projectFilter,
-      userId
+    logger.debug('ProjectFilter middleware - Result:', {
+      projectIdsCount: projectIds.length,
+      canViewAll,
+      isFiltered: true
     });
 
     next();
@@ -168,7 +358,7 @@ const projectFilter = async (req, res, next) => {
       stack: error.stack
     });
 
-    // On error, default to no filtering for admins, empty for others
+    // On error, default to no filtering
     req.projectFilter = {
       projectIds: null,
       selectedProjectId: null,
@@ -180,106 +370,37 @@ const projectFilter = async (req, res, next) => {
 };
 
 /**
- * Helper to get user's hierarchy level from roles table
- */
-async function getUserHierarchyLevel(db, userId) {
-  try {
-    // Look up user's role_id and get hierarchy_level from roles table
-    const userWithRole = await db('users')
-      .leftJoin('roles', 'users.role_id', 'roles.id')
-      .select('roles.hierarchy_level', 'roles.name as roleName')
-      .where('users.id', userId)
-      .first();
-
-    if (!userWithRole || !userWithRole.hierarchy_level) {
-      // Fallback: try legacy role column mapping
-      const user = await db('users')
-        .select('role')
-        .where('id', userId)
-        .first();
-
-      if (!user) return 0;
-
-      // Legacy mapping for backwards compatibility
-      const roleHierarchy = {
-        'super-admin': 10,
-        'company-admin': 9,
-        'manager': 5,
-        'sales-staff': 3,
-        'purchase-staff': 3,
-        'accounts-staff': 3,
-        // Also support screaming snake case (old format)
-        'SUPER_ADMIN': 10,
-        'COMPANY_ADMIN': 9,
-        'MANAGER': 5,
-        'SALES_STAFF': 3,
-        'PURCHASE_STAFF': 3,
-        'ACCOUNTS_STAFF': 3
-      };
-
-      return roleHierarchy[user.role] || 0;
-    }
-
-    return userWithRole.hierarchy_level;
-  } catch (error) {
-    logger.error('Error getting user hierarchy level', { error: error.message, userId });
-    return 0;
-  }
-}
-
-/**
  * Helper function to apply project filter to a Knex query builder
- *
- * @param {Knex.QueryBuilder} query - The Knex query builder
- * @param {Object} projectFilter - The req.projectFilter object
- * @param {string} projectColumn - The column name for project_id (default: 'project_id')
- * @returns {Knex.QueryBuilder} - Modified query with project filter applied
- *
- * Behavior:
- * - When a SPECIFIC project is selected: show ONLY records with that project_id (strict mode)
- * - When NO project is selected (viewing all): include records with NULL project_id
- * - This ensures new projects don't show unrelated data
  */
 const applyProjectFilter = (query, projectFilter, projectColumn = 'project_id') => {
-  // Debug logging - using info level to ensure visibility
-  logger.info('applyProjectFilter called:', {
+  // Debug logging (changed from INFO to DEBUG)
+  logger.debug('applyProjectFilter called:', {
     isFiltered: projectFilter?.isFiltered,
-    projectIds: projectFilter?.projectIds,
-    selectedProjectId: projectFilter?.selectedProjectId,
-    column: projectColumn
+    projectIdsCount: projectFilter?.projectIds?.length,
+    selectedProjectId: projectFilter?.selectedProjectId
   });
 
   if (!projectFilter || !projectFilter.isFiltered) {
-    logger.info('applyProjectFilter - NOT filtering (isFiltered=false or no filter)');
     return query;
   }
 
   if (projectFilter.projectIds === null) {
-    // No filter - show all
-    logger.info('applyProjectFilter - NOT filtering (projectIds=null)');
     return query;
   }
 
   if (projectFilter.projectIds.length === 0) {
-    // User has no projects - show nothing
-    logger.info('applyProjectFilter - User has no projects, returning EMPTY');
+    logger.debug('applyProjectFilter - User has no projects, returning empty');
     return query.whereRaw('1 = 0');
   }
 
-  // When a SPECIFIC project is selected, use strict filtering (exclude NULLs)
-  // This ensures new projects don't show data from other projects
+  // Strict mode when specific project selected
   if (projectFilter.selectedProjectId) {
-    // Strict mode: only matching project_id, no NULLs
-    logger.info('applyProjectFilter - Applying STRICT filter:', {
-      column: projectColumn,
-      projectIds: projectFilter.projectIds
-    });
+    logger.debug('applyProjectFilter - Applying strict filter');
     return query.whereIn(projectColumn, projectFilter.projectIds);
   }
 
-  // When viewing multiple projects (no specific selection), include NULLs
-  // This helps users see "unassigned" records that need project assignment
-  logger.info('applyProjectFilter - Applying inclusive filter with NULLs');
+  // Include NULLs when viewing all user's projects
+  logger.debug('applyProjectFilter - Applying inclusive filter with NULLs');
   return query.where(function() {
     this.whereIn(projectColumn, projectFilter.projectIds)
       .orWhereNull(projectColumn);
@@ -287,8 +408,7 @@ const applyProjectFilter = (query, projectFilter, projectColumn = 'project_id') 
 };
 
 /**
- * Optional middleware for routes that should NOT filter null project_id records
- * (strict mode - only show records with explicit project assignment)
+ * Strict project filter (excludes NULL project_id records)
  */
 const applyStrictProjectFilter = (query, projectFilter, projectColumn = 'project_id') => {
   if (!projectFilter || !projectFilter.isFiltered) {
@@ -303,12 +423,16 @@ const applyStrictProjectFilter = (query, projectFilter, projectColumn = 'project
     return query.whereRaw('1 = 0');
   }
 
-  // Strict mode: only matching project IDs, exclude NULLs
   return query.whereIn(projectColumn, projectFilter.projectIds);
 };
 
 module.exports = {
   projectFilter,
   applyProjectFilter,
-  applyStrictProjectFilter
+  applyStrictProjectFilter,
+  clearUserPermissionCache,
+  clearCompanyPermissionCache,
+  // Export for testing
+  checkSchemaExists,
+  getUserPermissions
 };

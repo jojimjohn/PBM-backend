@@ -175,6 +175,9 @@ class InMemoryFallback {
 /**
  * Resilient Redis Wrapper
  * Automatically falls back to in-memory when Redis is unavailable
+ *
+ * OPTIMIZATION (Jan 2026): Skip Redis connection entirely in development mode
+ * to avoid timeout delays and unnecessary network attempts.
  */
 class ResilientRedisClient {
   constructor() {
@@ -187,6 +190,18 @@ class ResilientRedisClient {
   }
 
   _initializeRedis() {
+    // DEVELOPMENT MODE: Skip Redis entirely - use in-memory immediately
+    // This prevents connection timeout delays and unnecessary network attempts
+    const isDevelopment = process.env.NODE_ENV !== 'production';
+    const forceRedis = process.env.FORCE_REDIS === 'true'; // Override for testing Redis locally
+
+    if (isDevelopment && !forceRedis && !process.env.REDIS_URL) {
+      logger.info('📦 Development mode: Using in-memory storage (Redis skipped)');
+      this.useInMemory = true;
+      this.isRedisConnected = false;
+      return; // Skip Redis connection entirely
+    }
+
     try {
       // Use URL if provided (for cloud Redis like Railway, Render, etc.)
       if (process.env.REDIS_URL) {

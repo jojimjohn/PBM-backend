@@ -64,7 +64,8 @@ const verifyRefreshToken = (token) => {
 };
 
 // Generate token pair (access + refresh)
-const generateTokenPair = (userId, email, role, companyId, permissions = [], roleId = null) => {
+// PERFORMANCE: Added hierarchyLevel to avoid DB lookup on every request
+const generateTokenPair = (userId, email, role, companyId, permissions = [], roleId = null, hierarchyLevel = null) => {
   const payload = {
     userId,
     email,
@@ -72,6 +73,7 @@ const generateTokenPair = (userId, email, role, companyId, permissions = [], rol
     companyId,
     permissions,
     roleId,
+    hierarchyLevel, // Used by projectFilter to skip DB lookups
     tokenType: 'access'
   };
 

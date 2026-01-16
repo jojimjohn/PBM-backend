@@ -3,7 +3,7 @@ const path = require('path');
 const { exec } = require('child_process');
 const { promisify } = require('util');
 const execAsync = promisify(exec);
-const winston = require('winston');
+const { logger } = require('./logger');
 const cron = require('node-cron');
 
 /**
@@ -41,13 +41,13 @@ class BackupManager {
       // Schedule automatic backups
       this.scheduleBackups();
       
-      winston.info('Backup Manager initialized', {
+      logger.info('Backup Manager initialized', {
         backupDir: this.backupDir,
         maxBackups: this.maxBackups,
         scheduledBackups: process.env.BACKUP_ENABLED === 'true'
       });
     } catch (error) {
-      winston.error('Failed to initialize Backup Manager', {
+      logger.error('Failed to initialize Backup Manager', {
         error: error.message
       });
       throw error;
@@ -61,7 +61,7 @@ class BackupManager {
     try {
       await fs.access(this.backupDir);
     } catch (error) {
-      winston.info('Creating backup directory', { backupDir: this.backupDir });
+      logger.info('Creating backup directory', { backupDir: this.backupDir });
       await fs.mkdir(this.backupDir, { recursive: true });
     }
   }
@@ -83,7 +83,7 @@ class BackupManager {
       const backupPath = path.join(this.backupDir, filename);
       const compressedPath = `${backupPath}.gz`;
 
-      winston.info('Starting database backup', {
+      logger.info('Starting database backup', {
         database,
         companyId,
         backupPath: compress ? compressedPath : backupPath
@@ -124,7 +124,7 @@ class BackupManager {
         throw new Error('Backup file is empty');
       }
 
-      winston.info('Database backup completed successfully', {
+      logger.info('Database backup completed successfully', {
         database,
         companyId,
         backupPath: finalPath,
@@ -142,7 +142,7 @@ class BackupManager {
       };
 
     } catch (error) {
-      winston.error('Database backup failed', {
+      logger.error('Database backup failed', {
         error: error.message,
         companyId,
         database: this.databases[companyId]
@@ -191,7 +191,7 @@ class BackupManager {
       // Check if backup file exists
       await fs.access(backupPath);
 
-      winston.info('Starting database restore', {
+      logger.info('Starting database restore', {
         database,
         companyId,
         backupPath
@@ -218,7 +218,7 @@ class BackupManager {
 
       await execAsync(restoreCommand);
 
-      winston.info('Database restore completed successfully', {
+      logger.info('Database restore completed successfully', {
         database,
         companyId,
         backupFile: backupFilename
@@ -232,7 +232,7 @@ class BackupManager {
       };
 
     } catch (error) {
-      winston.error('Database restore failed', {
+      logger.error('Database restore failed', {
         error: error.message,
         companyId,
         backupFile: backupFilename
@@ -283,7 +283,7 @@ class BackupManager {
 
       return backups;
     } catch (error) {
-      winston.error('Failed to list backups', {
+      logger.error('Failed to list backups', {
         error: error.message,
         companyId
       });
@@ -324,13 +324,13 @@ class BackupManager {
               await fs.unlink(path.join(this.backupDir, backup.filename));
               totalDeleted++;
               
-              winston.info('Old backup deleted', {
+              logger.info('Old backup deleted', {
                 filename: backup.filename,
                 companyId: backup.companyId,
                 createdAt: backup.createdAt
               });
             } catch (error) {
-              winston.warn('Failed to delete old backup', {
+              logger.warn('Failed to delete old backup', {
                 filename: backup.filename,
                 error: error.message
               });
@@ -339,14 +339,14 @@ class BackupManager {
         }
       }
 
-      winston.info('Backup cleanup completed', {
+      logger.info('Backup cleanup completed', {
         totalDeleted,
         maxBackups: this.maxBackups
       });
 
       return { deleted: totalDeleted };
     } catch (error) {
-      winston.error('Backup cleanup failed', {
+      logger.error('Backup cleanup failed', {
         error: error.message
       });
       throw error;
@@ -358,7 +358,7 @@ class BackupManager {
    */
   scheduleBackups() {
     if (process.env.BACKUP_ENABLED !== 'true') {
-      winston.info('Automatic backups are disabled');
+      logger.info('Automatic backups are disabled');
       return;
     }
 
@@ -366,26 +366,26 @@ class BackupManager {
     const dailySchedule = process.env.BACKUP_CRON || '0 2 * * *';
     
     cron.schedule(dailySchedule, async () => {
-      winston.info('Starting scheduled backup');
+      logger.info('Starting scheduled backup');
       try {
         const results = await this.createAllBackups(true);
         
         const successful = Object.values(results).filter(r => r.success).length;
         const failed = Object.values(results).filter(r => !r.success).length;
         
-        winston.info('Scheduled backup completed', {
+        logger.info('Scheduled backup completed', {
           successful,
           failed,
           results
         });
       } catch (error) {
-        winston.error('Scheduled backup failed', {
+        logger.error('Scheduled backup failed', {
           error: error.message
         });
       }
     });
 
-    winston.info('Backup scheduler initialized', {
+    logger.info('Backup scheduler initialized', {
       schedule: dailySchedule,
       timezone: process.env.TZ || 'UTC'
     });
@@ -396,7 +396,7 @@ class BackupManager {
    */
   async testBackupSystem() {
     try {
-      winston.info('Testing backup system...');
+      logger.info('Testing backup system...');
 
       // Test backup directory creation
       await this.ensureBackupDir();
@@ -418,14 +418,14 @@ class BackupManager {
         ].join(' ');
         
         await execAsync(testCommand);
-        winston.info('Database connection test passed', { companyId, database });
+        logger.info('Database connection test passed', { companyId, database });
       }
 
-      winston.info('Backup system test completed successfully');
+      logger.info('Backup system test completed successfully');
       return { success: true, message: 'All tests passed' };
       
     } catch (error) {
-      winston.error('Backup system test failed', {
+      logger.error('Backup system test failed', {
         error: error.message
       });
       return { success: false, error: error.message };
@@ -477,7 +477,7 @@ class BackupManager {
 
       return stats;
     } catch (error) {
-      winston.error('Failed to get backup statistics', {
+      logger.error('Failed to get backup statistics', {
         error: error.message
       });
       throw error;

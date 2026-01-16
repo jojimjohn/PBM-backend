@@ -39,8 +39,8 @@ router.get('/pending-actions',
     const userPermissions = user.permissions || [];
     const userRole = user.role || '';
 
-    // Debug logging for project filter
-    logger.info('Pending actions - Project filter state:', {
+    // Debug logging for project filter (changed from INFO to DEBUG - Jan 2026)
+    logger.debug('Pending actions - Project filter state:', {
       projectFilter: req.projectFilter,
       queryProjectId: req.query.project_id,
       userId: user.userId,
@@ -541,7 +541,7 @@ router.get('/pending-actions',
         pendingWastagesQuery = applyProjectFilter(pendingWastagesQuery, req.projectFilter, 'w.project_id');
         const pendingWastages = await pendingWastagesQuery;
 
-        logger.info('Pending wastages found:', { count: pendingWastages.length, userRole, hasApprovePermission: hasPermission('APPROVE_WASTAGE') });
+        logger.debug('Pending wastages found:', { count: pendingWastages.length, userRole, hasApprovePermission: hasPermission('APPROVE_WASTAGE') });
 
         pendingWastages.forEach(wastage => {
           addAction({
@@ -722,7 +722,7 @@ router.get('/pending-actions',
       pendingActions.high.sort((a, b) => (b.daysPending || 0) - (a.daysPending || 0));
       pendingActions.normal.sort((a, b) => (b.daysPending || 0) - (a.daysPending || 0));
 
-      logger.info(`Retrieved pending actions for company ${companyId}: ${pendingActions.stats.totalPending} total (${pendingActions.stats.highPriority} high priority)`, {
+      logger.debug(`Retrieved pending actions for company ${companyId}: ${pendingActions.stats.totalPending} total (${pendingActions.stats.highPriority} high priority)`, {
         companyId,
         userId: user.id
       });
@@ -1052,7 +1052,7 @@ router.get('/activity',
       // Limit to requested count
       const limitedActivities = activities.slice(0, limit);
 
-      logger.info(`Retrieved activity feed for company ${companyId}: ${limitedActivities.length} activities`, {
+      logger.debug(`Retrieved activity feed for company ${companyId}: ${limitedActivities.length} activities`, {
         companyId,
         userId: user.id
       });
