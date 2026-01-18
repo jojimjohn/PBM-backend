@@ -63,14 +63,44 @@ class InMemoryFallback {
     return this.store.get(key) || null;
   }
 
-  async set(key, value, exMode, exValue) {
+  async set(key, value, ...args) {
     this._logWarning();
-    this.store.set(key, value);
-    if (exMode === 'EX' && exValue) {
-      const expireAt = Date.now() + (exValue * 1000);
-      this.expirations.set(key, expireAt);
-      setTimeout(() => this._expire(key), exValue * 1000);
+
+    // Parse Redis SET options: SET key value [EX seconds] [NX|XX]
+    let exSeconds = null;
+    let nx = false;
+    let xx = false;
+
+    for (let i = 0; i < args.length; i++) {
+      const arg = String(args[i]).toUpperCase();
+      if (arg === 'EX' && args[i + 1] !== undefined) {
+        exSeconds = parseInt(args[i + 1], 10);
+        i++; // Skip the next arg (the seconds value)
+      } else if (arg === 'NX') {
+        nx = true;
+      } else if (arg === 'XX') {
+        xx = true;
+      }
     }
+
+    // Handle NX (only set if not exists)
+    if (nx && this.store.has(key)) {
+      return null; // Key exists, NX fails
+    }
+
+    // Handle XX (only set if exists)
+    if (xx && !this.store.has(key)) {
+      return null; // Key doesn't exist, XX fails
+    }
+
+    this.store.set(key, value);
+
+    if (exSeconds) {
+      const expireAt = Date.now() + (exSeconds * 1000);
+      this.expirations.set(key, expireAt);
+      setTimeout(() => this._expire(key), exSeconds * 1000);
+    }
+
     return 'OK';
   }
 
@@ -143,6 +173,58 @@ class InMemoryFallback {
 
   async ping() {
     return 'PONG';
+  }
+
+  /**
+   * SCAN implementation for in-memory fallback
+   * Returns [cursor, keys] matching pattern
+   * In-memory version returns all matches at once (cursor always '0')
+   */
+  async scan(cursor, ...args) {
+    // Parse SCAN arguments: SCAN cursor [MATCH pattern] [COUNT count]
+    let pattern = '*';
+    for (let i = 0; i < args.length; i++) {
+      if (String(args[i]).toUpperCase() === 'MATCH' && args[i + 1]) {
+        pattern = args[i + 1];
+        break;
+      }
+    }
+
+    const matchedKeys = await this.keys(pattern);
+    // Return [newCursor, keys] - cursor '0' means scan complete
+    return ['0', matchedKeys];
+  }
+
+  /**
+   * EVAL implementation for in-memory fallback
+   * Simulates Lua script execution for common patterns
+   * Currently supports the compare-and-delete pattern used for lock release
+   */
+  async eval(script, numKeys, ...args) {
+    // Extract keys and arguments
+    const keys = args.slice(0, numKeys);
+    const scriptArgs = args.slice(numKeys);
+
+    // Detect common Lua script patterns
+    // Pattern: Compare value and delete if match (lock release)
+    if (script.includes('redis.call("get"') && script.includes('redis.call("del"')) {
+      const key = keys[0];
+      const expectedValue = scriptArgs[0];
+      const currentValue = await this.get(key);
+
+      if (currentValue === expectedValue) {
+        await this.del(key);
+        return 1; // Deleted
+      }
+      return 0; // Not deleted (value mismatch or key missing)
+    }
+
+    // Unknown script pattern - log warning and return 0
+    this._logWarning();
+    logger.warn('InMemoryFallback: Unknown Lua script pattern', {
+      scriptPreview: script.substring(0, 100)
+    });
+    return 0;
   }
 
   _checkExpiration(key) {
@@ -483,6 +565,30 @@ class ResilientRedisClient {
     } catch (error) {
       logger.error('Redis multi failed, using fallback', { error: error.message });
       return this.fallback.multi();
+    }
+  }
+
+  /**
+   * SCAN for cursor-based key iteration (production-safe)
+   */
+  async scan(cursor, ...args) {
+    try {
+      return await this._getClient().scan(cursor, ...args);
+    } catch (error) {
+      logger.error('Redis scan failed, using fallback', { error: error.message });
+      return await this.fallback.scan(cursor, ...args);
+    }
+  }
+
+  /**
+   * EVAL for Lua script execution (used for atomic lock operations)
+   */
+  async eval(script, numKeys, ...args) {
+    try {
+      return await this._getClient().eval(script, numKeys, ...args);
+    } catch (error) {
+      logger.error('Redis eval failed, using fallback', { error: error.message });
+      return await this.fallback.eval(script, numKeys, ...args);
     }
   }
 
