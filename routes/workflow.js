@@ -67,6 +67,7 @@ router.get('/pending-actions',
       contract_renewal: 'VIEW_CONTRACTS',
       // Inventory tasks
       low_stock: 'VIEW_INVENTORY',
+      out_of_stock: 'VIEW_INVENTORY',
       // Petty Cash tasks
       petty_cash_expiry: 'MANAGE_PETTY_CASH',
       petty_cash_low_balance: 'MANAGE_PETTY_CASH',
@@ -390,6 +391,50 @@ router.get('/pending-actions',
         });
       } catch (err) {
         logger.warn('Could not fetch low stock items:', err.message);
+      }
+
+      // ============================================
+      // 6b. Out of Stock Items (quantity = 0)
+      // Separate from low stock - catches items without minimumStockLevel configured
+      // ============================================
+      try {
+        const outOfStockItems = await db('inventory as i')
+          .join('materials as m', 'i.materialId', 'm.id')
+          .select(
+            'i.id',
+            'i.materialId',
+            'm.name as materialName',
+            'm.unit',
+            'i.quantity',
+            'i.minimumStockLevel'
+          )
+          .where('i.quantity', '<=', 0)
+          .orderBy('m.name', 'asc')
+          .limit(10);
+
+        outOfStockItems.forEach(item => {
+          addAction({
+            type: 'out_of_stock',
+            module: 'inventory',
+            entityType: 'inventory',
+            entityId: item.materialId,
+            entityNumber: item.materialName,
+            title: `Out of Stock - ${item.materialName}`,
+            description: `No stock available (0 ${item.unit})`,
+            urgency: 'high', // Out of stock is always high priority
+            daysPending: 0,
+            metadata: {
+              currentStock: item.quantity,
+              minLevel: item.minimumStockLevel || 0,
+              unit: item.unit,
+              materialName: item.materialName
+            },
+            actionLabel: 'Restock',
+            actionRoute: `/inventory?highlight=${item.materialId}&search=${encodeURIComponent(item.materialName)}`
+          });
+        });
+      } catch (err) {
+        logger.warn('Could not fetch out of stock items:', err.message);
       }
 
       // ============================================
@@ -1175,6 +1220,7 @@ router.get('/stats',
           .select(
             db.raw('COUNT(*) as totalItems'),
             db.raw('SUM(CASE WHEN i.quantity < i.minimumStockLevel AND i.minimumStockLevel > 0 THEN 1 ELSE 0 END) as lowStock'),
+            db.raw('SUM(CASE WHEN i.quantity <= 0 THEN 1 ELSE 0 END) as outOfStock'),
             db.raw('COALESCE(SUM(i.quantity * m.standardPrice), 0) as totalValue')
           )
           .first();
@@ -1182,10 +1228,11 @@ router.get('/stats',
         stats.inventory = {
           totalItems: parseInt(inventoryStats?.totalItems) || 0,
           lowStock: parseInt(inventoryStats?.lowStock) || 0,
+          outOfStock: parseInt(inventoryStats?.outOfStock) || 0,
           totalValue: parseFloat(inventoryStats?.totalValue) || 0
         };
       } catch (err) {
-        stats.inventory = { totalItems: 0, lowStock: 0, totalValue: 0 };
+        stats.inventory = { totalItems: 0, lowStock: 0, outOfStock: 0, totalValue: 0 };
       }
 
       // Petty Cash stats
@@ -1436,11 +1483,33 @@ router.get('/notifications',
         });
       }
 
-      // 4. Low stock items
+      // 4. Out of stock items (quantity = 0) - HIGHER PRIORITY than low stock
+      try {
+        const outOfStock = await db('inventory')
+          .where('quantity', '<=', 0)
+          .count('* as count')
+          .first();
+
+        if (outOfStock?.count > 0) {
+          notifications.push({
+            type: 'out_of_stock',
+            severity: 'error', // Out of stock is more severe than low stock
+            title: `${outOfStock.count} Item${outOfStock.count > 1 ? 's' : ''} Out of Stock`,
+            message: 'Inventory items have no stock available',
+            route: '/inventory?filter=out-of-stock',
+            count: parseInt(outOfStock.count)
+          });
+        }
+      } catch (err) {
+        // Inventory table might not exist
+      }
+
+      // 5. Low stock items (below minimum level but still have some stock)
       try {
         const lowStock = await db('inventory')
           .whereRaw('quantity < minimumStockLevel')
           .where('minimumStockLevel', '>', 0)
+          .where('quantity', '>', 0) // Exclude out of stock items (handled above)
           .count('* as count')
           .first();
 
