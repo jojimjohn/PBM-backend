@@ -54,11 +54,13 @@ const REDIS_KEYS = {
 // Endpoints configuration
 const ENDPOINTS = {
   // Passive endpoints that do NOT update session activity
+  // These are background/automated calls that shouldn't count as user activity
   PASSIVE: [
     '/api/auth/session/status',
     '/api/auth/session/heartbeat',
     '/api/health',
     '/health',
+    '/api/workflow/notifications',  // Background polling - not user activity
   ],
 
   // Endpoints that can explicitly extend sessions

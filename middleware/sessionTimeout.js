@@ -367,6 +367,11 @@ const handleDevModeSession = async (req, res, next) => {
   const userId = req.user.userId;
   const companyId = req.user.companyId || 'al-ramrami';
 
+  // Check endpoint type - passive endpoints don't extend session
+  const passiveEndpoint = isPassiveEndpoint(req.originalUrl);
+  const extensionEndpoint = isSessionExtensionEndpoint(req.originalUrl);
+  const shouldUpdateActivity = !passiveEndpoint;
+
   const timeoutMinutes = await getSessionTimeoutForCompanyInternal(companyId);
   const timeoutMs = timeoutMinutes * 60 * 1000;
   const now = Date.now();
@@ -444,14 +449,19 @@ const handleDevModeSession = async (req, res, next) => {
     );
   }
 
-  // Session is valid - attach info to request
+  // Session is valid - update activity if not passive endpoint (like production mode)
+  if (shouldUpdateActivity) {
+    devSessionStore.set(userId, now, companyId);
+  }
+
+  // Attach session info to request
   req.sessionInfo = {
     active: true,
-    lastActivity: session.startTime,
+    lastActivity: shouldUpdateActivity ? now : session.startTime,
     timeoutMinutes: timeoutMinutes,
-    remainingMs: remainingMs,
-    remainingMinutes: Math.ceil(remainingMs / 60000),
-    expiresAt: session.startTime + timeoutMs,
+    remainingMs: shouldUpdateActivity ? timeoutMs : remainingMs,
+    remainingMinutes: shouldUpdateActivity ? timeoutMinutes : Math.ceil(remainingMs / 60000),
+    expiresAt: (shouldUpdateActivity ? now : session.startTime) + timeoutMs,
     mode: 'development'
   };
 

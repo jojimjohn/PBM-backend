@@ -239,16 +239,8 @@ const projectFilter = async (req, res, next) => {
       });
     }
 
-    const { userId, companyId, role } = req.user;
+    const { userId, companyId } = req.user;
     const db = getDbConnection(companyId);
-
-    // Debug logging (changed from INFO to DEBUG)
-    logger.debug('ProjectFilter middleware - Input:', {
-      userId,
-      role,
-      queryProjectId: req.query.project_id,
-      path: req.path
-    });
 
     // OPTIMIZATION: Check schema from cache (not DB on every request)
     const tableExists = await checkSchemaExists(db, companyId);
@@ -269,7 +261,7 @@ const projectFilter = async (req, res, next) => {
     // Check for project_id query parameter
     const selectedProjectId = req.query.project_id || req.query.projectId || null;
 
-    // If "all" is selected and user is admin, don't filter
+    // Handle 'all' selection for admins
     if (selectedProjectId === 'all' && canViewAll) {
       req.projectFilter = {
         projectIds: null,
@@ -277,22 +269,21 @@ const projectFilter = async (req, res, next) => {
         canViewAll: true,
         isFiltered: false
       };
-      logger.debug('ProjectFilter - Admin selected ALL');
       return next();
     }
 
-    // If specific project is selected, validate and use it
+    // Handle specific project selection
     if (selectedProjectId && selectedProjectId !== 'all') {
       const projectId = parseInt(selectedProjectId, 10);
 
       if (canViewAll) {
+        // Admin can access any project
         req.projectFilter = {
           projectIds: [projectId],
           selectedProjectId: projectId,
           canViewAll: true,
           isFiltered: true
         };
-        logger.debug('ProjectFilter - Admin selected specific project', { projectId });
         return next();
       }
 
@@ -310,23 +301,22 @@ const projectFilter = async (req, res, next) => {
         canViewAll: false,
         isFiltered: true
       };
-      logger.debug('ProjectFilter - Non-admin selected specific project', { projectId });
       return next();
     }
 
     // No specific project selected
     if (canViewAll) {
+      // Admin with no selection - no filtering
       req.projectFilter = {
         projectIds: null,
         selectedProjectId: null,
         canViewAll: true,
         isFiltered: false
       };
-      logger.debug('ProjectFilter - Admin with no selection');
       return next();
     }
 
-    // Non-admin: use cached project IDs
+    // Non-admin: filter by user's assigned projects
     if (!projectIds || projectIds.length === 0) {
       req.projectFilter = {
         projectIds: [],
@@ -343,12 +333,6 @@ const projectFilter = async (req, res, next) => {
       canViewAll: false,
       isFiltered: true
     };
-
-    logger.debug('ProjectFilter middleware - Result:', {
-      projectIdsCount: projectIds.length,
-      canViewAll,
-      isFiltered: true
-    });
 
     next();
   } catch (error) {
@@ -371,15 +355,9 @@ const projectFilter = async (req, res, next) => {
 
 /**
  * Helper function to apply project filter to a Knex query builder
+ * NOTE: No logging here to avoid spam - this is called for every query
  */
 const applyProjectFilter = (query, projectFilter, projectColumn = 'project_id') => {
-  // Debug logging (changed from INFO to DEBUG)
-  logger.debug('applyProjectFilter called:', {
-    isFiltered: projectFilter?.isFiltered,
-    projectIdsCount: projectFilter?.projectIds?.length,
-    selectedProjectId: projectFilter?.selectedProjectId
-  });
-
   if (!projectFilter || !projectFilter.isFiltered) {
     return query;
   }
@@ -389,18 +367,16 @@ const applyProjectFilter = (query, projectFilter, projectColumn = 'project_id') 
   }
 
   if (projectFilter.projectIds.length === 0) {
-    logger.debug('applyProjectFilter - User has no projects, returning empty');
+    // User has no projects assigned - return empty result
     return query.whereRaw('1 = 0');
   }
 
   // Strict mode when specific project selected
   if (projectFilter.selectedProjectId) {
-    logger.debug('applyProjectFilter - Applying strict filter');
     return query.whereIn(projectColumn, projectFilter.projectIds);
   }
 
   // Include NULLs when viewing all user's projects
-  logger.debug('applyProjectFilter - Applying inclusive filter with NULLs');
   return query.where(function() {
     this.whereIn(projectColumn, projectFilter.projectIds)
       .orWhereNull(projectColumn);
