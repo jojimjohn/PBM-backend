@@ -150,48 +150,56 @@ const mfaLimiter = rateLimit({
 app.use(globalLimiter);
 
 // CORS configuration - SECURITY FIX: Proper origin validation
+// Build allowed origins list once at startup
+const envOrigins = process.env.CORS_ORIGINS ? process.env.CORS_ORIGINS.split(',').map(o => o.trim()) : [];
+const allowedOrigins = [
+  ...envOrigins,
+  'https://pbm.alramramiapp.com',
+  'https://pbm-backend.alramramiapp.com'
+];
+
+// In development, allow localhost variants
+if (process.env.NODE_ENV !== 'production') {
+  allowedOrigins.push(
+    'http://localhost:3000',
+    'http://localhost:3001',
+    'http://localhost:5173',
+    'http://127.0.0.1:3000',
+    'http://127.0.0.1:5173'
+  );
+}
+
+logger.info('CORS allowed origins', { origins: allowedOrigins });
+
 const corsOptions = {
   origin: function (origin, callback) {
-    // Build allowed origins list from environment or defaults
-    const envOrigins = process.env.CORS_ORIGINS ? process.env.CORS_ORIGINS.split(',') : [];
-    const allowedOrigins = [
-      ...envOrigins,
-      'https://pbm.alramramiapp.com'
-    ];
-
-    // In development, allow localhost variants
-    if (process.env.NODE_ENV !== 'production') {
-      allowedOrigins.push(
-        'http://localhost:3000',
-        'http://localhost:3001',
-        'http://localhost:5173',
-        'http://127.0.0.1:3000',
-        'http://127.0.0.1:5173',
-        
-      );
-    }
-
-    // Allow requests with no origin (same-origin, mobile apps, Postman)
+    // Allow requests with no origin (same-origin, mobile apps, Postman, server-to-server)
     if (!origin) {
       return callback(null, true);
     }
 
-    // Strict origin validation - SECURITY: No wildcard fallback
+    // Check if origin is in allowed list
     if (allowedOrigins.includes(origin)) {
       callback(null, true);
     } else {
+      // IMPORTANT: Return false instead of throwing error
+      // This ensures CORS headers are still set (with rejection)
       logger.warn('CORS blocked request', {
         blockedOrigin: origin,
         allowedOrigins: allowedOrigins.filter(o => !o.includes('localhost'))
       });
-      callback(new Error('Not allowed by CORS'));
+      callback(null, false);
     }
   },
   credentials: true,  // Required for cookie-based authentication
   methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Accept', 'Origin', 'X-CSRF-Token'],
-  exposedHeaders: ['X-Total-Count']
+  exposedHeaders: ['X-Total-Count'],
+  optionsSuccessStatus: 200  // Some legacy browsers choke on 204
 };
+
+// Handle preflight OPTIONS requests explicitly
+app.options('*', cors(corsOptions));
 
 app.use(cors(corsOptions));
 app.use(compression());
