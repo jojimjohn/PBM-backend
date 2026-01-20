@@ -204,35 +204,96 @@ router.get('/',
 
       const users = await query.orderBy('users.firstName', 'asc');
 
-      // Get online status from Redis for all users
+      // Get online status from session store (Redis in prod, in-memory in dev)
       const userIds = users.map(u => u.id);
       const onlineMap = {};
 
-      // Import Redis and session timeout settings
-      const { redis } = require('../config/redis');
-      const SESSION_TIMEOUT_MS = 30 * 60 * 1000; // 30 minutes
+      // Import session utilities
+      const { redis, isRedisConnected } = require('../config/redis');
+      const { getSessionTimeoutForCompany, _devSessionStore } = require('../middleware/sessionTimeout');
+      const { getSessionKey, isDevelopment, SESSION_CONFIG } = require('../config/sessionConfig');
 
-      // Check Redis for each user's session activity
+      // Get company-specific session timeout (same as actual session middleware)
+      let sessionTimeoutMinutes;
+      try {
+        sessionTimeoutMinutes = await getSessionTimeoutForCompany(companyId);
+      } catch (err) {
+        sessionTimeoutMinutes = SESSION_CONFIG.DEFAULT_TIMEOUT_MINUTES;
+        logger.warn('Failed to get session timeout, using default', { error: err.message });
+      }
+      const SESSION_TIMEOUT_MS = sessionTimeoutMinutes * 60 * 1000;
+
+      // Determine which session store to use
+      const useDevStore = isDevelopment || !isRedisConnected();
+
+      logger.debug('Checking online status for users', {
+        userCount: userIds.length,
+        useDevStore,
+        isDevelopment,
+        redisConnected: isRedisConnected(),
+        devStoreSize: _devSessionStore?.size || 0,
+        sessionTimeoutMinutes
+      });
+
+      // Check session activity for each user
+      // Check BOTH dev store and Redis to handle all scenarios
+      const now = Date.now();
       for (const userId of userIds) {
         try {
-          const sessionKey = `session:activity:${userId}`;
-          const lastActivityStr = await redis.get(sessionKey);
+          // Ensure userId is a number for consistent Map key lookup
+          const numericUserId = typeof userId === 'number' ? userId : parseInt(userId, 10);
+          let isOnline = false;
 
-          if (lastActivityStr) {
-            const lastActivity = parseInt(lastActivityStr, 10);
-            const now = Date.now();
-            const remainingMs = SESSION_TIMEOUT_MS - (now - lastActivity);
-
-            // User is online if they have an active session that hasn't timed out
+          // First, check in-memory dev session store
+          const devSession = _devSessionStore.get(numericUserId);
+          if (devSession) {
+            const remainingMs = SESSION_TIMEOUT_MS - (now - devSession.startTime);
             if (remainingMs > 0) {
-              onlineMap[userId] = true;
+              isOnline = true;
             }
           }
+
+          // If not found in dev store and Redis is connected, check Redis
+          if (!isOnline && isRedisConnected()) {
+            try {
+              const sessionKey = getSessionKey(numericUserId);
+              const lastActivityStr = await redis.get(sessionKey);
+
+              if (lastActivityStr) {
+                const lastActivity = parseInt(lastActivityStr, 10);
+                const remainingMs = SESSION_TIMEOUT_MS - (now - lastActivity);
+
+                if (remainingMs > 0) {
+                  isOnline = true;
+                }
+              }
+            } catch (redisErr) {
+              // Redis error - continue without failing
+              logger.debug(`Redis session check failed for user ${numericUserId}`, { error: redisErr.message });
+            }
+          }
+
+          if (isOnline) {
+            onlineMap[userId] = true;
+          }
         } catch (err) {
-          // Redis error - don't fail the entire request
+          // Session check error - don't fail the entire request
           logger.warn(`Failed to check session for user ${userId}`, { error: err.message });
         }
       }
+
+      // The user making this request is definitely online
+      // (they just made an authenticated API call)
+      if (actorId && !onlineMap[actorId]) {
+        onlineMap[actorId] = true;
+        logger.debug('Marked current user as online', { actorId });
+      }
+
+      logger.debug('Online status check complete', {
+        onlineUsers: Object.keys(onlineMap).length,
+        totalUsers: userIds.length,
+        currentUserOnline: !!onlineMap[actorId]
+      });
 
       // Format response with additional computed fields
       const formattedUsers = users.map(user => ({
