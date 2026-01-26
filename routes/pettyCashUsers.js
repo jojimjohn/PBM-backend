@@ -31,7 +31,10 @@ const {
 
 // Validation schemas
 const createUserSchema = Joi.object({
-  cardId: Joi.number().integer().positive().required(),
+  cardId: Joi.number().integer().positive().required()
+    .description('Top-up card ID for general expenses'),
+  petrolCardId: Joi.number().integer().positive().allow(null).optional()
+    .description('Petrol card ID for fuel expenses (optional)'),
   name: Joi.string().min(2).max(100).required(),
   phone: Joi.string().max(20).allow('', null).optional(),
   department: Joi.string().max(100).allow('', null).optional(),
@@ -39,15 +42,22 @@ const createUserSchema = Joi.object({
   pin: Joi.string().pattern(/^\d{4,6}$/).required().messages({
     'string.pattern.base': 'PIN must be 4-6 digits',
   }),
+  userId: Joi.number().integer().positive().allow(null).optional()
+    .description('Link to a system user (optional)'),
 });
 
 const updateUserSchema = Joi.object({
-  cardId: Joi.number().integer().positive().optional(),
+  cardId: Joi.number().integer().positive().optional()
+    .description('Top-up card ID for general expenses'),
+  petrolCardId: Joi.number().integer().positive().allow(null).optional()
+    .description('Petrol card ID for fuel expenses (null to remove)'),
   name: Joi.string().min(2).max(100).optional(),
   phone: Joi.string().max(20).allow('', null).optional(),
   department: Joi.string().max(100).allow('', null).optional(),
   employeeId: Joi.string().max(50).allow('', null).optional(),
   isActive: Joi.boolean().optional(),
+  userId: Joi.number().integer().positive().allow(null).optional()
+    .description('Link to a system user (null to unlink)'),
 });
 
 const resetPinSchema = Joi.object({
@@ -85,14 +95,29 @@ router.get('/', requirePermission('MANAGE_PETTY_CASH'), async (req, res) => {
     let query = db('petty_cash_users')
       .select(
         'petty_cash_users.*',
+        // Top-up card info
         'petty_cash_cards.cardNumber',
+        'petty_cash_cards.cardName',
         'petty_cash_cards.currentBalance',
         'petty_cash_cards.status as cardStatus',
+        // Petrol card info
+        'petrol_card.cardNumber as petrolCardNumber',
+        'petrol_card.cardName as petrolCardName',
+        'petrol_card.currentBalance as petrolCardBalance',
+        'petrol_card.status as petrolCardStatus',
+        // Creator info
         'creator.firstName as createdByFirstName',
-        'creator.lastName as createdByLastName'
+        'creator.lastName as createdByLastName',
+        // Linked system user info
+        'linked_user.firstName as linkedUserFirstName',
+        'linked_user.lastName as linkedUserLastName',
+        'linked_user.email as linkedUserEmail',
+        'linked_user.role as linkedUserRole'
       )
       .leftJoin('petty_cash_cards', 'petty_cash_users.card_id', 'petty_cash_cards.id')
+      .leftJoin('petty_cash_cards as petrol_card', 'petty_cash_users.petrol_card_id', 'petrol_card.id')
       .leftJoin('users as creator', 'petty_cash_users.created_by', 'creator.id')
+      .leftJoin('users as linked_user', 'petty_cash_users.user_id', 'linked_user.id')
       .orderBy('petty_cash_users.created_at', 'desc');
 
     // Apply filters
@@ -162,16 +187,32 @@ router.get('/:id', requirePermission('MANAGE_PETTY_CASH'), async (req, res) => {
     const user = await db('petty_cash_users')
       .select(
         'petty_cash_users.*',
+        // Top-up card info
         'petty_cash_cards.cardNumber',
+        'petty_cash_cards.cardName',
         'petty_cash_cards.currentBalance',
         'petty_cash_cards.totalSpent',
         'petty_cash_cards.monthlyLimit',
         'petty_cash_cards.status as cardStatus',
+        // Petrol card info
+        'petrol_card.cardNumber as petrolCardNumber',
+        'petrol_card.cardName as petrolCardName',
+        'petrol_card.currentBalance as petrolCardBalance',
+        'petrol_card.totalSpent as petrolCardTotalSpent',
+        'petrol_card.status as petrolCardStatus',
+        // Creator info
         'creator.firstName as createdByFirstName',
-        'creator.lastName as createdByLastName'
+        'creator.lastName as createdByLastName',
+        // Linked system user info
+        'linked_user.firstName as linkedUserFirstName',
+        'linked_user.lastName as linkedUserLastName',
+        'linked_user.email as linkedUserEmail',
+        'linked_user.role as linkedUserRole'
       )
       .leftJoin('petty_cash_cards', 'petty_cash_users.card_id', 'petty_cash_cards.id')
+      .leftJoin('petty_cash_cards as petrol_card', 'petty_cash_users.petrol_card_id', 'petrol_card.id')
       .leftJoin('users as creator', 'petty_cash_users.created_by', 'creator.id')
+      .leftJoin('users as linked_user', 'petty_cash_users.user_id', 'linked_user.id')
       .where('petty_cash_users.id', id)
       .first();
 
@@ -263,26 +304,88 @@ router.post(
   async (req, res) => {
     try {
       const db = getDbConnection(req.user.companyId);
-      const { cardId, name, phone, department, employeeId, pin } = req.body;
+      const { cardId, petrolCardId, name, phone, department, employeeId, pin, userId } = req.body;
 
-      // Verify card exists and doesn't already have a petty cash user
+      // Verify system user exists if provided
+      if (userId) {
+        const systemUser = await db('users').where('id', userId).first();
+        if (!systemUser) {
+          return res.status(400).json({
+            success: false,
+            error: 'System user not found',
+          });
+        }
+
+        // Check if this system user is already linked to another PC user
+        const existingLinkedUser = await db('petty_cash_users')
+          .where('user_id', userId)
+          .first();
+
+        if (existingLinkedUser) {
+          return res.status(400).json({
+            success: false,
+            error: `This system user is already linked to petty cash user: ${existingLinkedUser.name}`,
+          });
+        }
+      }
+
+      // Verify top-up card exists and doesn't already have a petty cash user
       const card = await db('petty_cash_cards').where('id', cardId).first();
 
       if (!card) {
         return res.status(400).json({
           success: false,
-          error: 'Petty cash card not found',
+          error: 'Top-up card not found',
         });
       }
 
-      // Check if card already has a petty cash user
+      if (card.card_type !== 'top_up') {
+        return res.status(400).json({
+          success: false,
+          error: 'Card ID must be a top-up card. Use petrolCardId for petrol cards.',
+        });
+      }
+
+      // Check if top-up card already has a petty cash user
       const existingUser = await db('petty_cash_users').where('card_id', cardId).first();
 
       if (existingUser) {
         return res.status(400).json({
           success: false,
-          error: 'This card already has a petty cash user assigned',
+          error: 'This top-up card already has a petty cash user assigned',
         });
+      }
+
+      // Verify petrol card if provided
+      let petrolCard = null;
+      if (petrolCardId) {
+        petrolCard = await db('petty_cash_cards').where('id', petrolCardId).first();
+
+        if (!petrolCard) {
+          return res.status(400).json({
+            success: false,
+            error: 'Petrol card not found',
+          });
+        }
+
+        if (petrolCard.card_type !== 'petrol') {
+          return res.status(400).json({
+            success: false,
+            error: 'petrolCardId must reference a petrol-type card',
+          });
+        }
+
+        // Check if petrol card is already assigned to another petty cash user
+        const existingPetrolUser = await db('petty_cash_users')
+          .where('petrol_card_id', petrolCardId)
+          .first();
+
+        if (existingPetrolUser) {
+          return res.status(400).json({
+            success: false,
+            error: 'This petrol card is already assigned to another petty cash user',
+          });
+        }
       }
 
       // Hash PIN
@@ -294,6 +397,8 @@ router.post(
       // Create user
       const newUser = {
         card_id: cardId,
+        petrol_card_id: petrolCardId || null,
+        user_id: userId || null,
         name,
         phone: phone || null,
         department: department || null,
@@ -303,6 +408,7 @@ router.post(
         is_active: true,
         failed_attempts: 0,
         created_by: req.user.userId,
+        created_from: 'manual',
       };
 
       const [id] = await db('petty_cash_users').insert(newUser);
@@ -327,7 +433,12 @@ router.post(
           id,
           ...newUser,
           pin_hash: undefined, // Don't send back the hash
+          // Top-up card info
           cardNumber: card.cardNumber,
+          cardName: card.cardName,
+          // Petrol card info
+          petrolCardNumber: petrolCard?.cardNumber || null,
+          petrolCardName: petrolCard?.cardName || null,
           qrCode: qrCodeDataUrl,
           portalUrl: getPortalUrl(qrToken, req.user.companyId, requestOrigin),
         },
@@ -363,7 +474,7 @@ router.put(
     try {
       const db = getDbConnection(req.user.companyId);
       const { id } = req.params;
-      const { cardId, name, phone, department, employeeId, isActive } = req.body;
+      const { cardId, petrolCardId, name, phone, department, employeeId, isActive, userId } = req.body;
 
       // Check if user exists
       const existingUser = await db('petty_cash_users').where('id', id).first();
@@ -380,7 +491,39 @@ router.put(
         updated_at: new Date(),
       };
 
-      // Handle card reassignment if cardId is provided and different
+      // Handle system user link changes
+      if (userId !== undefined && userId !== existingUser.user_id) {
+        if (userId === null) {
+          // Unlinking system user
+          updateData.user_id = null;
+        } else {
+          // Verify system user exists
+          const systemUser = await db('users').where('id', userId).first();
+          if (!systemUser) {
+            return res.status(400).json({
+              success: false,
+              error: 'System user not found',
+            });
+          }
+
+          // Check if this system user is already linked to another PC user
+          const existingLinkedUser = await db('petty_cash_users')
+            .where('user_id', userId)
+            .whereNot('id', id)
+            .first();
+
+          if (existingLinkedUser) {
+            return res.status(400).json({
+              success: false,
+              error: `This system user is already linked to petty cash user: ${existingLinkedUser.name}`,
+            });
+          }
+
+          updateData.user_id = userId;
+        }
+      }
+
+      // Handle top-up card reassignment if cardId is provided and different
       if (cardId !== undefined && cardId !== existingUser.card_id) {
         // Verify new card exists
         const newCard = await db('petty_cash_cards').where('id', cardId).first();
@@ -388,7 +531,15 @@ router.put(
         if (!newCard) {
           return res.status(400).json({
             success: false,
-            error: 'Petty cash card not found',
+            error: 'Top-up card not found',
+          });
+        }
+
+        // Verify it's a top_up card type
+        if (newCard.card_type !== 'top_up') {
+          return res.status(400).json({
+            success: false,
+            error: 'Card ID must be a top-up card. Use petrolCardId for petrol cards.',
           });
         }
 
@@ -401,11 +552,52 @@ router.put(
         if (cardInUse) {
           return res.status(400).json({
             success: false,
-            error: 'This card is already assigned to another petty cash user',
+            error: 'This top-up card is already assigned to another petty cash user',
           });
         }
 
         updateData.card_id = cardId;
+      }
+
+      // Handle petrol card reassignment if petrolCardId is provided
+      if (petrolCardId !== undefined) {
+        if (petrolCardId === null) {
+          // Remove petrol card assignment
+          updateData.petrol_card_id = null;
+        } else if (petrolCardId !== existingUser.petrol_card_id) {
+          // Verify new petrol card exists
+          const newPetrolCard = await db('petty_cash_cards').where('id', petrolCardId).first();
+
+          if (!newPetrolCard) {
+            return res.status(400).json({
+              success: false,
+              error: 'Petrol card not found',
+            });
+          }
+
+          // Verify it's a petrol card type
+          if (newPetrolCard.card_type !== 'petrol') {
+            return res.status(400).json({
+              success: false,
+              error: 'petrolCardId must reference a petrol-type card',
+            });
+          }
+
+          // Check if new petrol card is already assigned to another user
+          const petrolCardInUse = await db('petty_cash_users')
+            .where('petrol_card_id', petrolCardId)
+            .whereNot('id', id) // Exclude current user
+            .first();
+
+          if (petrolCardInUse) {
+            return res.status(400).json({
+              success: false,
+              error: 'This petrol card is already assigned to another petty cash user',
+            });
+          }
+
+          updateData.petrol_card_id = petrolCardId;
+        }
       }
 
       if (name !== undefined) updateData.name = name;
@@ -425,7 +617,8 @@ router.put(
 
       winston.info('Petty cash user updated', {
         pcUserId: id,
-        cardChanged: updateData.card_id !== undefined,
+        topUpCardChanged: updateData.card_id !== undefined,
+        petrolCardChanged: updateData.petrol_card_id !== undefined,
         companyId: req.user.companyId,
         updatedBy: req.user.userId,
       });

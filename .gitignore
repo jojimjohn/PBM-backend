@@ -12,6 +12,8 @@ yarn-error.log*
 .env.production.local
 .env.example
 
+CLAUDE.md 
+
 # Logs
 logs/
 *.log
@@ -24,6 +26,18 @@ pids
 
 # Backups
 backups/
+
+# Migrations
+migrations/
+
+# Scripts
+scripts/
+
+# Seeds
+seeds/
+
+# Uploads
+uploads/
 
 # IDE
 .vscode/

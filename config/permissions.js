@@ -291,8 +291,8 @@ const PERMISSIONS = {
   MANAGE_PETTY_CASH: {
     key: 'MANAGE_PETTY_CASH',
     label: 'Manage Petty Cash',
-    description: 'Manage petty cash cards and funds',
-    module: 'finance'
+    description: 'Full petty cash management - cards, expenses, and funds',
+    module: 'petty_cash'
   },
   VIEW_PROFIT_LOSS: {
     key: 'VIEW_PROFIT_LOSS',

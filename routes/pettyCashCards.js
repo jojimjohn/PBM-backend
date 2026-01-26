@@ -186,22 +186,39 @@ router.get('/', requirePermission('VIEW_PETTY_CASH'), async (req, res) => {
   }
 });
 
-// GET /petty-cash-cards/petrol-card - Get company's active petrol card
+// GET /petty-cash-cards/petrol-card - Get user's assigned petrol card
 // This endpoint is used when creating expenses with petrol_card payment method
+// Query param: userId (optional) - if not provided, uses authenticated user's ID
 router.get('/petrol-card', requirePermission('VIEW_PETTY_CASH'), async (req, res) => {
   try {
     const db = getDbConnection(req.user.companyId);
+    const { userId } = req.query;
+
+    // Get the petrol card assigned to the specified user (or authenticated user if not specified)
+    const targetUserId = userId ? parseInt(userId) : req.user.userId;
 
     const petrolCard = await db('petty_cash_cards')
-      .select('id', 'cardNumber', 'cardName', 'card_type', 'currentBalance', 'status')
-      .where('card_type', 'petrol')
-      .where('status', 'active')
+      .select(
+        'petty_cash_cards.id',
+        'petty_cash_cards.cardNumber',
+        'petty_cash_cards.cardName',
+        'petty_cash_cards.card_type',
+        'petty_cash_cards.currentBalance',
+        'petty_cash_cards.status',
+        'petty_cash_cards.assignedTo',
+        'users.firstName as assignedUserFirstName',
+        'users.lastName as assignedUserLastName'
+      )
+      .leftJoin('users', 'petty_cash_cards.assignedTo', 'users.id')
+      .where('petty_cash_cards.card_type', 'petrol')
+      .where('petty_cash_cards.status', 'active')
+      .where('petty_cash_cards.assignedTo', targetUserId)
       .first();
 
     if (!petrolCard) {
       return res.status(404).json({
         success: false,
-        error: 'No active petrol card found for this company',
+        error: 'No active petrol card found for this user',
         data: null
       });
     }
@@ -216,6 +233,53 @@ router.get('/petrol-card', requirePermission('VIEW_PETTY_CASH'), async (req, res
       error: error.message,
       companyId: req.user.companyId,
       userId: req.user.userId
+    });
+
+    res.status(500).json({
+      success: false,
+      error: 'Internal server error'
+    });
+  }
+});
+
+// GET /petty-cash-cards/user-cards/:userId - Get all cards assigned to a user (top-up and petrol)
+// Used for expense forms to determine available payment methods
+router.get('/user-cards/:userId', requirePermission('VIEW_PETTY_CASH'), async (req, res) => {
+  try {
+    const db = getDbConnection(req.user.companyId);
+    const { userId } = req.params;
+
+    const cards = await db('petty_cash_cards')
+      .select(
+        'id',
+        'cardNumber',
+        'cardName',
+        'card_type',
+        'currentBalance',
+        'status',
+        'assignedTo'
+      )
+      .where('assignedTo', userId)
+      .where('status', 'active');
+
+    // Separate into top-up and petrol cards
+    const topUpCard = cards.find(c => c.card_type === 'top_up') || null;
+    const petrolCard = cards.find(c => c.card_type === 'petrol') || null;
+
+    res.json({
+      success: true,
+      data: {
+        topUpCard,
+        petrolCard,
+        allCards: cards
+      }
+    });
+
+  } catch (error) {
+    winston.error('Error fetching user cards', {
+      error: error.message,
+      userId: req.params.userId,
+      companyId: req.user.companyId
     });
 
     res.status(500).json({
@@ -311,25 +375,29 @@ router.post('/',
 
       // Validate card type specific rules
       if (cardType === 'petrol') {
-        // Petrol card: Only one active per company
-        const existingPetrolCard = await db('petty_cash_cards')
-          .where('card_type', 'petrol')
-          .where('status', 'active')
-          .first();
-
-        if (existingPetrolCard) {
-          return res.status(400).json({
-            success: false,
-            error: 'Company already has an active petrol card. Only one petrol card is allowed per company.'
-          });
-        }
-
-        // Petrol cards should not have user assignment
+        // Petrol cards can be assigned to users (one petrol card per user)
         if (cardData.assignedTo) {
-          return res.status(400).json({
-            success: false,
-            error: 'Petrol cards are shared and cannot be assigned to a specific user'
-          });
+          const assignedUser = await db('users').where('id', cardData.assignedTo).first();
+          if (!assignedUser) {
+            return res.status(400).json({
+              success: false,
+              error: 'Assigned user not found'
+            });
+          }
+
+          // Check if user already has an active petrol card
+          const existingPetrolCard = await db('petty_cash_cards')
+            .where('assignedTo', cardData.assignedTo)
+            .where('card_type', 'petrol')
+            .where('status', 'active')
+            .first();
+
+          if (existingPetrolCard) {
+            return res.status(400).json({
+              success: false,
+              error: 'User already has an active petrol card assigned'
+            });
+          }
         }
       }
 
@@ -381,8 +449,8 @@ router.post('/',
         cardNumber,
         card_type: cardType,
         cardName: cardData.cardName || (cardType === 'petrol' ? 'Petrol Card' : null),
-        assignedTo: cardType === 'petrol' ? null : (cardData.assignedTo || null),
-        staffName: cardType === 'petrol' ? 'Shared' : (cardData.staffName || null),
+        assignedTo: cardData.assignedTo || null,
+        staffName: cardData.staffName || null,
         department: cardData.department || null,
         initialBalance: cardData.initialBalance,
         currentBalance: cardData.initialBalance, // Start with initial balance
@@ -408,11 +476,12 @@ router.post('/',
         );
       }
 
-      // Handle petty cash user linking for top-up cards with assigned users
+      // Handle petty cash user linking for cards with assigned users
+      // Both top-up and petrol cards can be assigned to users
       let pettyCashUserResult = null;
       let generatedPin = null;
 
-      if (cardType === 'top_up' && cardData.assignedTo) {
+      if (cardData.assignedTo) {
         try {
           // Check if user already has a petty cash user record (from auto-creation during registration)
           const existingPcUser = await pettyCashUserService.findByUserId(
@@ -477,7 +546,7 @@ router.post('/',
         cardId: id,
         cardNumber,
         cardType,
-        assignedTo: cardType === 'petrol' ? null : cardData.assignedTo,
+        assignedTo: cardData.assignedTo || null,
         initialBalance: cardData.initialBalance,
         companyId: req.user.companyId,
         userId: req.user.userId,
@@ -547,37 +616,31 @@ router.put('/:id',
       // Handle card type changes and validation
       const newCardType = updateData.cardType || existingCard.card_type;
 
-      // Prevent changing card type if it would violate constraints
-      if (updateData.cardType && updateData.cardType !== existingCard.card_type) {
-        if (updateData.cardType === 'petrol') {
-          // Check if company already has an active petrol card
-          const existingPetrolCard = await db('petty_cash_cards')
-            .where('card_type', 'petrol')
-            .where('status', 'active')
-            .where('id', '!=', id)
-            .first();
-
-          if (existingPetrolCard) {
-            return res.status(400).json({
-              success: false,
-              error: 'Company already has an active petrol card. Cannot change this card to petrol type.'
-            });
-          }
-        }
-      }
-
-      // Validate card type specific rules
-      if (newCardType === 'petrol') {
-        // Petrol cards cannot have user assignment
-        if (updateData.assignedTo) {
+      // Validate card type specific rules for petrol cards
+      if (newCardType === 'petrol' && updateData.assignedTo && updateData.assignedTo !== existingCard.assignedTo) {
+        // If assigning petrol card to a different user, verify user exists
+        const newAssignedUser = await db('users').where('id', updateData.assignedTo).first();
+        if (!newAssignedUser) {
           return res.status(400).json({
             success: false,
-            error: 'Petrol cards are shared and cannot be assigned to a specific user'
+            error: 'Assigned user not found'
           });
         }
-        // Clear assignment for petrol cards
-        updateData.assignedTo = null;
-        updateData.staffName = 'Shared';
+
+        // Check if new user already has an active petrol card
+        const existingPetrolCard = await db('petty_cash_cards')
+          .where('assignedTo', updateData.assignedTo)
+          .where('card_type', 'petrol')
+          .where('status', 'active')
+          .where('id', '!=', id)
+          .first();
+
+        if (existingPetrolCard) {
+          return res.status(400).json({
+            success: false,
+            error: 'User already has an active petrol card assigned'
+          });
+        }
       }
 
       // If changing assigned user for top-up card, verify new user exists and doesn't have active card

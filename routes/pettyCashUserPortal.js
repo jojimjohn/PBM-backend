@@ -64,7 +64,10 @@ const loginSchema = Joi.object({
 });
 
 // Payment methods available in user portal
-const PORTAL_PAYMENT_METHODS = ['top_up_card', 'petrol_card'];
+// - top_up_card: User's assigned petty cash card (deducts from card balance)
+// - petrol_card: User's assigned petrol card for fuel expenses only (deducts from petrol card balance)
+// - iou: Personal expense (requires reimbursement when approved)
+const PORTAL_PAYMENT_METHODS = ['top_up_card', 'petrol_card', 'iou'];
 
 const expenseSchema = Joi.object({
   category: Joi.string().min(2).max(100).required(),
@@ -77,6 +80,8 @@ const expenseSchema = Joi.object({
   receiptNumber: Joi.string().max(100).allow(null, '').optional(),
   notes: Joi.string().max(1000).allow(null, '').optional(),
   paymentMethod: Joi.string().valid(...PORTAL_PAYMENT_METHODS).default('top_up_card').optional(),
+  projectId: Joi.number().integer().positive().allow(null).optional()
+    .messages({ 'number.base': 'Invalid project selection' }),
 });
 
 // Predefined expense categories (same as main system)
@@ -227,7 +232,8 @@ router.get('/me', requirePcAuth, async (req, res) => {
   try {
     const db = getDbConnectionByCompanyId(req.pcUser.companyId);
 
-    // Get fresh user data with card balance
+    // Get fresh user data with top-up card balance
+    // Also get petrol card info if assigned
     const userData = await db('petty_cash_users')
       .select(
         'petty_cash_users.id',
@@ -235,12 +241,18 @@ router.get('/me', requirePcAuth, async (req, res) => {
         'petty_cash_users.phone',
         'petty_cash_users.department',
         'petty_cash_users.employee_id',
+        'petty_cash_users.petrol_card_id',
+        // Top-up card info
         'petty_cash_cards.cardNumber',
         'petty_cash_cards.currentBalance',
         'petty_cash_cards.monthlyLimit',
-        'petty_cash_cards.totalSpent'
+        'petty_cash_cards.totalSpent',
+        // Petrol card info (aliased to avoid collision)
+        'petrol_card.cardNumber as petrolCardNumber',
+        'petrol_card.currentBalance as petrolCardBalance'
       )
       .leftJoin('petty_cash_cards', 'petty_cash_users.card_id', 'petty_cash_cards.id')
+      .leftJoin('petty_cash_cards as petrol_card', 'petty_cash_users.petrol_card_id', 'petrol_card.id')
       .where('petty_cash_users.id', req.pcUser.id)
       .first();
 
@@ -265,6 +277,10 @@ router.get('/me', requirePcAuth, async (req, res) => {
         currentBalance: parseFloat(userData.currentBalance) || 0,
         monthlyLimit: userData.monthlyLimit ? parseFloat(userData.monthlyLimit) : null,
         totalSpent: parseFloat(userData.totalSpent) || 0,
+        // Petrol card info (for fuel expenses)
+        hasPetrolCard: !!userData.petrol_card_id,
+        petrolCardBalance: userData.petrolCardBalance ? parseFloat(userData.petrolCardBalance) : 0,
+        petrolCardNumber: userData.petrolCardNumber || null,
         thisMonth: {
           expenseCount: parseInt(monthlyStats.expenseCount) || 0,
           approvedTotal: parseFloat(monthlyStats.approvedTotal) || 0,
@@ -327,6 +343,73 @@ router.get('/categories', async (req, res) => {
     res.json({
       success: true,
       data: expenseCategories,
+    });
+  }
+});
+
+// GET /pc-portal/projects - Get projects for authenticated PC user
+// Returns only projects the user belongs to (via user_projects junction table)
+// Note: Only PC users linked to system users can see projects
+router.get('/projects', requirePcAuth, async (req, res) => {
+  try {
+    const db = getDbConnectionByCompanyId(req.pcUser.companyId);
+
+    // Get the PC user's linked system user ID
+    const pcUser = await db('petty_cash_users')
+      .select('user_id')
+      .where('id', req.pcUser.id)
+      .first();
+
+    if (!pcUser || !pcUser.user_id) {
+      // PC user not linked to a system user - return empty array
+      // Only system users can have project assignments
+      winston.debug('PC user not linked to system user, returning empty projects', {
+        pcUserId: req.pcUser.id,
+        companyId: req.pcUser.companyId,
+      });
+
+      return res.json({
+        success: true,
+        data: [],
+        message: 'PC user not linked to system user - no project access',
+      });
+    }
+
+    // Get all active projects the user is assigned to
+    const projects = await db('projects')
+      .select(
+        'projects.id',
+        'projects.code',
+        'projects.name',
+        'projects.status',
+        'user_projects.role_in_project'
+      )
+      .innerJoin('user_projects', 'projects.id', 'user_projects.project_id')
+      .where('user_projects.user_id', pcUser.user_id)
+      .where('projects.status', 'active')
+      .orderBy('projects.name', 'asc');
+
+    winston.debug('Projects fetched for PC user', {
+      pcUserId: req.pcUser.id,
+      userId: pcUser.user_id,
+      projectCount: projects.length,
+      companyId: req.pcUser.companyId,
+    });
+
+    res.json({
+      success: true,
+      data: projects,
+    });
+  } catch (error) {
+    winston.error('Error fetching projects for PC user', {
+      error: error.message,
+      pcUserId: req.pcUser?.id,
+      companyId: req.pcUser?.companyId,
+    });
+
+    res.status(500).json({
+      success: false,
+      error: 'Failed to fetch projects',
     });
   }
 });
@@ -446,19 +529,53 @@ router.post('/expenses', requirePcAuth, async (req, res) => {
     }
 
     const db = getDbConnectionByCompanyId(req.pcUser.companyId);
-    const { category, description, amount, expenseDate, vendor, receiptNumber, notes, paymentMethod } = value;
+    const { category, description, amount, expenseDate, vendor, receiptNumber, notes, paymentMethod, projectId } = value;
 
     // Determine which card to use based on payment method
     let cardId = req.pcUser.cardId;
     let shouldDeductBalance = true;
     let isPetrolCard = false;
+    let isIOU = false;
     let card = null;
 
-    // For fuel category with petrol_card payment method, find company's shared petrol card
-    if (category === 'fuel' && paymentMethod === 'petrol_card') {
-      // Find company's active petrol card (shared among all users)
+    // Handle IOU (personal expense - reimbursed when approved)
+    // IOU does NOT deduct from any card balance - it's an out-of-pocket expense
+    if (paymentMethod === 'iou') {
+      isIOU = true;
+      shouldDeductBalance = false;
+      // For IOU, we still need a card reference for tracking purposes
+      // Use the user's assigned card but don't deduct from it
       card = await db('petty_cash_cards')
-        .where('card_type', 'petrol')
+        .where('id', cardId)
+        .first();
+
+      if (!card) {
+        return res.status(400).json({
+          success: false,
+          error: 'Petty cash card not found for user',
+        });
+      }
+    }
+    // For fuel category with petrol_card payment method, use user's assigned petrol card
+    // Use case-insensitive comparison since category code may be uppercase
+    else if (category?.toLowerCase() === 'fuel' && paymentMethod === 'petrol_card') {
+      // Get user's assigned petrol card
+      const pcUser = await db('petty_cash_users')
+        .select('petrol_card_id')
+        .where('id', req.pcUser.id)
+        .first();
+
+      if (!pcUser || !pcUser.petrol_card_id) {
+        return res.status(400).json({
+          success: false,
+          error: 'You do not have a petrol card assigned. Please use your regular card or IOU.',
+          code: 'NO_PETROL_CARD',
+        });
+      }
+
+      // Get the user's assigned petrol card
+      card = await db('petty_cash_cards')
+        .where('id', pcUser.petrol_card_id)
         .where('status', 'active')
         .first();
 
@@ -478,14 +595,14 @@ router.post('/expenses', requirePcAuth, async (req, res) => {
       } else {
         return res.status(400).json({
           success: false,
-          error: 'No active petrol card found for this company. Please use your regular card.',
-          code: 'NO_PETROL_CARD',
+          error: 'Your assigned petrol card is not active. Please use your regular card.',
+          code: 'PETROL_CARD_INACTIVE',
         });
       }
     }
 
-    // For non-petrol cards, check user's assigned card
-    if (!isPetrolCard) {
+    // For regular top-up cards (not petrol card, not IOU), check user's assigned card
+    if (!isPetrolCard && !isIOU) {
       card = await db('petty_cash_cards')
         .where('id', cardId)
         .first();
@@ -504,7 +621,7 @@ router.post('/expenses', requirePcAuth, async (req, res) => {
         });
       }
 
-      // Check balance for user's card
+      // Check balance for user's card (top_up_card only)
       const currentBalance = parseFloat(card.currentBalance) || 0;
       if (amount > currentBalance) {
         return res.status(400).json({
@@ -529,6 +646,7 @@ router.post('/expenses', requirePcAuth, async (req, res) => {
       expenseNumber,
       cardId: cardId, // Always set cardId (user's card OR petrol card) for balance tracking
       petrol_card_id: isPetrolCard ? cardId : null, // Track petrol card separately for reporting
+      project_id: projectId || null, // Link expense to project (optional)
       category,
       description,
       amount,

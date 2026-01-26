@@ -27,13 +27,14 @@ const uploadReceipt = handleS3UploadError(createS3SingleUpload('receipt'));
 // petrol_card: Shared fuel card - deducts from petrol card balance (fuel only)
 // company_card: Company debit card - no petty cash deduction
 // iou: Personal expense - no immediate deduction, reimbursed when approved
-const PAYMENT_METHODS = ['top_up_card', 'petrol_card', 'company_card', 'iou'];
+// Payment methods: top_up_card (user's card), petrol_card (shared fuel card), iou (personal expense)
+const PAYMENT_METHODS = ['top_up_card', 'petrol_card', 'iou'];
 
 // Validation schemas
 // IMPORTANT: Use string for dates to avoid timezone conversion issues
 // Joi.date().iso() converts to Date object which causes UTC timezone shifts
 const expenseSchema = Joi.object({
-  // cardId is required for top_up_card, optional for petrol_card (auto-selected), not needed for company_card/iou
+  // cardId is required for top_up_card, optional for petrol_card (auto-selected), not needed for iou
   cardId: Joi.number().integer().positive().allow(null).optional(),
   category: Joi.string().min(2).max(100).required(),
   paymentMethod: Joi.string().valid(...PAYMENT_METHODS).default('top_up_card'),
@@ -46,6 +47,8 @@ const expenseSchema = Joi.object({
   receiptNumber: Joi.string().max(100).allow(null, '').optional(),
   receiptPhoto: Joi.string().max(500).allow(null, '').optional(),
   notes: Joi.string().max(1000).allow(null, '').optional(),
+  // Optional: Link expense to a project
+  projectId: Joi.number().integer().positive().allow(null).optional(),
   // Optional: Admin can assign expense to a specific PC user
   submittedByPcUser: Joi.number().integer().positive().allow(null).optional()
 });
@@ -512,6 +515,7 @@ router.post('/',
         cardId: paymentMethod === 'top_up_card' ? expenseData.cardId :
                 (paymentMethod === 'petrol_card' ? card.id : null),
         petrol_card_id: petrolCardId,
+        project_id: expenseData.projectId || null, // Link to project
         category: expenseData.category,
         payment_method: paymentMethod,
         requires_reimbursement: requiresReimbursement,
