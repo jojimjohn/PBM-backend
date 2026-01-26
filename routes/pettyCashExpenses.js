@@ -789,6 +789,7 @@ router.put('/:id',
         if (updateData.notes !== undefined) dbUpdateData.notes = updateData.notes;
         if (updateData.paymentMethod !== undefined) dbUpdateData.payment_method = updateData.paymentMethod;
         if (updateData.submittedByPcUser !== undefined) dbUpdateData.submittedByPcUser = updateData.submittedByPcUser;
+        if (updateData.projectId !== undefined) dbUpdateData.project_id = updateData.projectId;
 
         await trx('petty_cash_expenses').where('id', id).update(dbUpdateData);
 
