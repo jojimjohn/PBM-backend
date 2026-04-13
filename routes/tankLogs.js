@@ -53,6 +53,72 @@ async function getPreviousDayNetClosing(db, tankId, date) {
 }
 
 // ============================================================================
+// GET /api/tank-logs/linkable-collections?date=YYYY-MM-DD
+// Returns finalized collection orders for a date that are NOT already linked
+// to any tank_daily_collections entry — available for manual linking
+// ============================================================================
+router.get('/linkable-collections', requirePermission('VIEW_TANK_LOGS'), async (req, res) => {
+  try {
+    const db = getDbConnection(req.user.companyId);
+    const { date, search } = req.query;
+
+    // Get collection_order_ids already linked to tank logs
+    const linkedIds = await db('tank_daily_collections')
+      .whereNotNull('collection_order_id')
+      .pluck('collection_order_id');
+
+    // Find finalized collection orders not yet linked
+    let query = db('collection_orders as co')
+      .where('co.is_finalized', 1)
+      .whereNotIn('co.id', linkedIds.length > 0 ? linkedIds : [0])
+      .select(
+        'co.id', 'co.orderNumber', 'co.wcn_number', 'co.wcn_date',
+        'co.vehiclePlate', 'co.vehicle_id', 'co.driverName', 'co.scheduledDate'
+      )
+      .orderBy('co.scheduledDate', 'desc')
+      .limit(50);
+
+    if (date) {
+      query = query.where(function () {
+        this.where('co.scheduledDate', date).orWhere('co.wcn_date', date);
+      });
+    }
+
+    if (search) {
+      query = query.where(function () {
+        this.where('co.orderNumber', 'like', `%${search}%`)
+          .orWhere('co.wcn_number', 'like', `%${search}%`)
+          .orWhere('co.vehiclePlate', 'like', `%${search}%`);
+      });
+    }
+
+    // Get total collected quantity per order
+    const orders = await query;
+    const orderIds = orders.map(o => o.id);
+    let itemTotals = [];
+    if (orderIds.length > 0) {
+      itemTotals = await db('collection_items')
+        .whereIn('collectionOrderId', orderIds)
+        .groupBy('collectionOrderId')
+        .select('collectionOrderId', db.raw('SUM(collectedQuantity) as total_quantity'));
+    }
+
+    const totalMap = {};
+    itemTotals.forEach(t => { totalMap[t.collectionOrderId] = parseFloat(t.total_quantity); });
+
+    const result = orders.map(o => ({
+      ...o,
+      total_collected: totalMap[o.id] || 0
+    }));
+
+    res.json({ success: true, data: result });
+  } catch (error) {
+    logger.error('Error fetching linkable collections', { error: error.message });
+    res.status(500).json({ success: false, error: 'Failed to fetch linkable collections' });
+  }
+});
+
+// ============================================================================
 // GET /api/tank-logs?date=YYYY-MM-DD
 // Returns all active tanks with their log for the given date,
 // plus previous day's net closing stock for opening stock auto-population
@@ -177,8 +243,22 @@ router.post('/', requirePermission('MANAGE_TANK_LOGS'), validate(tankLogSchema),
         logId = id;
       }
 
-      // Insert collections
+      // Insert collections with dedup check on collection_order_id
       if (collections && collections.length > 0) {
+        // Check for collection_order_ids already linked to OTHER tank logs
+        const coIds = collections.map(c => c.collection_order_id).filter(Boolean);
+        if (coIds.length > 0) {
+          const alreadyLinked = await trx('tank_daily_collections')
+            .whereIn('collection_order_id', coIds)
+            .where('tank_daily_log_id', '!=', logId)
+            .select('collection_order_id');
+
+          if (alreadyLinked.length > 0) {
+            const dupeIds = alreadyLinked.map(r => r.collection_order_id).join(', ');
+            throw new Error(`Collection order(s) ${dupeIds} already linked to another tank log`);
+          }
+        }
+
         await trx('tank_daily_collections').insert(
           collections.map(c => ({
             tank_daily_log_id: logId,

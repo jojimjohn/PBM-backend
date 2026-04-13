@@ -1601,6 +1601,8 @@ router.post('/:id/finalize-wcn',
   validate(Joi.object({
     wcnDate: Joi.date().optional(),
     notes: Joi.string().allow('').optional(),
+    // Optional: link this collection to a storage tank for daily log tracking
+    target_tank_id: Joi.number().integer().positive().allow(null).optional(),
     // Support for verified quantities and quality from WCN modal
     items: Joi.array().items(Joi.object({
       id: Joi.number().integer().positive().allow(null).optional(), // Allow null for new items
@@ -1626,7 +1628,7 @@ router.post('/:id/finalize-wcn',
   async (req, res) => {
     try {
       const { id } = req.params;
-      const { wcnDate, notes, items: verifiedItems } = req.body;
+      const { wcnDate, notes, items: verifiedItems, target_tank_id } = req.body;
       const { companyId, userId } = req.user;
       const db = getDbConnection(companyId);
 
@@ -2461,6 +2463,74 @@ router.post('/:id/finalize-wcn',
         itemsCount: items.length,
         newItemsAdded
       });
+
+      // Auto-link to tank daily log if target_tank_id specified
+      // Non-blocking: tank log creation failure does not roll back WCN finalization
+      if (target_tank_id) {
+        try {
+          const logDate = (wcnDate ? new Date(wcnDate) : new Date()).toISOString().split('T')[0];
+
+          // Check if this collection_order_id is already linked (dedup)
+          const existingLink = await db('tank_daily_collections')
+            .where('collection_order_id', id)
+            .first();
+
+          if (!existingLink) {
+            // Find or create tank_daily_log for this date + tank
+            let tankLog = await db('tank_daily_log')
+              .where({ log_date: logDate, tank_id: target_tank_id })
+              .first();
+
+            if (!tankLog) {
+              // Auto-create log entry with zeros — user fills in closing/sales later
+              const prevNet = await db('tank_daily_log')
+                .where('tank_id', target_tank_id)
+                .where('log_date', '<', logDate)
+                .orderBy('log_date', 'desc')
+                .select(db.raw('(closing_stock - sales) as net'))
+                .first();
+
+              const [logId] = await db('tank_daily_log').insert({
+                log_date: logDate,
+                tank_id: target_tank_id,
+                opening_stock: prevNet ? parseFloat(prevNet.net) : 0,
+                closing_stock: 0,
+                sales: 0,
+                created_by: userId
+              });
+              tankLog = { id: logId };
+            }
+
+            // Calculate total collected quantity
+            const totalCollected = items.reduce((sum, item) => {
+              return sum + parseFloat(item.verifiedQuantity || item.collectedQuantity || 0);
+            }, 0);
+
+            await db('tank_daily_collections').insert({
+              tank_daily_log_id: tankLog.id,
+              vehicle_id: order.vehicle_id || null,
+              vehicle_plate: order.vehiclePlate || null,
+              collected_quantity: totalCollected,
+              collection_order_id: id,
+              notes: `Auto-linked from WCN ${wcnNumber}`
+            });
+
+            logger.info('Tank log auto-linked from WCN', {
+              collectionOrderId: id,
+              tankId: target_tank_id,
+              logDate,
+              quantity: totalCollected
+            });
+          }
+        } catch (tankError) {
+          // Log but don't fail — WCN finalization already succeeded
+          logger.warn('Failed to auto-link tank log from WCN', {
+            collectionOrderId: id,
+            tankId: target_tank_id,
+            error: tankError.message
+          });
+        }
+      }
 
       // Build appropriate message
       let message = 'WCN finalized successfully. Purchase order auto-generated and inventory updated.';
