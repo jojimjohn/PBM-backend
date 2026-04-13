@@ -212,7 +212,13 @@ const schemas = {
       .description('Send welcome email with temporary password'),
     createPettyCashAccount: Joi.boolean()
       .default(true)
-      .description('Create a petty cash account for the user')
+      .description('Create a petty cash account for the user'),
+    employee_id: Joi.number()
+      .integer()
+      .positive()
+      .allow(null)
+      .optional()
+      .description('Link to existing employee record (auto-creates if omitted)')
   }),
 
   // Update user - for editing existing users

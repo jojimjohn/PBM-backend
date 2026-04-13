@@ -39,6 +39,8 @@ const createUserSchema = Joi.object({
   phone: Joi.string().max(20).allow('', null).optional(),
   department: Joi.string().max(100).allow('', null).optional(),
   employeeId: Joi.string().max(50).allow('', null).optional(),
+  employee_record_id: Joi.number().integer().positive().allow(null).optional()
+    .description('Link to employee master record (recommended — auto-populates name/phone)'),
   pin: Joi.string().pattern(/^\d{4,6}$/).required().messages({
     'string.pattern.base': 'PIN must be 4-6 digits',
   }),
@@ -112,12 +114,17 @@ router.get('/', requirePermission('MANAGE_PETTY_CASH'), async (req, res) => {
         'linked_user.firstName as linkedUserFirstName',
         'linked_user.lastName as linkedUserLastName',
         'linked_user.email as linkedUserEmail',
-        'linked_user.role as linkedUserRole'
+        'linked_user.role as linkedUserRole',
+        // Linked employee info
+        'emp.employee_code as employeeCode',
+        'emp.full_name as employeeFullName',
+        'emp.employee_type as employeeType'
       )
       .leftJoin('petty_cash_cards', 'petty_cash_users.card_id', 'petty_cash_cards.id')
       .leftJoin('petty_cash_cards as petrol_card', 'petty_cash_users.petrol_card_id', 'petrol_card.id')
       .leftJoin('users as creator', 'petty_cash_users.created_by', 'creator.id')
       .leftJoin('users as linked_user', 'petty_cash_users.user_id', 'linked_user.id')
+      .leftJoin('employees as emp', 'petty_cash_users.employee_record_id', 'emp.id')
       .orderBy('petty_cash_users.created_at', 'desc');
 
     // Apply filters
@@ -207,7 +214,11 @@ router.get('/:id', requirePermission('MANAGE_PETTY_CASH'), async (req, res) => {
         'linked_user.firstName as linkedUserFirstName',
         'linked_user.lastName as linkedUserLastName',
         'linked_user.email as linkedUserEmail',
-        'linked_user.role as linkedUserRole'
+        'linked_user.role as linkedUserRole',
+        // Linked employee info
+        'emp.employee_code as employeeCode',
+        'emp.full_name as employeeFullName',
+        'emp.employee_type as employeeType'
       )
       .leftJoin('petty_cash_cards', 'petty_cash_users.card_id', 'petty_cash_cards.id')
       .leftJoin('petty_cash_cards as petrol_card', 'petty_cash_users.petrol_card_id', 'petrol_card.id')
@@ -304,7 +315,7 @@ router.post(
   async (req, res) => {
     try {
       const db = getDbConnection(req.user.companyId);
-      const { cardId, petrolCardId, name, phone, department, employeeId, pin, userId } = req.body;
+      const { cardId, petrolCardId, name, phone, department, employeeId, employee_record_id, pin, userId } = req.body;
 
       // Verify system user exists if provided
       if (userId) {
@@ -394,14 +405,44 @@ router.post(
       // Generate QR token
       const qrToken = generateQrToken();
 
+      // Resolve employee data if employee_record_id provided
+      let resolvedName = name;
+      let resolvedPhone = phone;
+      let resolvedDepartment = department;
+      let resolvedEmployeeRecordId = employee_record_id || null;
+
+      if (employee_record_id) {
+        const employee = await db('employees').where('id', employee_record_id).first();
+        if (!employee) {
+          return res.status(400).json({ success: false, error: 'Employee not found' });
+        }
+        // Use employee data as source of truth
+        resolvedName = employee.full_name;
+        resolvedPhone = employee.phone || phone;
+        resolvedDepartment = employee.department || department;
+      } else if (userId) {
+        // If linked to system user, inherit their employee_id
+        const systemUser = await db('users').where('id', userId).first();
+        if (systemUser && systemUser.employee_id) {
+          resolvedEmployeeRecordId = systemUser.employee_id;
+          const employee = await db('employees').where('id', systemUser.employee_id).first();
+          if (employee) {
+            resolvedName = employee.full_name;
+            resolvedPhone = employee.phone || phone;
+            resolvedDepartment = employee.department || department;
+          }
+        }
+      }
+
       // Create user
       const newUser = {
         card_id: cardId,
         petrol_card_id: petrolCardId || null,
         user_id: userId || null,
-        name,
-        phone: phone || null,
-        department: department || null,
+        employee_record_id: resolvedEmployeeRecordId,
+        name: resolvedName,
+        phone: resolvedPhone || null,
+        department: resolvedDepartment || null,
         employee_id: employeeId || null,
         pin_hash: pinHash,
         qr_token: qrToken,

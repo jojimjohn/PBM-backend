@@ -149,6 +149,7 @@ router.get('/',
       // LEFT JOIN with roles table to get role name from database-driven roles system
       let query = db('users')
         .leftJoin('roles', 'users.role_id', 'roles.id')
+        .leftJoin('employees', 'users.employee_id', 'employees.id')
         .select(
           'users.id',
           'users.email',
@@ -156,6 +157,10 @@ router.get('/',
           'users.firstName',
           'users.lastName',
           'users.role_id as roleId',
+          'users.employee_id as employeeId',
+          'employees.employee_code as employeeCode',
+          'employees.full_name as employeeName',
+          'employees.employee_type as employeeType',
           // Use role name from roles table, fallback to legacy role column
           db.raw('COALESCE(roles.slug, users.role) as role'),
           db.raw('COALESCE(roles.name, users.role) as roleName'),
@@ -426,7 +431,7 @@ router.post('/',
   async (req, res) => {
     try {
       const { companyId, userId: actorId, role: actorRole, email: actorEmail, roleId: actorRoleId } = req.user;
-      const { email, username, firstName, lastName, roleId, sendWelcomeEmail = true, createPettyCashAccount = true } = req.body;
+      const { email, username, firstName, lastName, roleId, sendWelcomeEmail = true, createPettyCashAccount = true, employee_id: providedEmployeeId } = req.body;
       const db = getDbConnection(companyId);
 
       // Look up the target role from the database
@@ -496,6 +501,45 @@ router.post('/',
       const tempPassword = generateTempPassword();
       const hashedPassword = await bcrypt.hash(tempPassword, 12);
 
+      // Resolve employee link: use provided employee_id or auto-create from user data
+      let employeeId = providedEmployeeId || null;
+      if (providedEmployeeId) {
+        // Verify the employee exists
+        const emp = await db('employees').where('id', providedEmployeeId).first();
+        if (!emp) {
+          return res.status(400).json({ success: false, error: 'Employee not found' });
+        }
+        // Check employee isn't already linked to another user
+        const existingLink = await db('users').where('employee_id', providedEmployeeId).first();
+        if (existingLink) {
+          return res.status(400).json({ success: false, error: `This employee is already linked to user: ${existingLink.email}` });
+        }
+      } else {
+        // Auto-create employee record from user data
+        try {
+          const lastEmp = await db('employees').orderBy('id', 'desc').first('employee_code');
+          let seq = 1;
+          if (lastEmp && lastEmp.employee_code) {
+            const num = parseInt(lastEmp.employee_code.replace('EMP-', ''), 10);
+            if (!isNaN(num)) seq = num + 1;
+          }
+          const empCode = `EMP-${String(seq).padStart(3, '0')}`;
+
+          const [empId] = await db('employees').insert({
+            employee_code: empCode,
+            full_name: `${firstName} ${lastName}`,
+            email,
+            employee_type: 'admin_staff',
+            status: 'active'
+          });
+          employeeId = empId;
+          logger.info('Auto-created employee record for new user', { empId, empCode, email });
+        } catch (empErr) {
+          logger.warn('Failed to auto-create employee record', { error: empErr.message, email });
+          // Continue without employee link — don't block user creation
+        }
+      }
+
       // Create user with both role_id and legacy role slug for backward compatibility
       const [userId] = await db('users').insert({
         email,
@@ -509,6 +553,7 @@ router.post('/',
         isActive: true,
         force_password_change: true,
         mfa_enabled: false,
+        employee_id: employeeId,
         created_by: actorId,
         updated_by: actorId
       });
