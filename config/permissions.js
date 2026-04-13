@@ -489,6 +489,26 @@ const PERMISSIONS = {
     module: 'employees'
   },
 
+  // Vehicle Management
+  VIEW_VEHICLES: {
+    key: 'VIEW_VEHICLES',
+    label: 'View Vehicles',
+    description: 'View vehicle fleet and details',
+    module: 'vehicles'
+  },
+  MANAGE_VEHICLES: {
+    key: 'MANAGE_VEHICLES',
+    label: 'Manage Vehicles',
+    description: 'Create, edit vehicles and manage documents',
+    module: 'vehicles'
+  },
+  MANAGE_VEHICLE_TYPES: {
+    key: 'MANAGE_VEHICLE_TYPES',
+    label: 'Manage Vehicle Types',
+    description: 'Manage vehicle type lookup table',
+    module: 'vehicles'
+  },
+
   // Branch Management
   VIEW_BRANCHES: {
     key: 'VIEW_BRANCHES',
@@ -829,6 +849,12 @@ const MODULES = {
     label: 'Employees',
     icon: 'user-check',
     order: 17
+  },
+  vehicles: {
+    key: 'vehicles',
+    label: 'Vehicles',
+    icon: 'truck',
+    order: 18
   }
 };
 

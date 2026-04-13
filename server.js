@@ -50,6 +50,8 @@ const pettyCashUserPortalRoutes = require('./routes/pettyCashUserPortal');
 const projectsRoutes = require('./routes/projects');
 const expenseCategoriesRoutes = require('./routes/expenseCategories');
 const employeesRoutes = require('./routes/employees');
+const vehiclesRoutes = require('./routes/vehicles');
+const vehicleTypesRoutes = require('./routes/vehicleTypes');
 const { authenticateToken } = require('./middleware/auth');
 const { checkSessionTimeout, _devSessionStore } = require('./middleware/sessionTimeout');
 const { validateCsrfToken, ensureCsrfToken } = require('./middleware/csrf');
@@ -313,6 +315,8 @@ app.use('/api/inventory-batches', inventoryBatchesRoutes);
 app.use('/api/projects', projectsRoutes);
 app.use('/api/expense-categories', expenseCategoriesRoutes);
 app.use('/api/employees', employeesRoutes);
+app.use('/api/vehicles', vehiclesRoutes);
+app.use('/api/vehicle-types', vehicleTypesRoutes);
 
 // 404 handler
 app.use('*', (req, res) => {

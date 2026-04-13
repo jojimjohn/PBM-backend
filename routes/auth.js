@@ -1836,7 +1836,8 @@ const getUserPermissions = async (roleOrRoleId, companyId, db = null) => {
       'VIEW_SETTINGS', 'EDIT_SETTINGS', 'MANAGE_SETTINGS',
       'MANAGE_USERS', 'VIEW_USERS', 'ASSIGN_ROLES', 'MANAGE_ROLES', 'VIEW_ROLES',
       'VIEW_AUDIT_LOGS', 'VIEW_COMPANIES', 'MANAGE_COMPANIES', 'SWITCH_COMPANIES',
-      'VIEW_EMPLOYEES', 'MANAGE_EMPLOYEES', 'DELETE_EMPLOYEES'
+      'VIEW_EMPLOYEES', 'MANAGE_EMPLOYEES', 'DELETE_EMPLOYEES',
+      'VIEW_VEHICLES', 'MANAGE_VEHICLES', 'MANAGE_VEHICLE_TYPES'
     ];
   }
 
@@ -1935,7 +1936,9 @@ const getUserPermissions = async (roleOrRoleId, companyId, db = null) => {
       // Projects
       'VIEW_PROJECTS', 'MANAGE_PROJECTS',
       // Employee Management
-      'VIEW_EMPLOYEES', 'MANAGE_EMPLOYEES', 'DELETE_EMPLOYEES'
+      'VIEW_EMPLOYEES', 'MANAGE_EMPLOYEES', 'DELETE_EMPLOYEES',
+      // Vehicle Management
+      'VIEW_VEHICLES', 'MANAGE_VEHICLES', 'MANAGE_VEHICLE_TYPES'
     ],
     'COMPANY_ADMIN': [
       // Customer Management
@@ -1992,7 +1995,9 @@ const getUserPermissions = async (roleOrRoleId, companyId, db = null) => {
       // Projects
       'VIEW_PROJECTS', 'MANAGE_PROJECTS',
       // Employee Management
-      'VIEW_EMPLOYEES', 'MANAGE_EMPLOYEES', 'DELETE_EMPLOYEES'
+      'VIEW_EMPLOYEES', 'MANAGE_EMPLOYEES', 'DELETE_EMPLOYEES',
+      // Vehicle Management
+      'VIEW_VEHICLES', 'MANAGE_VEHICLES', 'MANAGE_VEHICLE_TYPES'
     ],
     'MANAGER': [
       // Customer Management
@@ -2044,7 +2049,9 @@ const getUserPermissions = async (roleOrRoleId, companyId, db = null) => {
       // Projects
       'VIEW_PROJECTS',
       // Employee Management
-      'VIEW_EMPLOYEES', 'MANAGE_EMPLOYEES'
+      'VIEW_EMPLOYEES', 'MANAGE_EMPLOYEES',
+      // Vehicle Management
+      'VIEW_VEHICLES', 'MANAGE_VEHICLES'
     ],
     'SALES_STAFF': [
       // Customer Management
@@ -2071,7 +2078,9 @@ const getUserPermissions = async (roleOrRoleId, companyId, db = null) => {
       // Projects (view only)
       'VIEW_PROJECTS',
       // Employee Management (view only)
-      'VIEW_EMPLOYEES'
+      'VIEW_EMPLOYEES',
+      // Vehicle Management (view only)
+      'VIEW_VEHICLES'
     ],
     'PURCHASE_STAFF': [
       // Supplier Management
@@ -2109,7 +2118,9 @@ const getUserPermissions = async (roleOrRoleId, companyId, db = null) => {
       // Projects (view only)
       'VIEW_PROJECTS',
       // Employee Management (view only)
-      'VIEW_EMPLOYEES'
+      'VIEW_EMPLOYEES',
+      // Vehicle Management (view only)
+      'VIEW_VEHICLES'
     ],
     'ACCOUNTS_STAFF': [
       // Customer/Supplier (view only)
@@ -2144,7 +2155,9 @@ const getUserPermissions = async (roleOrRoleId, companyId, db = null) => {
       // Projects (view only)
       'VIEW_PROJECTS',
       // Employee Management (view only)
-      'VIEW_EMPLOYEES'
+      'VIEW_EMPLOYEES',
+      // Vehicle Management (view only)
+      'VIEW_VEHICLES'
     ]
   };
 

@@ -483,6 +483,22 @@ const PERMISSION_TREE = {
 
   DELETE_EMPLOYEES: {
     implies: []
+  },
+
+  // =========================================================================
+  // VEHICLE MANAGEMENT
+  // =========================================================================
+  MANAGE_VEHICLES: {
+    implies: [
+      'VIEW_VEHICLES',
+      'CREATE_VEHICLES',
+      'EDIT_VEHICLES',
+      'MANAGE_VEHICLE_DOCUMENTS'
+    ]
+  },
+
+  MANAGE_VEHICLE_TYPES: {
+    implies: ['VIEW_VEHICLES']
   }
 };
 
