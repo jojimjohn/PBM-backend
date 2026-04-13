@@ -163,8 +163,9 @@ const requirePermission = (requiredPermission) => {
     // Super Admin bypass: role-based override grants all permissions
     // This ensures super admins are never blocked, even if their JWT
     // doesn't contain every individual permission string
-    const userRole = (req.user.role || '').toLowerCase().replace(/[_\s]/g, '-');
-    if (userRole === 'super-admin') {
+    const rawRole = (req.user.role || '').toString();
+    const normalizedRole = rawRole.toLowerCase().replace(/[-_\s]/g, '');
+    if (normalizedRole === 'superadmin') {
       return next();
     }
 
