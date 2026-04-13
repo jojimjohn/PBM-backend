@@ -509,6 +509,20 @@ const PERMISSIONS = {
     module: 'vehicles'
   },
 
+  // Tank Log Management
+  VIEW_TANK_LOGS: {
+    key: 'VIEW_TANK_LOGS',
+    label: 'View Tank Logs',
+    description: 'View daily tank stock logs',
+    module: 'tank_logs'
+  },
+  MANAGE_TANK_LOGS: {
+    key: 'MANAGE_TANK_LOGS',
+    label: 'Manage Tank Logs',
+    description: 'Create, edit daily tank logs and manage storage tanks',
+    module: 'tank_logs'
+  },
+
   // Branch Management
   VIEW_BRANCHES: {
     key: 'VIEW_BRANCHES',
@@ -855,6 +869,12 @@ const MODULES = {
     label: 'Vehicles',
     icon: 'truck',
     order: 18
+  },
+  tank_logs: {
+    key: 'tank_logs',
+    label: 'Tank Logs',
+    icon: 'droplet',
+    order: 19
   }
 };
 

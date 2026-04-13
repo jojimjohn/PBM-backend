@@ -1837,7 +1837,8 @@ const getUserPermissions = async (roleOrRoleId, companyId, db = null) => {
       'MANAGE_USERS', 'VIEW_USERS', 'ASSIGN_ROLES', 'MANAGE_ROLES', 'VIEW_ROLES',
       'VIEW_AUDIT_LOGS', 'VIEW_COMPANIES', 'MANAGE_COMPANIES', 'SWITCH_COMPANIES',
       'VIEW_EMPLOYEES', 'MANAGE_EMPLOYEES', 'DELETE_EMPLOYEES',
-      'VIEW_VEHICLES', 'MANAGE_VEHICLES', 'MANAGE_VEHICLE_TYPES'
+      'VIEW_VEHICLES', 'MANAGE_VEHICLES', 'MANAGE_VEHICLE_TYPES',
+      'VIEW_TANK_LOGS', 'MANAGE_TANK_LOGS'
     ];
   }
 
@@ -1938,7 +1939,9 @@ const getUserPermissions = async (roleOrRoleId, companyId, db = null) => {
       // Employee Management
       'VIEW_EMPLOYEES', 'MANAGE_EMPLOYEES', 'DELETE_EMPLOYEES',
       // Vehicle Management
-      'VIEW_VEHICLES', 'MANAGE_VEHICLES', 'MANAGE_VEHICLE_TYPES'
+      'VIEW_VEHICLES', 'MANAGE_VEHICLES', 'MANAGE_VEHICLE_TYPES',
+      // Tank Log Management
+      'VIEW_TANK_LOGS', 'MANAGE_TANK_LOGS'
     ],
     'COMPANY_ADMIN': [
       // Customer Management
@@ -1997,7 +2000,9 @@ const getUserPermissions = async (roleOrRoleId, companyId, db = null) => {
       // Employee Management
       'VIEW_EMPLOYEES', 'MANAGE_EMPLOYEES', 'DELETE_EMPLOYEES',
       // Vehicle Management
-      'VIEW_VEHICLES', 'MANAGE_VEHICLES', 'MANAGE_VEHICLE_TYPES'
+      'VIEW_VEHICLES', 'MANAGE_VEHICLES', 'MANAGE_VEHICLE_TYPES',
+      // Tank Log Management
+      'VIEW_TANK_LOGS', 'MANAGE_TANK_LOGS'
     ],
     'MANAGER': [
       // Customer Management
@@ -2051,7 +2056,9 @@ const getUserPermissions = async (roleOrRoleId, companyId, db = null) => {
       // Employee Management
       'VIEW_EMPLOYEES', 'MANAGE_EMPLOYEES',
       // Vehicle Management
-      'VIEW_VEHICLES', 'MANAGE_VEHICLES'
+      'VIEW_VEHICLES', 'MANAGE_VEHICLES',
+      // Tank Log Management
+      'VIEW_TANK_LOGS', 'MANAGE_TANK_LOGS'
     ],
     'SALES_STAFF': [
       // Customer Management
@@ -2080,7 +2087,9 @@ const getUserPermissions = async (roleOrRoleId, companyId, db = null) => {
       // Employee Management (view only)
       'VIEW_EMPLOYEES',
       // Vehicle Management (view only)
-      'VIEW_VEHICLES'
+      'VIEW_VEHICLES',
+      // Tank Log (view only)
+      'VIEW_TANK_LOGS'
     ],
     'PURCHASE_STAFF': [
       // Supplier Management
@@ -2120,7 +2129,9 @@ const getUserPermissions = async (roleOrRoleId, companyId, db = null) => {
       // Employee Management (view only)
       'VIEW_EMPLOYEES',
       // Vehicle Management (view only)
-      'VIEW_VEHICLES'
+      'VIEW_VEHICLES',
+      // Tank Log (view only)
+      'VIEW_TANK_LOGS'
     ],
     'ACCOUNTS_STAFF': [
       // Customer/Supplier (view only)
@@ -2157,7 +2168,9 @@ const getUserPermissions = async (roleOrRoleId, companyId, db = null) => {
       // Employee Management (view only)
       'VIEW_EMPLOYEES',
       // Vehicle Management (view only)
-      'VIEW_VEHICLES'
+      'VIEW_VEHICLES',
+      // Tank Log (view only)
+      'VIEW_TANK_LOGS'
     ]
   };
 

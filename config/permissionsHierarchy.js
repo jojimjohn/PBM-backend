@@ -499,6 +499,18 @@ const PERMISSION_TREE = {
 
   MANAGE_VEHICLE_TYPES: {
     implies: ['VIEW_VEHICLES']
+  },
+
+  // =========================================================================
+  // TANK LOG MANAGEMENT
+  // =========================================================================
+  MANAGE_TANK_LOGS: {
+    implies: [
+      'VIEW_TANK_LOGS',
+      'CREATE_TANK_LOGS',
+      'EDIT_TANK_LOGS',
+      'MANAGE_STORAGE_TANKS'
+    ]
   }
 };
 
