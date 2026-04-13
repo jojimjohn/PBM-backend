@@ -1838,7 +1838,8 @@ const getUserPermissions = async (roleOrRoleId, companyId, db = null) => {
       'VIEW_AUDIT_LOGS', 'VIEW_COMPANIES', 'MANAGE_COMPANIES', 'SWITCH_COMPANIES',
       'VIEW_EMPLOYEES', 'MANAGE_EMPLOYEES', 'DELETE_EMPLOYEES',
       'VIEW_VEHICLES', 'MANAGE_VEHICLES', 'MANAGE_VEHICLE_TYPES',
-      'VIEW_TANK_LOGS', 'MANAGE_TANK_LOGS'
+      'VIEW_TANK_LOGS', 'MANAGE_TANK_LOGS',
+      'VIEW_EXPENSE_SHEETS', 'MANAGE_EXPENSE_SHEETS', 'APPROVE_EXPENSE_SHEETS'
     ];
   }
 
@@ -1941,7 +1942,9 @@ const getUserPermissions = async (roleOrRoleId, companyId, db = null) => {
       // Vehicle Management
       'VIEW_VEHICLES', 'MANAGE_VEHICLES', 'MANAGE_VEHICLE_TYPES',
       // Tank Log Management
-      'VIEW_TANK_LOGS', 'MANAGE_TANK_LOGS'
+      'VIEW_TANK_LOGS', 'MANAGE_TANK_LOGS',
+      // Expense Sheet Management
+      'VIEW_EXPENSE_SHEETS', 'MANAGE_EXPENSE_SHEETS', 'APPROVE_EXPENSE_SHEETS'
     ],
     'COMPANY_ADMIN': [
       // Customer Management
@@ -2002,7 +2005,9 @@ const getUserPermissions = async (roleOrRoleId, companyId, db = null) => {
       // Vehicle Management
       'VIEW_VEHICLES', 'MANAGE_VEHICLES', 'MANAGE_VEHICLE_TYPES',
       // Tank Log Management
-      'VIEW_TANK_LOGS', 'MANAGE_TANK_LOGS'
+      'VIEW_TANK_LOGS', 'MANAGE_TANK_LOGS',
+      // Expense Sheet Management
+      'VIEW_EXPENSE_SHEETS', 'MANAGE_EXPENSE_SHEETS', 'APPROVE_EXPENSE_SHEETS'
     ],
     'MANAGER': [
       // Customer Management
@@ -2058,7 +2063,9 @@ const getUserPermissions = async (roleOrRoleId, companyId, db = null) => {
       // Vehicle Management
       'VIEW_VEHICLES', 'MANAGE_VEHICLES',
       // Tank Log Management
-      'VIEW_TANK_LOGS', 'MANAGE_TANK_LOGS'
+      'VIEW_TANK_LOGS', 'MANAGE_TANK_LOGS',
+      // Expense Sheet Management
+      'VIEW_EXPENSE_SHEETS', 'MANAGE_EXPENSE_SHEETS', 'APPROVE_EXPENSE_SHEETS'
     ],
     'SALES_STAFF': [
       // Customer Management
@@ -2089,7 +2096,9 @@ const getUserPermissions = async (roleOrRoleId, companyId, db = null) => {
       // Vehicle Management (view only)
       'VIEW_VEHICLES',
       // Tank Log (view only)
-      'VIEW_TANK_LOGS'
+      'VIEW_TANK_LOGS',
+      // Expense Sheets (view only)
+      'VIEW_EXPENSE_SHEETS'
     ],
     'PURCHASE_STAFF': [
       // Supplier Management
@@ -2131,7 +2140,9 @@ const getUserPermissions = async (roleOrRoleId, companyId, db = null) => {
       // Vehicle Management (view only)
       'VIEW_VEHICLES',
       // Tank Log (view only)
-      'VIEW_TANK_LOGS'
+      'VIEW_TANK_LOGS',
+      // Expense Sheets (create/submit)
+      'VIEW_EXPENSE_SHEETS', 'MANAGE_EXPENSE_SHEETS'
     ],
     'ACCOUNTS_STAFF': [
       // Customer/Supplier (view only)
@@ -2170,7 +2181,9 @@ const getUserPermissions = async (roleOrRoleId, companyId, db = null) => {
       // Vehicle Management (view only)
       'VIEW_VEHICLES',
       // Tank Log (view only)
-      'VIEW_TANK_LOGS'
+      'VIEW_TANK_LOGS',
+      // Expense Sheets (view only)
+      'VIEW_EXPENSE_SHEETS'
     ]
   };
 

@@ -523,6 +523,26 @@ const PERMISSIONS = {
     module: 'tank_logs'
   },
 
+  // Vehicle Expense Sheet Management
+  VIEW_EXPENSE_SHEETS: {
+    key: 'VIEW_EXPENSE_SHEETS',
+    label: 'View Expense Sheets',
+    description: 'View daily vehicle expense sheets',
+    module: 'expense_sheets'
+  },
+  MANAGE_EXPENSE_SHEETS: {
+    key: 'MANAGE_EXPENSE_SHEETS',
+    label: 'Manage Expense Sheets',
+    description: 'Create and edit daily vehicle expense sheets',
+    module: 'expense_sheets'
+  },
+  APPROVE_EXPENSE_SHEETS: {
+    key: 'APPROVE_EXPENSE_SHEETS',
+    label: 'Approve Expense Sheets',
+    description: 'Approve submitted expense sheets',
+    module: 'expense_sheets'
+  },
+
   // Branch Management
   VIEW_BRANCHES: {
     key: 'VIEW_BRANCHES',
@@ -875,6 +895,12 @@ const MODULES = {
     label: 'Tank Logs',
     icon: 'droplet',
     order: 19
+  },
+  expense_sheets: {
+    key: 'expense_sheets',
+    label: 'Expense Sheets',
+    icon: 'receipt',
+    order: 20
   }
 };
 

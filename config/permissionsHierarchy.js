@@ -511,6 +511,22 @@ const PERMISSION_TREE = {
       'EDIT_TANK_LOGS',
       'MANAGE_STORAGE_TANKS'
     ]
+  },
+
+  // =========================================================================
+  // VEHICLE EXPENSE SHEET MANAGEMENT
+  // =========================================================================
+  MANAGE_EXPENSE_SHEETS: {
+    implies: [
+      'VIEW_EXPENSE_SHEETS',
+      'CREATE_EXPENSE_SHEETS',
+      'EDIT_EXPENSE_SHEETS',
+      'SUBMIT_EXPENSE_SHEETS'
+    ]
+  },
+
+  APPROVE_EXPENSE_SHEETS: {
+    implies: ['VIEW_EXPENSE_SHEETS']
   }
 };
 
