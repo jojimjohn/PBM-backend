@@ -160,6 +160,14 @@ const requirePermission = (requiredPermission) => {
       });
     }
 
+    // Super Admin bypass: role-based override grants all permissions
+    // This ensures super admins are never blocked, even if their JWT
+    // doesn't contain every individual permission string
+    const userRole = (req.user.role || '').toLowerCase().replace(/[_\s]/g, '-');
+    if (userRole === 'super-admin') {
+      return next();
+    }
+
     const userPermissions = req.user.permissions || [];
 
     // Use hierarchical permission checking - parent permissions grant child permissions
@@ -192,6 +200,12 @@ const requireAnyPermission = (permissions) => {
         success: false,
         error: 'Authentication required'
       });
+    }
+
+    // Super Admin bypass
+    const userRole = (req.user.role || '').toLowerCase().replace(/[_\s]/g, '-');
+    if (userRole === 'super-admin') {
+      return next();
     }
 
     const userPermissions = req.user.permissions || [];
