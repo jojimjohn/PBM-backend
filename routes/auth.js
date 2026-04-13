@@ -1835,7 +1835,8 @@ const getUserPermissions = async (roleOrRoleId, companyId, db = null) => {
       'VIEW_REPORTS', 'EXPORT_REPORTS', 'CREATE_CUSTOM_REPORTS',
       'VIEW_SETTINGS', 'EDIT_SETTINGS', 'MANAGE_SETTINGS',
       'MANAGE_USERS', 'VIEW_USERS', 'ASSIGN_ROLES', 'MANAGE_ROLES', 'VIEW_ROLES',
-      'VIEW_AUDIT_LOGS', 'VIEW_COMPANIES', 'MANAGE_COMPANIES', 'SWITCH_COMPANIES'
+      'VIEW_AUDIT_LOGS', 'VIEW_COMPANIES', 'MANAGE_COMPANIES', 'SWITCH_COMPANIES',
+      'VIEW_EMPLOYEES', 'MANAGE_EMPLOYEES', 'DELETE_EMPLOYEES'
     ];
   }
 
@@ -1932,7 +1933,9 @@ const getUserPermissions = async (roleOrRoleId, companyId, db = null) => {
       // Company Management
       'VIEW_COMPANIES', 'MANAGE_COMPANIES', 'SWITCH_COMPANIES',
       // Projects
-      'VIEW_PROJECTS', 'MANAGE_PROJECTS'
+      'VIEW_PROJECTS', 'MANAGE_PROJECTS',
+      // Employee Management
+      'VIEW_EMPLOYEES', 'MANAGE_EMPLOYEES', 'DELETE_EMPLOYEES'
     ],
     'COMPANY_ADMIN': [
       // Customer Management
@@ -1987,7 +1990,9 @@ const getUserPermissions = async (roleOrRoleId, companyId, db = null) => {
       // Company Management (own company only)
       'VIEW_COMPANIES',
       // Projects
-      'VIEW_PROJECTS', 'MANAGE_PROJECTS'
+      'VIEW_PROJECTS', 'MANAGE_PROJECTS',
+      // Employee Management
+      'VIEW_EMPLOYEES', 'MANAGE_EMPLOYEES', 'DELETE_EMPLOYEES'
     ],
     'MANAGER': [
       // Customer Management
@@ -2037,7 +2042,9 @@ const getUserPermissions = async (roleOrRoleId, companyId, db = null) => {
       // User Management (view only)
       'VIEW_USERS', 'VIEW_ROLES',
       // Projects
-      'VIEW_PROJECTS'
+      'VIEW_PROJECTS',
+      // Employee Management
+      'VIEW_EMPLOYEES', 'MANAGE_EMPLOYEES'
     ],
     'SALES_STAFF': [
       // Customer Management
@@ -2062,7 +2069,9 @@ const getUserPermissions = async (roleOrRoleId, companyId, db = null) => {
       // System (view only)
       'VIEW_SETTINGS', 'VIEW_BRANCHES', 'VIEW_DASHBOARD',
       // Projects (view only)
-      'VIEW_PROJECTS'
+      'VIEW_PROJECTS',
+      // Employee Management (view only)
+      'VIEW_EMPLOYEES'
     ],
     'PURCHASE_STAFF': [
       // Supplier Management
@@ -2098,7 +2107,9 @@ const getUserPermissions = async (roleOrRoleId, companyId, db = null) => {
       // System (view only)
       'VIEW_SETTINGS', 'VIEW_BRANCHES', 'VIEW_DASHBOARD',
       // Projects (view only)
-      'VIEW_PROJECTS'
+      'VIEW_PROJECTS',
+      // Employee Management (view only)
+      'VIEW_EMPLOYEES'
     ],
     'ACCOUNTS_STAFF': [
       // Customer/Supplier (view only)
@@ -2131,7 +2142,9 @@ const getUserPermissions = async (roleOrRoleId, companyId, db = null) => {
       // System (view only)
       'VIEW_SETTINGS', 'VIEW_BRANCHES', 'VIEW_DASHBOARD',
       // Projects (view only)
-      'VIEW_PROJECTS'
+      'VIEW_PROJECTS',
+      // Employee Management (view only)
+      'VIEW_EMPLOYEES'
     ]
   };
 
