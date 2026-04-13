@@ -591,6 +591,18 @@ function hasPermission(userPermissions, requiredPermission) {
     return true;
   }
 
+  // Base-to-granular fallback:
+  // If route requires VIEW_X_ALL or VIEW_X_OWN, and user has VIEW_X (base), grant it.
+  // Similarly for CREATE_X_ALL, EDIT_X_ALL, DELETE_X_ALL.
+  // This bridges old JWT permissions (VIEW_COLLECTIONS) with new route guards (VIEW_COLLECTIONS_ALL).
+  if (requiredPermission.endsWith('_ALL') || requiredPermission.endsWith('_OWN') || requiredPermission.endsWith('_ASSIGNED')) {
+    // Strip the suffix to get the base permission
+    const basePerm = requiredPermission.replace(/_(ALL|OWN|ASSIGNED)$/, '');
+    if (userPermissions.includes(basePerm)) {
+      return true;
+    }
+  }
+
   // Hierarchical check: Does user have a parent permission that implies the required one?
   for (const userPerm of userPermissions) {
     const permissionNode = PERMISSION_TREE[userPerm];
