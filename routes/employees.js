@@ -26,6 +26,7 @@ const employeeSchema = Joi.object({
   employment_start_date: Joi.date().allow(null),
   designation: Joi.string().max(100).allow('', null).trim(),
   department: Joi.string().max(100).allow('', null).trim(),
+  employee_type: Joi.string().valid('driver', 'helper', 'operator', 'supervisor', 'mechanic', 'admin_staff', 'contract_worker', 'other').allow(null),
   status: Joi.string().valid('active', 'inactive', 'terminated').default('active')
 });
 
@@ -145,12 +146,13 @@ router.get('/expiry-alerts', requirePermission('VIEW_EMPLOYEES'), async (req, re
 router.get('/', requirePermission('VIEW_EMPLOYEES'), async (req, res) => {
   try {
     const db = getDbConnection(req.user.companyId);
-    const { status, search, department, page = 1, limit = 50 } = req.query;
+    const { status, search, department, employee_type, page = 1, limit = 50 } = req.query;
 
     let query = db('employees');
 
     if (status) query = query.where('status', status);
     if (department) query = query.where('department', department);
+    if (employee_type) query = query.where('employee_type', employee_type);
     if (search) {
       query = query.where(function () {
         this.where('full_name', 'like', `%${search}%`)
