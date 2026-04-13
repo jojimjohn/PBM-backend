@@ -469,6 +469,26 @@ const PERMISSIONS = {
     module: 'projects'
   },
 
+  // Employee Management
+  VIEW_EMPLOYEES: {
+    key: 'VIEW_EMPLOYEES',
+    label: 'View Employees',
+    description: 'View employee records and details',
+    module: 'employees'
+  },
+  MANAGE_EMPLOYEES: {
+    key: 'MANAGE_EMPLOYEES',
+    label: 'Manage Employees',
+    description: 'Create, edit employees and manage documents/assignments',
+    module: 'employees'
+  },
+  DELETE_EMPLOYEES: {
+    key: 'DELETE_EMPLOYEES',
+    label: 'Delete Employees',
+    description: 'Deactivate employee records',
+    module: 'employees'
+  },
+
   // Branch Management
   VIEW_BRANCHES: {
     key: 'VIEW_BRANCHES',
@@ -803,6 +823,12 @@ const MODULES = {
     label: 'Projects',
     icon: 'folder',
     order: 16
+  },
+  employees: {
+    key: 'employees',
+    label: 'Employees',
+    icon: 'user-check',
+    order: 17
   }
 };
 
