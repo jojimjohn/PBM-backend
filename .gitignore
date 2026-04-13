@@ -32,6 +32,7 @@ migrations/
 
 # Scripts
 scripts/
+sql/
 
 # Seeds
 seeds/
