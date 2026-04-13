@@ -11,9 +11,9 @@ const router = express.Router();
 router.use(sanitize);
 
 // GET /api/supplier-contracts/:supplierId/rates - Get active contract rates for supplier
-router.get('/:supplierId/rates', 
+router.get('/:supplierId/rates',
   validateParams(Joi.object({ supplierId: Joi.number().integer().positive().required() })),
-  requirePermission('VIEW_PURCHASE'),
+  requirePermission('VIEW_SUPPLIER_CONTRACTS'),
   async (req, res) => {
     try {
       const { supplierId } = req.params;
@@ -136,11 +136,11 @@ router.get('/:supplierId/rates',
 
 // GET /api/supplier-contracts/:supplierId/materials/:materialId/rate - Get specific material rate
 router.get('/:supplierId/materials/:materialId/rate',
-  validateParams(Joi.object({ 
+  validateParams(Joi.object({
     supplierId: Joi.number().integer().positive().required(),
     materialId: Joi.number().integer().positive().required()
   })),
-  requirePermission('VIEW_PURCHASE'),
+  requirePermission('VIEW_SUPPLIER_CONTRACTS'),
   async (req, res) => {
     try {
       const { supplierId, materialId } = req.params;

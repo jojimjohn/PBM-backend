@@ -1,6 +1,7 @@
 const { verifyToken } = require('../utils/jwt');
 const { logger, auditLog } = require('../utils/logger');
 const tokenBlacklist = require('../utils/tokenBlacklist');
+const { hasPermission, hasAnyPermission, hasAllPermissions } = require('../config/permissionsHierarchy');
 
 /**
  * Authentication middleware
@@ -149,7 +150,7 @@ const requireRole = (allowedRoles) => {
   };
 };
 
-// Permission-based authorization middleware
+// Permission-based authorization middleware with hierarchical checking
 const requirePermission = (requiredPermission) => {
   return (req, res, next) => {
     if (!req.user) {
@@ -160,9 +161,9 @@ const requirePermission = (requiredPermission) => {
     }
 
     const userPermissions = req.user.permissions || [];
-    
-    
-    if (!userPermissions.includes(requiredPermission)) {
+
+    // Use hierarchical permission checking - parent permissions grant child permissions
+    if (!hasPermission(userPermissions, requiredPermission)) {
       auditLog('PERMISSION_DENIED', req.user.userId, {
         requiredPermission,
         userPermissions,
@@ -181,7 +182,7 @@ const requirePermission = (requiredPermission) => {
 };
 
 /**
- * Require any of the specified permissions
+ * Require any of the specified permissions (hierarchical checking)
  * @param {string[]} permissions - Array of permission strings (user needs at least ONE)
  */
 const requireAnyPermission = (permissions) => {
@@ -195,10 +196,8 @@ const requireAnyPermission = (permissions) => {
 
     const userPermissions = req.user.permissions || [];
 
-    // Check if user has ANY of the required permissions
-    const hasPermission = permissions.some(p => userPermissions.includes(p));
-
-    if (!hasPermission) {
+    // Use hierarchical checking - checks if user has ANY of the required permissions
+    if (!hasAnyPermission(userPermissions, permissions)) {
       auditLog('PERMISSION_DENIED', req.user.userId, {
         requiredPermissions: permissions,
         userPermissions,
@@ -209,6 +208,40 @@ const requireAnyPermission = (permissions) => {
       return res.status(403).json({
         success: false,
         error: `One of these permissions is required: ${permissions.join(', ')}`
+      });
+    }
+
+    next();
+  };
+};
+
+/**
+ * Require all of the specified permissions (hierarchical checking)
+ * @param {string[]} permissions - Array of permission strings (user needs ALL)
+ */
+const requireAllPermissions = (permissions) => {
+  return (req, res, next) => {
+    if (!req.user) {
+      return res.status(401).json({
+        success: false,
+        error: 'Authentication required'
+      });
+    }
+
+    const userPermissions = req.user.permissions || [];
+
+    // Use hierarchical checking - checks if user has ALL of the required permissions
+    if (!hasAllPermissions(userPermissions, permissions)) {
+      auditLog('PERMISSION_DENIED', req.user.userId, {
+        requiredPermissions: permissions,
+        userPermissions,
+        endpoint: req.originalUrl,
+        ip: req.ip
+      });
+
+      return res.status(403).json({
+        success: false,
+        error: `All of these permissions are required: ${permissions.join(', ')}`
       });
     }
 
@@ -271,6 +304,7 @@ module.exports = {
   requireRole,
   requirePermission,
   requireAnyPermission,
+  requireAllPermissions,
   requireCompanyAccess,
   authRateLimit
 };

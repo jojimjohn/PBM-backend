@@ -1,13 +1,42 @@
 const express = require('express');
 const router = express.Router();
 const { getDbConnection } = require('../config/database');
-const { requirePermission } = require('../middleware/auth');
+const { requirePermission, requireAnyPermission } = require('../middleware/auth');
 const { validate, validateParams } = require('../middleware/validation');
 const { uploadMultipleToS3, requireFiles } = require('../middleware/upload');
 const storageService = require('../services/storageService');
 const { bankTransactionAttachments } = require('../repositories/AttachmentRepository');
 const Joi = require('joi');
 const { logger, auditLog } = require('../utils/logger');
+
+// Helper function to check bank transaction ownership
+const checkBankTransactionOwnership = (transaction, userId, permissions, permissionType = 'EDIT') => {
+  const { hasPermission } = require('../config/permissionsHierarchy');
+
+  // Check if user has permission for ALL bank transactions
+  const allPermission = `${permissionType}_BANK_TRANSACTIONS_ALL`;
+  if (hasPermission(permissions, allPermission)) {
+    return true;
+  }
+
+  // Check if user has permission for OWN bank transactions and owns this transaction
+  const ownPermission = `${permissionType}_BANK_TRANSACTIONS_OWN`;
+  if (hasPermission(permissions, ownPermission)) {
+    return transaction.created_by === userId;
+  }
+
+  return false;
+};
+
+// Enhanced audit logging helper
+const auditPermissionDenial = (action, userId, details) => {
+  logger.warn('RBAC Audit Log', {
+    action,
+    userId,
+    timestamp: new Date().toISOString(),
+    ...details
+  });
+};
 
 // Validation schemas
 const bankTransactionSchema = Joi.object({
@@ -90,39 +119,51 @@ const isCreditTransaction = (type) => {
 };
 
 // GET /api/bank-transactions - List all transactions
-router.get('/', requirePermission('VIEW_SETTINGS'), async (req, res) => {
-  try {
-    const { companyId } = req.user;
-    const db = getDbConnection(companyId);
+router.get('/',
+  requireAnyPermission(['VIEW_BANK_TRANSACTIONS_ALL', 'VIEW_BANK_TRANSACTIONS_OWN']),
+  async (req, res) => {
+    try {
+      const { companyId, userId, permissions } = req.user;
+      const db = getDbConnection(companyId);
+      const { hasPermission } = require('../config/permissionsHierarchy');
 
-    const {
-      page = 1,
-      limit = 50,
-      account_id,
-      transaction_type,
-      category,
-      reconciled,
-      start_date,
-      end_date,
-      reference_type,
-      search
-    } = req.query;
+      const {
+        page = 1,
+        limit = 50,
+        account_id,
+        transaction_type,
+        category,
+        reconciled,
+        start_date,
+        end_date,
+        reference_type,
+        search
+      } = req.query;
 
-    const offset = (page - 1) * limit;
+      const offset = (page - 1) * limit;
 
-    let query = db('bank_transactions')
-      .leftJoin('bank_accounts', 'bank_transactions.account_id', 'bank_accounts.id')
-      .leftJoin('users as created_users', 'bank_transactions.created_by', 'created_users.id')
-      .select(
-        'bank_transactions.*',
-        'bank_accounts.account_number',
-        'bank_accounts.account_name',
-        'bank_accounts.bank_name',
-        db.raw('CONCAT(created_users.firstName, " ", created_users.lastName) as created_by_name')
-      )
-      .where('bank_accounts.company_id', companyId)
-      .orderBy('bank_transactions.transaction_date', 'desc')
-      .orderBy('bank_transactions.created_at', 'desc');
+      let query = db('bank_transactions')
+        .leftJoin('bank_accounts', 'bank_transactions.account_id', 'bank_accounts.id')
+        .leftJoin('users as created_users', 'bank_transactions.created_by', 'created_users.id')
+        .select(
+          'bank_transactions.*',
+          'bank_accounts.account_number',
+          'bank_accounts.account_name',
+          'bank_accounts.bank_name',
+          db.raw('CONCAT(created_users.firstName, " ", created_users.lastName) as created_by_name')
+        )
+        .where('bank_accounts.company_id', companyId)
+        .orderBy('bank_transactions.transaction_date', 'desc')
+        .orderBy('bank_transactions.created_at', 'desc');
+
+      // Apply ownership filtering if user only has VIEW_BANK_TRANSACTIONS_OWN permission
+      if (!hasPermission(permissions, 'VIEW_BANK_TRANSACTIONS_ALL')) {
+        query = query.where('bank_transactions.created_by', userId);
+        logger.info('Filtering bank transactions to user\'s own records', {
+          userId,
+          companyId
+        });
+      }
 
     // Apply filters
     if (account_id) {
@@ -224,7 +265,9 @@ router.get('/', requirePermission('VIEW_SETTINGS'), async (req, res) => {
 });
 
 // GET /api/bank-transactions/categories - Get transaction categories
-router.get('/categories', requirePermission('VIEW_SETTINGS'), async (req, res) => {
+router.get('/categories',
+  requireAnyPermission(['VIEW_BANK_TRANSACTIONS_ALL', 'VIEW_BANK_TRANSACTIONS_OWN']),
+  async (req, res) => {
   try {
     // Predefined categories for bank transactions
     const categories = [
@@ -260,10 +303,10 @@ router.get('/categories', requirePermission('VIEW_SETTINGS'), async (req, res) =
 // GET /api/bank-transactions/:id - Get specific transaction
 router.get('/:id',
   validateParams(Joi.object({ id: Joi.number().integer().positive().required() })),
-  requirePermission('VIEW_SETTINGS'),
+  requireAnyPermission(['VIEW_BANK_TRANSACTIONS_ALL', 'VIEW_BANK_TRANSACTIONS_OWN']),
   async (req, res) => {
     try {
-      const { companyId } = req.user;
+      const { companyId, userId, permissions } = req.user;
       const { id } = req.params;
       const db = getDbConnection(companyId);
 
@@ -287,6 +330,22 @@ router.get('/:id',
         return res.status(404).json({
           success: false,
           error: 'Transaction not found'
+        });
+      }
+
+      // Check ownership
+      if (!checkBankTransactionOwnership(transaction, userId, permissions, 'VIEW')) {
+        auditPermissionDenial('PERMISSION_DENIED', userId, {
+          action: 'VIEW_BANK_TRANSACTION',
+          reason: 'Attempted to view another user\'s bank transaction',
+          transactionId: id,
+          transactionCreatedBy: transaction.created_by,
+          requestedBy: userId
+        });
+
+        return res.status(403).json({
+          success: false,
+          error: 'You can only view your own bank transactions'
         });
       }
 
@@ -337,7 +396,7 @@ router.get('/:id',
 // POST /api/bank-transactions - Create new transaction
 router.post('/',
   validate(bankTransactionSchema),
-  requirePermission('MANAGE_SETTINGS'),
+  requirePermission('CREATE_BANK_TRANSACTIONS'),
   async (req, res) => {
     try {
       const { companyId, userId } = req.user;
@@ -424,7 +483,7 @@ router.post('/',
 // POST /api/bank-transactions/link-payment - Create transaction linked to PO/SO/PettyCash
 router.post('/link-payment',
   validate(linkPaymentSchema),
-  requirePermission('MANAGE_SETTINGS'),
+  requirePermission('CREATE_BANK_TRANSACTIONS'),
   async (req, res) => {
     try {
       const { companyId, userId } = req.user;
@@ -596,16 +655,17 @@ router.post('/link-payment',
 router.put('/:id',
   validateParams(Joi.object({ id: Joi.number().integer().positive().required() })),
   validate(updateTransactionSchema),
-  requirePermission('MANAGE_SETTINGS'),
+  requireAnyPermission(['EDIT_BANK_TRANSACTIONS_ALL', 'EDIT_BANK_TRANSACTIONS_OWN']),
   async (req, res) => {
     try {
-      const { companyId, userId } = req.user;
+      const { companyId, userId, permissions } = req.user;
       const { id } = req.params;
       const db = getDbConnection(companyId);
 
       // Get existing transaction
       const existingTransaction = await db('bank_transactions')
         .leftJoin('bank_accounts', 'bank_transactions.account_id', 'bank_accounts.id')
+        .select('bank_transactions.*')
         .where('bank_transactions.id', id)
         .where('bank_accounts.company_id', companyId)
         .first();
@@ -621,6 +681,22 @@ router.put('/:id',
         return res.status(400).json({
           success: false,
           error: 'Cannot edit a reconciled transaction'
+        });
+      }
+
+      // Check ownership
+      if (!checkBankTransactionOwnership(existingTransaction, userId, permissions, 'EDIT')) {
+        auditPermissionDenial('PERMISSION_DENIED', userId, {
+          action: 'EDIT_BANK_TRANSACTION',
+          reason: 'Attempted to edit another user\'s bank transaction',
+          transactionId: id,
+          transactionCreatedBy: existingTransaction.created_by,
+          requestedBy: userId
+        });
+
+        return res.status(403).json({
+          success: false,
+          error: 'You can only edit your own bank transactions'
         });
       }
 
@@ -701,7 +777,7 @@ router.put('/:id',
 // POST /api/bank-transactions/reconcile - Mark transactions as reconciled
 router.post('/reconcile',
   validate(reconcileSchema),
-  requirePermission('MANAGE_SETTINGS'),
+  requirePermission('RECONCILE_BANK_TRANSACTIONS'),
   async (req, res) => {
     try {
       const { companyId, userId } = req.user;
@@ -769,10 +845,10 @@ router.post('/reconcile',
 // DELETE /api/bank-transactions/:id - Delete transaction (only unreconciled)
 router.delete('/:id',
   validateParams(Joi.object({ id: Joi.number().integer().positive().required() })),
-  requirePermission('MANAGE_SETTINGS'),
+  requireAnyPermission(['DELETE_BANK_TRANSACTIONS_ALL', 'DELETE_BANK_TRANSACTIONS_OWN']),
   async (req, res) => {
     try {
-      const { companyId, userId } = req.user;
+      const { companyId, userId, permissions } = req.user;
       const { id } = req.params;
       const db = getDbConnection(companyId);
 
@@ -795,6 +871,22 @@ router.delete('/:id',
         return res.status(400).json({
           success: false,
           error: 'Cannot delete a reconciled transaction'
+        });
+      }
+
+      // Check ownership
+      if (!checkBankTransactionOwnership(transaction, userId, permissions, 'DELETE')) {
+        auditPermissionDenial('PERMISSION_DENIED', userId, {
+          action: 'DELETE_BANK_TRANSACTION',
+          reason: 'Attempted to delete another user\'s bank transaction',
+          transactionId: id,
+          transactionCreatedBy: transaction.created_by,
+          requestedBy: userId
+        });
+
+        return res.status(403).json({
+          success: false,
+          error: 'You can only delete your own bank transactions'
         });
       }
 

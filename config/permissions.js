@@ -344,6 +344,12 @@ const PERMISSIONS = {
     description: 'View detailed expense reports',
     module: 'petty_cash'
   },
+  VIEW_EXPENSE_CATEGORIES: {
+    key: 'VIEW_EXPENSE_CATEGORIES',
+    label: 'View Expense Categories',
+    description: 'View expense category list',
+    module: 'finance'
+  },
 
   // Invoice Management
   CREATE_INVOICES: {
@@ -424,10 +430,28 @@ const PERMISSIONS = {
     description: 'Configure system settings',
     module: 'system'
   },
+  VIEW_SETTINGS: {
+    key: 'VIEW_SETTINGS',
+    label: 'View Settings',
+    description: 'View system settings',
+    module: 'system'
+  },
   VIEW_AUDIT_LOGS: {
     key: 'VIEW_AUDIT_LOGS',
     label: 'View Audit Logs',
     description: 'Access system audit trail',
+    module: 'system'
+  },
+  MANAGE_BACKUPS: {
+    key: 'MANAGE_BACKUPS',
+    label: 'Manage Backups',
+    description: 'Create, restore, and manage database backups',
+    module: 'system'
+  },
+  VIEW_DASHBOARD: {
+    key: 'VIEW_DASHBOARD',
+    label: 'View Dashboard',
+    description: 'Access dashboard and workflow status',
     module: 'system'
   },
 
@@ -443,6 +467,242 @@ const PERMISSIONS = {
     label: 'Manage Projects',
     description: 'Create, edit, and manage projects',
     module: 'projects'
+  },
+
+  // Branch Management
+  VIEW_BRANCHES: {
+    key: 'VIEW_BRANCHES',
+    label: 'View Branches',
+    description: 'View company branches',
+    module: 'system'
+  },
+
+  // Bank Account Management
+  VIEW_BANK_ACCOUNTS: {
+    key: 'VIEW_BANK_ACCOUNTS',
+    label: 'View Bank Accounts',
+    description: 'View company bank accounts',
+    module: 'finance'
+  },
+  CREATE_BANK_ACCOUNTS: {
+    key: 'CREATE_BANK_ACCOUNTS',
+    label: 'Create Bank Accounts',
+    description: 'Add new bank accounts',
+    module: 'finance'
+  },
+  EDIT_BANK_ACCOUNTS: {
+    key: 'EDIT_BANK_ACCOUNTS',
+    label: 'Edit Bank Accounts',
+    description: 'Modify bank account details',
+    module: 'finance'
+  },
+  DELETE_BANK_ACCOUNTS: {
+    key: 'DELETE_BANK_ACCOUNTS',
+    label: 'Delete Bank Accounts',
+    description: 'Remove bank accounts',
+    module: 'finance'
+  },
+
+  // Contract Location Management
+  VIEW_CONTRACT_LOCATIONS: {
+    key: 'VIEW_CONTRACT_LOCATIONS',
+    label: 'View Contract Locations',
+    description: 'View contract collection locations',
+    module: 'contracts'
+  },
+  CREATE_CONTRACT_LOCATIONS: {
+    key: 'CREATE_CONTRACT_LOCATIONS',
+    label: 'Create Contract Locations',
+    description: 'Add new contract locations',
+    module: 'contracts'
+  },
+  EDIT_CONTRACT_LOCATIONS: {
+    key: 'EDIT_CONTRACT_LOCATIONS',
+    label: 'Edit Contract Locations',
+    description: 'Modify contract locations',
+    module: 'contracts'
+  },
+  MANAGE_CONTRACT_LOCATION_RATES: {
+    key: 'MANAGE_CONTRACT_LOCATION_RATES',
+    label: 'Manage Contract Location Rates',
+    description: 'Update material rates for contract locations',
+    module: 'contracts'
+  },
+  VIEW_CONTRACT_LOCATION_RATES: {
+    key: 'VIEW_CONTRACT_LOCATION_RATES',
+    label: 'View Contract Location Rates',
+    description: 'View material rates for contract locations',
+    module: 'contracts'
+  },
+
+  // Supplier Location Management
+  VIEW_SUPPLIER_LOCATIONS: {
+    key: 'VIEW_SUPPLIER_LOCATIONS',
+    label: 'View Supplier Locations',
+    description: 'View supplier addresses',
+    module: 'suppliers'
+  },
+  CREATE_SUPPLIER_LOCATIONS: {
+    key: 'CREATE_SUPPLIER_LOCATIONS',
+    label: 'Create Supplier Locations',
+    description: 'Add new supplier locations',
+    module: 'suppliers'
+  },
+  EDIT_SUPPLIER_LOCATIONS: {
+    key: 'EDIT_SUPPLIER_LOCATIONS',
+    label: 'Edit Supplier Locations',
+    description: 'Modify supplier locations',
+    module: 'suppliers'
+  },
+  DELETE_SUPPLIER_LOCATIONS: {
+    key: 'DELETE_SUPPLIER_LOCATIONS',
+    label: 'Delete Supplier Locations',
+    description: 'Remove supplier locations',
+    module: 'suppliers'
+  },
+
+  // Material Composition Management
+  VIEW_MATERIAL_COMPOSITIONS: {
+    key: 'VIEW_MATERIAL_COMPOSITIONS',
+    label: 'View Material Compositions',
+    description: 'View composite material breakdowns',
+    module: 'inventory'
+  },
+  CREATE_MATERIAL_COMPOSITIONS: {
+    key: 'CREATE_MATERIAL_COMPOSITIONS',
+    label: 'Create Material Compositions',
+    description: 'Define new composite materials',
+    module: 'inventory'
+  },
+  EDIT_MATERIAL_COMPOSITIONS: {
+    key: 'EDIT_MATERIAL_COMPOSITIONS',
+    label: 'Edit Material Compositions',
+    description: 'Modify composite material definitions',
+    module: 'inventory'
+  },
+  DELETE_MATERIAL_COMPOSITIONS: {
+    key: 'DELETE_MATERIAL_COMPOSITIONS',
+    label: 'Delete Material Compositions',
+    description: 'Remove composite material definitions',
+    module: 'inventory'
+  },
+
+  // Inventory Batch Management
+  VIEW_INVENTORY_BATCHES: {
+    key: 'VIEW_INVENTORY_BATCHES',
+    label: 'View Inventory Batches',
+    description: 'View inventory batch tracking records',
+    module: 'inventory'
+  },
+  MANAGE_INVENTORY_BATCHES: {
+    key: 'MANAGE_INVENTORY_BATCHES',
+    label: 'Manage Inventory Batches',
+    description: 'Create and manage inventory batches',
+    module: 'inventory'
+  },
+
+  // Supplier Contract Management
+  VIEW_SUPPLIER_CONTRACTS: {
+    key: 'VIEW_SUPPLIER_CONTRACTS',
+    label: 'View Supplier Contracts',
+    description: 'View supplier contract rates',
+    module: 'suppliers'
+  },
+
+  // Customer & Supplier Type Management
+  VIEW_CUSTOMER_TYPES: {
+    key: 'VIEW_CUSTOMER_TYPES',
+    label: 'View Customer Types',
+    description: 'View customer type categories',
+    module: 'customers'
+  },
+  VIEW_SUPPLIER_TYPES: {
+    key: 'VIEW_SUPPLIER_TYPES',
+    label: 'View Supplier Types',
+    description: 'View supplier type categories',
+    module: 'suppliers'
+  },
+
+  // Purchase Order Expense Management (Ownership-Scoped)
+  VIEW_PO_EXPENSES_ALL: {
+    key: 'VIEW_PO_EXPENSES_ALL',
+    label: 'View All PO Expenses',
+    description: 'View all purchase order expenses',
+    module: 'purchase'
+  },
+  VIEW_PO_EXPENSES_OWN: {
+    key: 'VIEW_PO_EXPENSES_OWN',
+    label: 'View Own PO Expenses',
+    description: 'View only own purchase order expenses',
+    module: 'purchase'
+  },
+  CREATE_PO_EXPENSES: {
+    key: 'CREATE_PO_EXPENSES',
+    label: 'Create PO Expenses',
+    description: 'Add expenses to purchase orders',
+    module: 'purchase'
+  },
+  EDIT_PO_EXPENSES_ALL: {
+    key: 'EDIT_PO_EXPENSES_ALL',
+    label: 'Edit All PO Expenses',
+    description: 'Edit any purchase order expense',
+    module: 'purchase'
+  },
+  EDIT_PO_EXPENSES_OWN: {
+    key: 'EDIT_PO_EXPENSES_OWN',
+    label: 'Edit Own PO Expenses',
+    description: 'Edit only own purchase order expenses',
+    module: 'purchase'
+  },
+  DELETE_PO_EXPENSES_ALL: {
+    key: 'DELETE_PO_EXPENSES_ALL',
+    label: 'Delete All PO Expenses',
+    description: 'Delete any purchase order expense',
+    module: 'purchase'
+  },
+  DELETE_PO_EXPENSES_OWN: {
+    key: 'DELETE_PO_EXPENSES_OWN',
+    label: 'Delete Own PO Expenses',
+    description: 'Delete only own purchase order expenses',
+    module: 'purchase'
+  },
+
+  // Purchase Order Amendment Management (Ownership-Scoped)
+  VIEW_AMENDMENTS_ALL: {
+    key: 'VIEW_AMENDMENTS_ALL',
+    label: 'View All Amendments',
+    description: 'View all purchase order amendments',
+    module: 'purchase'
+  },
+  VIEW_AMENDMENTS_OWN: {
+    key: 'VIEW_AMENDMENTS_OWN',
+    label: 'View Own Amendments',
+    description: 'View only own purchase order amendments',
+    module: 'purchase'
+  },
+  CREATE_AMENDMENTS: {
+    key: 'CREATE_AMENDMENTS',
+    label: 'Create Amendments',
+    description: 'Create purchase order amendments',
+    module: 'purchase'
+  },
+  EDIT_AMENDMENTS_ALL: {
+    key: 'EDIT_AMENDMENTS_ALL',
+    label: 'Edit All Amendments',
+    description: 'Edit any purchase order amendment',
+    module: 'purchase'
+  },
+  EDIT_AMENDMENTS_OWN: {
+    key: 'EDIT_AMENDMENTS_OWN',
+    label: 'Edit Own Amendments',
+    description: 'Edit only own purchase order amendments',
+    module: 'purchase'
+  },
+  APPROVE_AMENDMENTS: {
+    key: 'APPROVE_AMENDMENTS',
+    label: 'Approve Amendments',
+    description: 'Approve purchase order amendments',
+    module: 'purchase'
   }
 };
 

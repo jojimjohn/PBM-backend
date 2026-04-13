@@ -28,7 +28,7 @@ const updateBankAccountSchema = bankAccountSchema.fork(
 ).options({ stripUnknown: true });
 
 // GET /api/bank-accounts - List all bank accounts
-router.get('/', requirePermission('VIEW_SETTINGS'), async (req, res) => {
+router.get('/', requirePermission('VIEW_BANK_ACCOUNTS'), async (req, res) => {
   try {
     const { companyId } = req.user;
     const db = getDbConnection(companyId);
@@ -125,7 +125,7 @@ router.get('/', requirePermission('VIEW_SETTINGS'), async (req, res) => {
 // GET /api/bank-accounts/:id - Get specific bank account with recent transactions
 router.get('/:id',
   validateParams(Joi.object({ id: Joi.number().integer().positive().required() })),
-  requirePermission('VIEW_SETTINGS'),
+  requirePermission('VIEW_BANK_ACCOUNTS'),
   async (req, res) => {
     try {
       const { companyId } = req.user;
@@ -207,7 +207,7 @@ router.get('/:id',
 // POST /api/bank-accounts - Create new bank account
 router.post('/',
   validate(bankAccountSchema),
-  requirePermission('MANAGE_SETTINGS'),
+  requirePermission('CREATE_BANK_ACCOUNTS'),
   async (req, res) => {
     try {
       const { companyId, userId } = req.user;
@@ -283,7 +283,7 @@ router.post('/',
 router.put('/:id',
   validateParams(Joi.object({ id: Joi.number().integer().positive().required() })),
   validate(updateBankAccountSchema),
-  requirePermission('MANAGE_SETTINGS'),
+  requirePermission('EDIT_BANK_ACCOUNTS'),
   async (req, res) => {
     try {
       const { companyId, userId } = req.user;
@@ -381,7 +381,7 @@ router.put('/:id',
 router.patch('/:id/status',
   validateParams(Joi.object({ id: Joi.number().integer().positive().required() })),
   validate(Joi.object({ is_active: Joi.boolean().required() })),
-  requirePermission('MANAGE_SETTINGS'),
+  requirePermission('EDIT_BANK_ACCOUNTS'),
   async (req, res) => {
     try {
       const { companyId, userId } = req.user;
@@ -439,7 +439,7 @@ router.patch('/:id/status',
 // DELETE /api/bank-accounts/:id - Delete bank account
 router.delete('/:id',
   validateParams(Joi.object({ id: Joi.number().integer().positive().required() })),
-  requirePermission('MANAGE_SETTINGS'),
+  requirePermission('DELETE_BANK_ACCOUNTS'),
   async (req, res) => {
     try {
       const { companyId, userId } = req.user;
@@ -533,7 +533,7 @@ router.delete('/:id',
 // GET /api/bank-accounts/:id/balance-history - Get balance history for charting
 router.get('/:id/balance-history',
   validateParams(Joi.object({ id: Joi.number().integer().positive().required() })),
-  requirePermission('VIEW_SETTINGS'),
+  requirePermission('VIEW_BANK_ACCOUNTS'),
   async (req, res) => {
     try {
       const { companyId } = req.user;

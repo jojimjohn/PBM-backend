@@ -1,7 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const { getDbConnection } = require('../config/database');
-const { requirePermission, requireAnyPermission } = require('../middleware/auth');
+const { requirePermission } = require('../middleware/auth');
 const { validate, validateParams } = require('../middleware/validation');
 const Joi = require('joi');
 const { logger, auditLog } = require('../utils/logger');
@@ -27,8 +27,7 @@ const updateBranchSchema = branchSchema.fork(
 ).options({ stripUnknown: true });
 
 // GET /api/branches - List all branches
-// Allow access for: settings viewers, sales users, or purchase users (need branches for order forms)
-router.get('/', requireAnyPermission(['VIEW_SETTINGS', 'VIEW_SALES', 'VIEW_PURCHASE', 'CREATE_SALES', 'CREATE_PURCHASE']), async (req, res) => {
+router.get('/', requirePermission('VIEW_BRANCHES'), async (req, res) => {
   try {
     const { companyId } = req.user;
     const db = getDbConnection(companyId);
@@ -107,7 +106,7 @@ router.get('/', requireAnyPermission(['VIEW_SETTINGS', 'VIEW_SALES', 'VIEW_PURCH
 // GET /api/branches/:id - Get specific branch
 router.get('/:id',
   validateParams(Joi.object({ id: Joi.number().integer().positive().required() })),
-  requireAnyPermission(['VIEW_SETTINGS', 'VIEW_SALES', 'VIEW_PURCHASE', 'CREATE_SALES', 'CREATE_PURCHASE']),
+  requirePermission('VIEW_BRANCHES'),
   async (req, res) => {
     try {
       const { companyId } = req.user;

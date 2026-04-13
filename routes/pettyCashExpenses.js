@@ -1,7 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const { getDbConnection } = require('../config/database');
-const { requirePermission } = require('../middleware/auth');
+const { requirePermission, requireAnyPermission } = require('../middleware/auth');
 const { validate } = require('../middleware/validation');
 const { getRepositoryFactory } = require('../repositories/RepositoryFactory');
 const Joi = require('joi');
@@ -117,11 +117,39 @@ async function isValidExpenseCategory(db, categoryCode) {
   return expenseCategoryIds.some(id => id.toLowerCase() === normalizedCode);
 }
 
+/**
+ * Check if user has permission to access a petty cash expense
+ * @param {object} expense - The expense object (must have 'submittedBy' field)
+ * @param {number} userId - The requesting user's ID
+ * @param {array} permissions - The user's permissions array
+ * @param {string} permissionType - Type of permission ('EDIT', 'DELETE', 'VIEW')
+ * @returns {boolean} - True if user has access, false otherwise
+ */
+const checkExpenseOwnership = (expense, userId, permissions, permissionType = 'EDIT') => {
+  const { hasPermission } = require('../config/permissionsHierarchy');
+
+  // If user has the _ALL variant, they can access any expense
+  const allPermission = `${permissionType}_PETTY_CASH_EXPENSE_ALL`;
+  if (hasPermission(permissions, allPermission)) {
+    return true;
+  }
+
+  // If user has the _OWN variant, check ownership
+  const ownPermission = `${permissionType}_PETTY_CASH_EXPENSE_OWN`;
+  if (hasPermission(permissions, ownPermission)) {
+    return expense.submittedBy === userId;
+  }
+
+  return false;
+};
+
 // GET /petty-cash-expenses - List all expenses with filtering
-router.get('/', requirePermission('VIEW_EXPENSE_REPORTS'), async (req, res) => {
+router.get('/', requireAnyPermission(['VIEW_PETTY_CASH_EXPENSE_ALL', 'VIEW_PETTY_CASH_EXPENSE_OWN']), async (req, res) => {
   try {
-    const db = getDbConnection(req.user.companyId);
-    
+    const { companyId, userId, permissions } = req.user;
+    const db = getDbConnection(companyId);
+    const { hasPermission } = require('../config/permissionsHierarchy');
+
     const {
       page = 1,
       limit = 50,
@@ -133,9 +161,9 @@ router.get('/', requirePermission('VIEW_EXPENSE_REPORTS'), async (req, res) => {
       dateTo,
       search
     } = req.query;
-    
+
     const offset = (page - 1) * limit;
-    
+
     let query = db('petty_cash_expenses')
       .select(
         'petty_cash_expenses.*',
@@ -150,11 +178,10 @@ router.get('/', requirePermission('VIEW_EXPENSE_REPORTS'), async (req, res) => {
       .leftJoin('users as submittedUser', 'petty_cash_expenses.submittedBy', 'submittedUser.id')
       .leftJoin('users as approvedUser', 'petty_cash_expenses.approvedBy', 'approvedUser.id')
       .orderBy('petty_cash_expenses.created_at', 'desc');
-    
-    // Apply user-specific filters based on role
-    if (!req.user.permissions.includes('VIEW_EXPENSE_REPORTS')) {
-      // Non-admin users can only see their own expenses
-      query = query.where('petty_cash_expenses.submittedBy', req.user.userId);
+
+    // Apply ownership filtering if user only has VIEW_PETTY_CASH_EXPENSE_OWN permission
+    if (!hasPermission(permissions, 'VIEW_PETTY_CASH_EXPENSE_ALL')) {
+      query = query.where('petty_cash_expenses.submittedBy', userId);
     }
     
     // Apply filters
@@ -231,7 +258,7 @@ router.get('/', requirePermission('VIEW_EXPENSE_REPORTS'), async (req, res) => {
 });
 
 // GET /petty-cash-expenses/categories - Get expense categories (from database)
-router.get('/categories', requirePermission('VIEW_EXPENSE_REPORTS'), async (req, res) => {
+router.get('/categories', requireAnyPermission(['VIEW_PETTY_CASH_EXPENSE_ALL', 'VIEW_PETTY_CASH_EXPENSE_OWN']), async (req, res) => {
   try {
     const repositoryFactory = getRepositoryFactory(req.user.companyId);
     const categoryRepository = repositoryFactory.getExpenseCategoriesRepository();
@@ -333,7 +360,7 @@ router.get('/pending-reimbursements', requirePermission('VIEW_PETTY_CASH'), asyn
 
 // POST /petty-cash-expenses - Create new expense
 router.post('/',
-  requirePermission('CREATE_EXPENSE'),
+  requireAnyPermission(['CREATE_PETTY_CASH_EXPENSE_ALL', 'CREATE_PETTY_CASH_EXPENSE_OWN']),
   validate(expenseSchema),
   async (req, res) => {
     try {
@@ -619,13 +646,15 @@ router.post('/',
 
 // PUT /petty-cash-expenses/:id - Update expense (only if pending)
 router.put('/:id',
-  requirePermission('CREATE_EXPENSE'),
+  requireAnyPermission(['EDIT_PETTY_CASH_EXPENSE_ALL', 'EDIT_PETTY_CASH_EXPENSE_OWN']),
   validate(updateExpenseSchema),
   async (req, res) => {
     try {
-      const db = getDbConnection(req.user.companyId);
+      const { companyId, userId, permissions } = req.user;
+      const db = getDbConnection(companyId);
       const { id } = req.params;
       const updateData = req.body;
+      const { auditLog } = require('../utils/logger');
 
       // Check if expense exists and is pending
       const existingExpense = await db('petty_cash_expenses')
@@ -648,8 +677,15 @@ router.put('/:id',
         });
       }
 
-      // Check permission to update
-      if (existingExpense.submittedBy !== req.user.userId && !req.user.permissions.includes('MANAGE_EXPENSES')) {
+      // Check ownership permission
+      if (!checkExpenseOwnership(existingExpense, userId, permissions, 'EDIT')) {
+        auditLog('PERMISSION_DENIED', userId, {
+          reason: 'Attempted to edit another user\'s petty cash expense',
+          expenseId: id,
+          expenseSubmittedBy: existingExpense.submittedBy,
+          requestedBy: userId
+        });
+
         return res.status(403).json({
           success: false,
           error: 'You can only update your own expenses'
@@ -1094,30 +1130,39 @@ router.post('/:id/reimburse',
 );
 
 // DELETE /petty-cash-expenses/:id - Delete expense (only if pending)
-router.delete('/:id', requirePermission('CREATE_EXPENSE'), async (req, res) => {
+router.delete('/:id', requireAnyPermission(['DELETE_PETTY_CASH_EXPENSE_ALL', 'DELETE_PETTY_CASH_EXPENSE_OWN']), async (req, res) => {
   try {
-    const db = getDbConnection(req.user.companyId);
+    const { companyId, userId, permissions } = req.user;
+    const db = getDbConnection(companyId);
     const { id } = req.params;
-    
+    const { auditLog } = require('../utils/logger');
+
     // Check if expense exists and is pending
     const existingExpense = await db('petty_cash_expenses').where('id', id).first();
-    
+
     if (!existingExpense) {
       return res.status(404).json({
         success: false,
         error: 'Expense not found'
       });
     }
-    
+
     if (existingExpense.status !== 'pending') {
       return res.status(400).json({
         success: false,
         error: 'Cannot delete non-pending expense'
       });
     }
-    
-    // Check permission to delete
-    if (existingExpense.submittedBy !== req.user.userId && !req.user.permissions.includes('MANAGE_EXPENSES')) {
+
+    // Check ownership permission
+    if (!checkExpenseOwnership(existingExpense, userId, permissions, 'DELETE')) {
+      auditLog('PERMISSION_DENIED', userId, {
+        reason: 'Attempted to delete another user\'s petty cash expense',
+        expenseId: id,
+        expenseSubmittedBy: existingExpense.submittedBy,
+        requestedBy: userId
+      });
+
       return res.status(403).json({
         success: false,
         error: 'You can only delete your own expenses'
@@ -1157,11 +1202,13 @@ const MAX_RECEIPTS_PER_EXPENSE = 2;
 
 // GET /petty-cash-expenses/:id/receipts - Get all receipts for expense
 router.get('/:id/receipts',
-  requirePermission('CREATE_EXPENSE'),
+  requireAnyPermission(['VIEW_PETTY_CASH_EXPENSE_ALL', 'VIEW_PETTY_CASH_EXPENSE_OWN']),
   async (req, res) => {
     try {
-      const db = getDbConnection(req.user.companyId);
+      const { companyId, userId, permissions } = req.user;
+      const db = getDbConnection(companyId);
       const { id } = req.params;
+      const { auditLog } = require('../utils/logger');
 
       // Check if expense exists
       const expense = await db('petty_cash_expenses')
@@ -1177,9 +1224,23 @@ router.get('/:id/receipts',
         });
       }
 
-      // Check permission: owner, card holder, or admin
-      const isOwner = expense.submittedBy === req.user.userId;
-      const isCardHolder = expense.assignedTo === req.user.userId;
+      // Check ownership permission
+      if (!checkExpenseOwnership(expense, userId, permissions, 'VIEW')) {
+        auditLog('PERMISSION_DENIED', userId, {
+          reason: 'Attempted to view receipts of another user\'s petty cash expense',
+          expenseId: id,
+          expenseSubmittedBy: expense.submittedBy,
+          requestedBy: userId
+        });
+
+        return res.status(403).json({
+          success: false,
+          error: 'You can only view receipts of your own expenses'
+        });
+      }
+
+      const isOwner = expense.submittedBy === userId;
+      const isCardHolder = expense.assignedTo === userId;
       const canManage = req.user.permissions.includes('MANAGE_PETTY_CASH') ||
                         req.user.permissions.includes('MANAGE_EXPENSES') ||
                         req.user.permissions.includes('VIEW_EXPENSES');
@@ -1254,12 +1315,14 @@ router.get('/:id/receipts',
 
 // POST /petty-cash-expenses/:id/receipt - Upload receipt for expense (max 2)
 router.post('/:id/receipt',
-  requirePermission('CREATE_EXPENSE'),
+  requireAnyPermission(['EDIT_PETTY_CASH_EXPENSE_ALL', 'EDIT_PETTY_CASH_EXPENSE_OWN']),
   uploadReceipt,
   async (req, res) => {
     try {
-      const db = getDbConnection(req.user.companyId);
+      const { companyId, userId, permissions } = req.user;
+      const db = getDbConnection(companyId);
       const { id } = req.params;
+      const { auditLog } = require('../utils/logger');
 
       // Check if expense exists
       const expense = await db('petty_cash_expenses')
@@ -1269,22 +1332,38 @@ router.post('/:id/receipt',
         .first();
 
       if (!expense) {
+        // Clean up uploaded file if expense doesn't exist
+        if (req.file && req.file.key) {
+          await storageService.deleteFile(req.file.key).catch(err =>
+            winston.warn('Failed to delete orphaned receipt file', { key: req.file.key })
+          );
+        }
+
         return res.status(404).json({
           success: false,
           error: 'Expense not found'
         });
       }
 
-      // Check permission: owner, card holder, or admin
-      const isOwner = expense.submittedBy === req.user.userId;
-      const isCardHolder = expense.assignedTo === req.user.userId;
-      const canManage = req.user.permissions.includes('MANAGE_PETTY_CASH') ||
-                        req.user.permissions.includes('MANAGE_EXPENSES');
+      // Check ownership permission with file cleanup on failure
+      if (!checkExpenseOwnership(expense, userId, permissions, 'EDIT')) {
+        // Clean up uploaded file if user lacks permission
+        if (req.file && req.file.key) {
+          await storageService.deleteFile(req.file.key).catch(err =>
+            winston.warn('Failed to delete unauthorized receipt file', { key: req.file.key })
+          );
+        }
 
-      if (!isOwner && !isCardHolder && !canManage) {
+        auditLog('PERMISSION_DENIED', userId, {
+          reason: 'Attempted to upload receipt to another user\'s petty cash expense',
+          expenseId: id,
+          expenseSubmittedBy: expense.submittedBy,
+          requestedBy: userId
+        });
+
         return res.status(403).json({
           success: false,
-          error: 'You are not authorized to upload receipts for this expense'
+          error: 'You can only upload receipts to your own expenses'
         });
       }
 
@@ -1413,11 +1492,13 @@ router.post('/:id/receipt',
 
 // DELETE /petty-cash-expenses/:id/receipts/:receiptId - Delete a receipt
 router.delete('/:id/receipts/:receiptId',
-  requirePermission('CREATE_EXPENSE'),
+  requireAnyPermission(['EDIT_PETTY_CASH_EXPENSE_ALL', 'EDIT_PETTY_CASH_EXPENSE_OWN']),
   async (req, res) => {
     try {
-      const db = getDbConnection(req.user.companyId);
+      const { companyId, userId, permissions } = req.user;
+      const db = getDbConnection(companyId);
       const { id, receiptId } = req.params;
+      const { auditLog } = require('../utils/logger');
 
       // Check if expense exists
       const expense = await db('petty_cash_expenses')
@@ -1433,16 +1514,19 @@ router.delete('/:id/receipts/:receiptId',
         });
       }
 
-      // Check permission: owner, card holder, or admin
-      const isOwner = expense.submittedBy === req.user.userId;
-      const isCardHolder = expense.assignedTo === req.user.userId;
-      const canManage = req.user.permissions.includes('MANAGE_PETTY_CASH') ||
-                        req.user.permissions.includes('MANAGE_EXPENSES');
+      // Check ownership permission
+      if (!checkExpenseOwnership(expense, userId, permissions, 'EDIT')) {
+        auditLog('PERMISSION_DENIED', userId, {
+          reason: 'Attempted to delete receipt from another user\'s petty cash expense',
+          expenseId: id,
+          receiptId,
+          expenseSubmittedBy: expense.submittedBy,
+          requestedBy: userId
+        });
 
-      if (!isOwner && !isCardHolder && !canManage) {
         return res.status(403).json({
           success: false,
-          error: 'You are not authorized to delete receipts for this expense'
+          error: 'You can only delete receipts from your own expenses'
         });
       }
 
@@ -1501,10 +1585,12 @@ router.delete('/:id/receipts/:receiptId',
 );
 
 // GET /petty-cash-expenses/:id/receipt - Get receipt download URL
-router.get('/:id/receipt', requirePermission('VIEW_EXPENSE_REPORTS'), async (req, res) => {
+router.get('/:id/receipt', requireAnyPermission(['VIEW_PETTY_CASH_EXPENSE_ALL', 'VIEW_PETTY_CASH_EXPENSE_OWN']), async (req, res) => {
   try {
-    const db = getDbConnection(req.user.companyId);
+    const { companyId, userId, permissions } = req.user;
+    const db = getDbConnection(companyId);
     const { id } = req.params;
+    const { auditLog } = require('../utils/logger');
 
     // Get expense with receipt info
     const expense = await db('petty_cash_expenses')
@@ -1519,13 +1605,18 @@ router.get('/:id/receipt', requirePermission('VIEW_EXPENSE_REPORTS'), async (req
       });
     }
 
-    // Check if user can view this expense
-    const canView = req.user.permissions.includes('VIEW_EXPENSE_REPORTS') ||
-                    expense.submittedBy === req.user.userId;
-    if (!canView) {
+    // Check ownership permission
+    if (!checkExpenseOwnership(expense, userId, permissions, 'VIEW')) {
+      auditLog('PERMISSION_DENIED', userId, {
+        reason: 'Attempted to view receipt of another user\'s petty cash expense',
+        expenseId: id,
+        expenseSubmittedBy: expense.submittedBy,
+        requestedBy: userId
+      });
+
       return res.status(403).json({
         success: false,
-        error: 'Access denied'
+        error: 'You can only view receipts of your own expenses'
       });
     }
 
@@ -1671,17 +1762,24 @@ router.delete('/:id/receipt', requirePermission('MANAGE_PETTY_CASH'), async (req
 });
 
 // GET /petty-cash-expenses/analytics - Get expense analytics
-router.get('/analytics', requirePermission('VIEW_EXPENSE_REPORTS'), async (req, res) => {
+router.get('/analytics', requireAnyPermission(['VIEW_PETTY_CASH_EXPENSE_ALL', 'VIEW_PETTY_CASH_EXPENSE_OWN']), async (req, res) => {
   try {
-    const db = getDbConnection(req.user.companyId);
+    const { companyId, userId, permissions } = req.user;
+    const db = getDbConnection(companyId);
+    const { hasPermission } = require('../config/permissionsHierarchy');
     const { period = '30' } = req.query;
-    
+
     // Calculate date range based on period
     const now = new Date();
     const periodDays = parseInt(period) || 30;
     const endDate = now.toISOString().split('T')[0];
     const startDate = new Date(now.getTime() - (periodDays * 24 * 60 * 60 * 1000)).toISOString().split('T')[0];
-    
+
+    // Build query with ownership filtering
+    const ownershipFilter = !hasPermission(permissions, 'VIEW_PETTY_CASH_EXPENSE_ALL')
+      ? 'AND submittedBy = ?'
+      : '';
+
     // Get basic analytics
     const analyticsQuery = `
       SELECT
@@ -1694,9 +1792,14 @@ router.get('/analytics', requirePermission('VIEW_EXPENSE_REPORTS'), async (req, 
       FROM petty_cash_expenses
       WHERE DATE(expenseDate) >= ?
         AND DATE(expenseDate) <= ?
+        ${ownershipFilter}
     `;
 
-    const [analytics] = await db.raw(analyticsQuery, [startDate, endDate]);
+    const queryParams = !hasPermission(permissions, 'VIEW_PETTY_CASH_EXPENSE_ALL')
+      ? [startDate, endDate, userId]
+      : [startDate, endDate];
+
+    const [analytics] = await db.raw(analyticsQuery, queryParams);
     
     res.json({
       success: true,
@@ -1720,29 +1823,31 @@ router.get('/analytics', requirePermission('VIEW_EXPENSE_REPORTS'), async (req, 
 });
 
 // GET /petty-cash-expenses/analytics/summary - Get expense analytics
-router.get('/analytics/summary', requirePermission('VIEW_EXPENSE_REPORTS'), async (req, res) => {
+router.get('/analytics/summary', requireAnyPermission(['VIEW_PETTY_CASH_EXPENSE_ALL', 'VIEW_PETTY_CASH_EXPENSE_OWN']), async (req, res) => {
   try {
-    const db = getDbConnection(req.user.companyId);
+    const { companyId, userId, permissions } = req.user;
+    const db = getDbConnection(companyId);
+    const { hasPermission } = require('../config/permissionsHierarchy');
     const { dateFrom, dateTo, cardId } = req.query;
-    
+
     let query = db('petty_cash_expenses');
-    
+
+    // Apply ownership filtering if user only has VIEW_PETTY_CASH_EXPENSE_OWN permission
+    if (!hasPermission(permissions, 'VIEW_PETTY_CASH_EXPENSE_ALL')) {
+      query = query.where('submittedBy', userId);
+    }
+
     // Apply date filters
     if (dateFrom) {
       query = query.where('expenseDate', '>=', dateFrom);
     }
-    
+
     if (dateTo) {
       query = query.where('expenseDate', '<=', dateTo);
     }
-    
+
     if (cardId) {
       query = query.where('cardId', cardId);
-    }
-    
-    // Apply user-specific filters for non-admin users
-    if (!req.user.permissions.includes('VIEW_EXPENSE_REPORTS')) {
-      query = query.where('submittedBy', req.user.userId);
     }
     
     // Get summary statistics
@@ -1820,12 +1925,14 @@ router.get('/analytics/summary', requirePermission('VIEW_EXPENSE_REPORTS'), asyn
 
 // GET /petty-cash-expenses/:id - Get specific expense
 // NOTE: This route MUST be defined last, after all specific routes (like /analytics)
-router.get('/:id', requirePermission('VIEW_EXPENSE_REPORTS'), async (req, res) => {
+router.get('/:id', requireAnyPermission(['VIEW_PETTY_CASH_EXPENSE_ALL', 'VIEW_PETTY_CASH_EXPENSE_OWN']), async (req, res) => {
   try {
-    const db = getDbConnection(req.user.companyId);
+    const { companyId, userId, permissions } = req.user;
+    const db = getDbConnection(companyId);
     const { id } = req.params;
+    const { auditLog } = require('../utils/logger');
 
-    let query = db('petty_cash_expenses')
+    const expense = await db('petty_cash_expenses')
       .select(
         'petty_cash_expenses.*',
         'petty_cash_cards.cardNumber',
@@ -1841,19 +1948,28 @@ router.get('/:id', requirePermission('VIEW_EXPENSE_REPORTS'), async (req, res) =
       .leftJoin('petty_cash_cards', 'petty_cash_expenses.cardId', 'petty_cash_cards.id')
       .leftJoin('users as submittedUser', 'petty_cash_expenses.submittedBy', 'submittedUser.id')
       .leftJoin('users as approvedUser', 'petty_cash_expenses.approvedBy', 'approvedUser.id')
-      .where('petty_cash_expenses.id', id);
-
-    // Apply user-specific filters based on role
-    if (!req.user.permissions.includes('VIEW_EXPENSE_REPORTS')) {
-      query = query.where('petty_cash_expenses.submittedBy', req.user.userId);
-    }
-
-    const expense = await query.first();
+      .where('petty_cash_expenses.id', id)
+      .first();
 
     if (!expense) {
       return res.status(404).json({
         success: false,
-        error: 'Expense not found or access denied'
+        error: 'Expense not found'
+      });
+    }
+
+    // Check ownership permission
+    if (!checkExpenseOwnership(expense, userId, permissions, 'VIEW')) {
+      auditLog('PERMISSION_DENIED', userId, {
+        reason: 'Attempted to view another user\'s petty cash expense',
+        expenseId: id,
+        expenseSubmittedBy: expense.submittedBy,
+        requestedBy: userId
+      });
+
+      return res.status(403).json({
+        success: false,
+        error: 'You can only view your own expenses'
       });
     }
 

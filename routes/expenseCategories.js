@@ -53,14 +53,14 @@ const toggleActiveSchema = Joi.object({
  */
 router.get('/', async (req, res) => {
   // Check for either permission
-  const hasViewExpenses = req.user.permissions?.includes('VIEW_EXPENSES');
+  const hasViewCategories = req.user.permissions?.includes('VIEW_EXPENSE_CATEGORIES');
   const hasManageSettings = req.user.permissions?.includes('MANAGE_SETTINGS');
   const hasManageCategories = req.user.permissions?.includes('MANAGE_EXPENSE_CATEGORIES');
 
-  if (!hasViewExpenses && !hasManageSettings && !hasManageCategories) {
+  if (!hasViewCategories && !hasManageSettings && !hasManageCategories) {
     return res.status(403).json({
       success: false,
-      error: 'Permission required: VIEW_EXPENSES, MANAGE_SETTINGS, or MANAGE_EXPENSE_CATEGORIES'
+      error: 'Permission required: VIEW_EXPENSE_CATEGORIES, MANAGE_SETTINGS, or MANAGE_EXPENSE_CATEGORIES'
     });
   }
   try {
@@ -115,7 +115,7 @@ router.get('/', async (req, res) => {
  * GET /expense-categories/types
  * Get all available category types
  */
-router.get('/types', requirePermission('VIEW_EXPENSES'), async (req, res) => {
+router.get('/types', requirePermission('VIEW_EXPENSE_CATEGORIES'), async (req, res) => {
   try {
     const types = [
       {
@@ -207,7 +207,7 @@ router.get('/dropdown/:type', async (req, res) => {
  * GET /expense-categories/by-type/:type
  * Get all categories for a specific type
  */
-router.get('/by-type/:type', requirePermission('VIEW_EXPENSES'), async (req, res) => {
+router.get('/by-type/:type', requirePermission('VIEW_EXPENSE_CATEGORIES'), async (req, res) => {
   try {
     const { type } = req.params;
     const includeInactive = req.query.includeInactive === 'true';
@@ -248,7 +248,7 @@ router.get('/by-type/:type', requirePermission('VIEW_EXPENSES'), async (req, res
  * GET /expense-categories/statistics
  * Get category statistics for analytics
  */
-router.get('/statistics', requirePermission('VIEW_EXPENSES'), async (req, res) => {
+router.get('/statistics', requirePermission('VIEW_EXPENSE_CATEGORIES'), async (req, res) => {
   try {
     const repositoryFactory = getRepositoryFactory(req.user.companyId);
     const categoryRepository = repositoryFactory.getExpenseCategoriesRepository();
@@ -276,7 +276,7 @@ router.get('/statistics', requirePermission('VIEW_EXPENSES'), async (req, res) =
  * GET /expense-categories/:id
  * Get specific category by ID
  */
-router.get('/:id', requirePermission('VIEW_EXPENSES'), async (req, res) => {
+router.get('/:id', requirePermission('VIEW_EXPENSE_CATEGORIES'), async (req, res) => {
   try {
     const repositoryFactory = getRepositoryFactory(req.user.companyId);
     const categoryRepository = repositoryFactory.getExpenseCategoriesRepository();
@@ -528,7 +528,7 @@ router.delete('/:id', requirePermission('MANAGE_EXPENSE_CATEGORIES'), async (req
  * POST /expense-categories/:id/validate-amount
  * Validate if an amount exceeds the category's max_amount limit
  */
-router.post('/:id/validate-amount', requirePermission('VIEW_EXPENSES'), async (req, res) => {
+router.post('/:id/validate-amount', requirePermission('VIEW_EXPENSE_CATEGORIES'), async (req, res) => {
   try {
     const { amount } = req.body;
 

@@ -48,7 +48,7 @@ const contractLocationRateSchema = Joi.object({
 });
 
 // GET /api/contract-locations - List all supplier locations (renamed for compatibility)
-router.get('/', requirePermission('VIEW_SUPPLIERS'), async (req, res) => {
+router.get('/', requirePermission('VIEW_CONTRACT_LOCATIONS'), async (req, res) => {
   try {
     const { companyId } = req.user;
     const db = getDbConnection(companyId);
@@ -129,9 +129,9 @@ router.get('/', requirePermission('VIEW_SUPPLIERS'), async (req, res) => {
 });
 
 // GET /api/contract-locations/:id - Get specific location with rates
-router.get('/:id', 
+router.get('/:id',
   validateParams(Joi.object({ id: Joi.number().integer().positive().required() })),
-  requirePermission('VIEW_CONTRACTS'),
+  requirePermission('VIEW_CONTRACT_LOCATIONS'),
   async (req, res) => {
     try {
       const { id } = req.params;
@@ -201,9 +201,9 @@ router.get('/:id',
 
 // POST /api/contract-locations - Create new contract location (or supplier location)
 // POST /api/contract-locations - Create supplier collection location
-router.post('/', 
+router.post('/',
   validate(supplierLocationSchema),
-  requirePermission('MANAGE_SUPPLIERS'),
+  requirePermission('CREATE_CONTRACT_LOCATIONS'),
   async (req, res) => {
     try {
       const { companyId } = req.user;
@@ -304,7 +304,7 @@ router.post('/',
 router.put('/:id',
   validateParams(Joi.object({ id: Joi.number().integer().positive().required() })),
   validate(supplierLocationSchema.fork(['supplierId'], schema => schema.optional())),
-  requirePermission('MANAGE_SUPPLIERS'),
+  requirePermission('EDIT_CONTRACT_LOCATIONS'),
   async (req, res) => {
     try {
       const { id } = req.params;
@@ -371,7 +371,7 @@ router.put('/:id',
 router.post('/:id/rates',
   validateParams(Joi.object({ id: Joi.number().integer().positive().required() })),
   validate(contractLocationRateSchema.fork(['supplierId', 'locationId'], schema => schema.optional())),
-  requirePermission('MANAGE_SUPPLIERS'),
+  requirePermission('MANAGE_CONTRACT_LOCATION_RATES'),
   async (req, res) => {
     try {
       const { id } = req.params;
@@ -472,11 +472,11 @@ router.post('/:id/rates',
 
 // GET /api/contract-locations/:locationId/rates/:materialId - Get specific location rate
 router.get('/:locationId/rates/:materialId',
-  validateParams(Joi.object({ 
+  validateParams(Joi.object({
     locationId: Joi.number().integer().positive().required(),
     materialId: Joi.number().integer().positive().required()
   })),
-  requirePermission('VIEW_CONTRACTS'),
+  requirePermission('VIEW_CONTRACT_LOCATION_RATES'),
   async (req, res) => {
     try {
       const { locationId, materialId } = req.params;

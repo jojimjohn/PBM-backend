@@ -1,6 +1,6 @@
 const express = require('express');
 const { validate, validateParams, sanitize, schemas } = require('../middleware/validation');
-const { requirePermission, requireCompanyAccess } = require('../middleware/auth');
+const { requirePermission, requireAnyPermission, requireCompanyAccess } = require('../middleware/auth');
 const { logger, auditLog } = require('../utils/logger');
 const { getDbConnection } = require('../config/database');
 const { uploadMultipleToS3, requireFiles } = require('../middleware/upload');
@@ -12,6 +12,32 @@ const router = express.Router();
 
 // Apply sanitization to all routes
 router.use(sanitize);
+
+/**
+ * Check if user has permission to access a customer
+ * @param {object} customer - The customer object (must have 'createdBy' field)
+ * @param {number} userId - The requesting user's ID
+ * @param {array} permissions - The user's permissions array
+ * @param {string} permissionType - Type of permission ('EDIT', 'DELETE', 'VIEW')
+ * @returns {boolean} - True if user has access, false otherwise
+ */
+const checkCustomerOwnership = (customer, userId, permissions, permissionType = 'EDIT') => {
+  const { hasPermission } = require('../config/permissionsHierarchy');
+
+  // If user has the _ALL variant, they can access any customer
+  const allPermission = `${permissionType}_CUSTOMERS_ALL`;
+  if (hasPermission(permissions, allPermission)) {
+    return true;
+  }
+
+  // If user has the _OWN variant, check ownership
+  const ownPermission = `${permissionType}_CUSTOMERS_OWN`;
+  if (hasPermission(permissions, ownPermission)) {
+    return customer.createdBy === userId;
+  }
+
+  return false;
+};
 
 // Customer validation schema
 // Customer types: individual, business, project, contract
@@ -31,22 +57,28 @@ const customerSchema = Joi.object({
 });
 
 // GET /api/customers - List all customers
-router.get('/', requirePermission('VIEW_CUSTOMERS'), async (req, res) => {
+router.get('/', requireAnyPermission(['VIEW_CUSTOMERS_ALL', 'VIEW_CUSTOMERS_OWN']), async (req, res) => {
   try {
-    const { companyId } = req.user;
+    const { companyId, userId, permissions } = req.user;
     const db = getDbConnection(companyId);
-    
-    const { 
-      page = 1, 
-      limit = 50, 
-      search = '', 
+    const { hasPermission } = require('../config/permissionsHierarchy');
+
+    const {
+      page = 1,
+      limit = 50,
+      search = '',
       customerType = '',
       isActive = ''
     } = req.query;
 
     const offset = (page - 1) * limit;
-    
+
     let query = db('customers').select('*');
+
+    // Apply ownership filtering if user only has VIEW_CUSTOMERS_OWN permission
+    if (!hasPermission(permissions, 'VIEW_CUSTOMERS_ALL')) {
+      query = query.where('createdBy', userId);
+    }
 
     // Search filter
     if (search) {
@@ -109,13 +141,13 @@ router.get('/', requirePermission('VIEW_CUSTOMERS'), async (req, res) => {
 });
 
 // GET /api/customers/:id - Get specific customer
-router.get('/:id', 
+router.get('/:id',
   validateParams(Joi.object({ id: Joi.number().integer().positive().required() })),
-  requirePermission('VIEW_CUSTOMERS'),
+  requireAnyPermission(['VIEW_CUSTOMERS_ALL', 'VIEW_CUSTOMERS_OWN']),
   async (req, res) => {
     try {
       const { id } = req.params;
-      const { companyId } = req.user;
+      const { companyId, userId, permissions } = req.user;
       const db = getDbConnection(companyId);
 
       const customer = await db('customers')
@@ -126,6 +158,21 @@ router.get('/:id',
         return res.status(404).json({
           success: false,
           error: 'Customer not found'
+        });
+      }
+
+      // Check ownership
+      if (!checkCustomerOwnership(customer, userId, permissions, 'VIEW')) {
+        auditLog('PERMISSION_DENIED', userId, {
+          reason: 'Attempted to view another user\'s customer',
+          customerId: id,
+          customerCreatedBy: customer.createdBy,
+          requestedBy: userId
+        });
+
+        return res.status(403).json({
+          success: false,
+          error: 'You can only view your own customers'
         });
       }
 
@@ -154,12 +201,12 @@ router.get('/:id',
 );
 
 // POST /api/customers - Create new customer
-router.post('/', 
+router.post('/',
   validate(customerSchema),
-  requirePermission('MANAGE_CUSTOMERS'),
+  requirePermission('CREATE_CUSTOMERS'),
   async (req, res) => {
     try {
-      const { companyId } = req.user;
+      const { companyId, userId } = req.user;
       const db = getDbConnection(companyId);
 
       // Check if customer with same email already exists (if email provided)
@@ -178,6 +225,7 @@ router.post('/',
 
       const customerData = {
         ...req.body,
+        createdBy: userId,  // ✅ Set createdBy for ownership tracking
         created_at: new Date(),
         updated_at: new Date()
       };
@@ -224,11 +272,11 @@ router.post('/',
 router.put('/:id',
   validateParams(Joi.object({ id: Joi.number().integer().positive().required() })),
   validate(customerSchema),
-  requirePermission('MANAGE_CUSTOMERS'),
+  requireAnyPermission(['EDIT_CUSTOMERS_ALL', 'EDIT_CUSTOMERS_OWN']),
   async (req, res) => {
     try {
       const { id } = req.params;
-      const { companyId } = req.user;
+      const { companyId, userId, permissions } = req.user;
       const db = getDbConnection(companyId);
 
       // Check if customer exists
@@ -240,6 +288,21 @@ router.put('/:id',
         return res.status(404).json({
           success: false,
           error: 'Customer not found'
+        });
+      }
+
+      // Check ownership
+      if (!checkCustomerOwnership(existingCustomer, userId, permissions, 'EDIT')) {
+        auditLog('PERMISSION_DENIED', userId, {
+          reason: 'Attempted to edit another user\'s customer',
+          customerId: id,
+          customerCreatedBy: existingCustomer.createdBy,
+          requestedBy: userId
+        });
+
+        return res.status(403).json({
+          success: false,
+          error: 'You can only edit your own customers'
         });
       }
 
@@ -306,11 +369,11 @@ router.put('/:id',
 // DELETE /api/customers/:id - Delete customer
 router.delete('/:id',
   validateParams(Joi.object({ id: Joi.number().integer().positive().required() })),
-  requirePermission('MANAGE_CUSTOMERS'),
+  requireAnyPermission(['DELETE_CUSTOMERS_ALL', 'DELETE_CUSTOMERS_OWN']),
   async (req, res) => {
     try {
       const { id } = req.params;
-      const { companyId } = req.user;
+      const { companyId, userId, permissions } = req.user;
       const db = getDbConnection(companyId);
 
       // Check if customer exists
@@ -322,6 +385,21 @@ router.delete('/:id',
         return res.status(404).json({
           success: false,
           error: 'Customer not found'
+        });
+      }
+
+      // Check ownership
+      if (!checkCustomerOwnership(customer, userId, permissions, 'DELETE')) {
+        auditLog('PERMISSION_DENIED', userId, {
+          reason: 'Attempted to delete another user\'s customer',
+          customerId: id,
+          customerCreatedBy: customer.createdBy,
+          requestedBy: userId
+        });
+
+        return res.status(403).json({
+          success: false,
+          error: 'You can only delete your own customers'
         });
       }
 
@@ -380,10 +458,10 @@ router.delete('/:id',
 
 // PATCH /api/customers/:id/status - Update customer active status
 router.patch('/:id/status',
-  requirePermission('MANAGE_CUSTOMERS'),
+  requireAnyPermission(['EDIT_CUSTOMERS_ALL', 'EDIT_CUSTOMERS_OWN']),
   async (req, res) => {
     try {
-      const { companyId, userId } = req.user;
+      const { companyId, userId, permissions } = req.user;
       const db = getDbConnection(companyId);
       const { id } = req.params;
       const { isActive } = req.body;
@@ -403,6 +481,21 @@ router.patch('/:id/status',
         return res.status(404).json({
           success: false,
           error: 'Customer not found'
+        });
+      }
+
+      // Check ownership
+      if (!checkCustomerOwnership(customer, userId, permissions, 'EDIT')) {
+        auditLog('PERMISSION_DENIED', userId, {
+          reason: 'Attempted to change status of another user\'s customer',
+          customerId: id,
+          customerCreatedBy: customer.createdBy,
+          requestedBy: userId
+        });
+
+        return res.status(403).json({
+          success: false,
+          error: 'You can only change status of your own customers'
         });
       }
 
@@ -458,13 +551,13 @@ router.patch('/:id/status',
 // POST /api/customers/:id/attachments - Upload attachments to customer
 router.post('/:id/attachments',
   validateParams(Joi.object({ id: Joi.number().integer().positive().required() })),
-  requirePermission('MANAGE_CUSTOMERS'),
+  requireAnyPermission(['EDIT_CUSTOMERS_ALL', 'EDIT_CUSTOMERS_OWN']),
   uploadMultipleToS3,
   requireFiles,
   async (req, res) => {
     try {
       const { id } = req.params;
-      const { companyId, userId } = req.user;
+      const { companyId, userId, permissions } = req.user;
       const db = getDbConnection(companyId);
 
       // Check if customer exists
@@ -482,6 +575,30 @@ router.post('/:id/attachments',
         return res.status(404).json({
           success: false,
           error: 'Customer not found'
+        });
+      }
+
+      // Check ownership
+      if (!checkCustomerOwnership(customer, userId, permissions, 'EDIT')) {
+        // Delete uploaded S3 files if permission check fails
+        if (req.files && req.files.length > 0) {
+          await Promise.all(req.files.map(file =>
+            storageService.deleteFile(file.key).catch(err =>
+              logger.warn('Failed to delete unauthorized customer attachment', { key: file.key })
+            )
+          ));
+        }
+
+        auditLog('PERMISSION_DENIED', userId, {
+          reason: 'Attempted to upload attachments to another user\'s customer',
+          customerId: id,
+          customerCreatedBy: customer.createdBy,
+          requestedBy: userId
+        });
+
+        return res.status(403).json({
+          success: false,
+          error: 'You can only upload attachments to your own customers'
         });
       }
 
@@ -529,11 +646,11 @@ router.post('/:id/attachments',
 // GET /api/customers/:id/attachments - Get attachments for customer
 router.get('/:id/attachments',
   validateParams(Joi.object({ id: Joi.number().integer().positive().required() })),
-  requirePermission('VIEW_CUSTOMERS'),
+  requireAnyPermission(['VIEW_CUSTOMERS_ALL', 'VIEW_CUSTOMERS_OWN']),
   async (req, res) => {
     try {
       const { id } = req.params;
-      const { companyId } = req.user;
+      const { companyId, userId, permissions } = req.user;
       const db = getDbConnection(companyId);
 
       // Verify customer exists
@@ -543,6 +660,21 @@ router.get('/:id/attachments',
         return res.status(404).json({
           success: false,
           error: 'Customer not found'
+        });
+      }
+
+      // Check ownership
+      if (!checkCustomerOwnership(customer, userId, permissions, 'VIEW')) {
+        auditLog('PERMISSION_DENIED', userId, {
+          reason: 'Attempted to view attachments from another user\'s customer',
+          customerId: id,
+          customerCreatedBy: customer.createdBy,
+          requestedBy: userId
+        });
+
+        return res.status(403).json({
+          success: false,
+          error: 'You can only view attachments from your own customers'
         });
       }
 
@@ -591,11 +723,11 @@ router.delete('/:id/attachments/:fileId',
     id: Joi.number().integer().positive().required(),
     fileId: Joi.number().integer().positive().required()
   })),
-  requirePermission('MANAGE_CUSTOMERS'),
+  requireAnyPermission(['EDIT_CUSTOMERS_ALL', 'EDIT_CUSTOMERS_OWN']),
   async (req, res) => {
     try {
       const { id, fileId } = req.params;
-      const { companyId, userId } = req.user;
+      const { companyId, userId, permissions } = req.user;
       const db = getDbConnection(companyId);
 
       // Verify customer exists
@@ -605,6 +737,21 @@ router.delete('/:id/attachments/:fileId',
         return res.status(404).json({
           success: false,
           error: 'Customer not found'
+        });
+      }
+
+      // Check ownership
+      if (!checkCustomerOwnership(customer, userId, permissions, 'EDIT')) {
+        auditLog('PERMISSION_DENIED', userId, {
+          reason: 'Attempted to delete attachment from another user\'s customer',
+          customerId: id,
+          customerCreatedBy: customer.createdBy,
+          requestedBy: userId
+        });
+
+        return res.status(403).json({
+          success: false,
+          error: 'You can only delete attachments from your own customers'
         });
       }
 

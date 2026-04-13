@@ -1,6 +1,6 @@
 const express = require('express');
 const { validate, validateParams, sanitize } = require('../middleware/validation');
-const { requirePermission } = require('../middleware/auth');
+const { requirePermission, requireAnyPermission } = require('../middleware/auth');
 const { logger, auditLog } = require('../utils/logger');
 const { getDbConnection } = require('../config/database');
 const Joi = require('joi');
@@ -9,6 +9,50 @@ const router = express.Router();
 
 // Apply sanitization to all routes
 router.use(sanitize);
+
+/**
+ * Helper function to check amendment ownership
+ * Note: Amendments use 'amended_by' field instead of 'createdBy'
+ * @param {Object} amendment - Amendment object
+ * @param {number} userId - Current user's ID
+ * @param {Array} permissions - User's permissions array
+ * @param {string} permissionType - Type of permission to check (VIEW, EDIT, DELETE)
+ * @returns {boolean} - Whether user has permission
+ */
+const checkAmendmentOwnership = (amendment, userId, permissions, permissionType = 'EDIT') => {
+  const { hasPermission } = require('../config/permissionsHierarchy');
+
+  // Check if user has permission for ALL amendments
+  const allPermission = `${permissionType}_AMENDMENTS_ALL`;
+  if (hasPermission(permissions, allPermission)) {
+    return true;
+  }
+
+  // Check if user has permission for OWN amendments and owns this amendment
+  const ownPermission = `${permissionType}_AMENDMENTS_OWN`;
+  if (hasPermission(permissions, ownPermission)) {
+    // Amendments use 'amended_by' field for ownership
+    return amendment.amended_by === userId;
+  }
+
+  return false;
+};
+
+/**
+ * Helper function to audit permission denials
+ * @param {string} action - Action being attempted
+ * @param {number} userId - User ID
+ * @param {Object} details - Additional details
+ */
+const auditPermissionDenial = (action, userId, details) => {
+  logger.warn(`Permission denied: ${action}`, {
+    userId,
+    ...details,
+    timestamp: new Date().toISOString()
+  });
+
+  auditLog(action, userId, details);
+};
 
 // Helper function to format payment terms for display (matches purchaseOrders.js)
 const formatPaymentTermsForDisplay = (paymentTerms) => {
@@ -52,10 +96,13 @@ const approvalSchema = Joi.object({
 }).options({ stripUnknown: true });
 
 // GET /api/purchase-order-amendments - List all amendments
-router.get('/', requirePermission('VIEW_PURCHASE'), async (req, res) => {
+router.get('/',
+  requireAnyPermission(['VIEW_AMENDMENTS_ALL', 'VIEW_AMENDMENTS_OWN']),
+  async (req, res) => {
   try {
-    const { companyId } = req.user;
+    const { companyId, userId, permissions } = req.user;
     const db = getDbConnection(companyId);
+    const { hasPermission } = require('../config/permissionsHierarchy');
 
     const {
       page = 1,
@@ -76,6 +123,15 @@ router.get('/', requirePermission('VIEW_PURCHASE'), async (req, res) => {
         db.raw('CONCAT(creator.firstName, " ", creator.lastName) as createdByName'),
         db.raw('CONCAT(approver.firstName, " ", approver.lastName) as approvedByName')
       );
+
+    // Apply ownership filtering if user only has VIEW_AMENDMENTS_OWN permission
+    if (!hasPermission(permissions, 'VIEW_AMENDMENTS_ALL')) {
+      query = query.where('purchase_order_amendments.amended_by', userId);
+      logger.info('Filtering amendments to user\'s own records', {
+        userId,
+        companyId
+      });
+    }
 
     // Filter by original order
     if (originalOrderId) {
@@ -137,16 +193,26 @@ router.get('/', requirePermission('VIEW_PURCHASE'), async (req, res) => {
 // GET /api/purchase-order-amendments/counts - Get amendment counts for all POs (bulk)
 // This endpoint returns counts grouped by original_order_id in a single query
 // Used to avoid N+1 queries when loading the PO list
-router.get('/counts', requirePermission('VIEW_PURCHASE'), async (req, res) => {
+router.get('/counts',
+  requireAnyPermission(['VIEW_AMENDMENTS_ALL', 'VIEW_AMENDMENTS_OWN']),
+  async (req, res) => {
   try {
-    const { companyId } = req.user;
+    const { companyId, userId, permissions } = req.user;
     const db = getDbConnection(companyId);
+    const { hasPermission } = require('../config/permissionsHierarchy');
 
-    // Get counts grouped by original_order_id in a single query
-    const counts = await db('purchase_order_amendments')
+    // Build query with ownership filtering if needed
+    let query = db('purchase_order_amendments')
       .select('original_order_id')
-      .count('* as count')
-      .groupBy('original_order_id');
+      .count('* as count');
+
+    // Apply ownership filtering if user only has VIEW_AMENDMENTS_OWN permission
+    if (!hasPermission(permissions, 'VIEW_AMENDMENTS_ALL')) {
+      query = query.where('amended_by', userId);
+    }
+
+    // Get counts grouped by original_order_id
+    const counts = await query.groupBy('original_order_id');
 
     // Convert to a map of orderId -> count
     const countsMap = {};
@@ -175,11 +241,11 @@ router.get('/counts', requirePermission('VIEW_PURCHASE'), async (req, res) => {
 // GET /api/purchase-order-amendments/:id - Get specific amendment
 router.get('/:id',
   validateParams(Joi.object({ id: Joi.number().integer().positive().required() })),
-  requirePermission('VIEW_PURCHASE'),
+  requireAnyPermission(['VIEW_AMENDMENTS_ALL', 'VIEW_AMENDMENTS_OWN']),
   async (req, res) => {
     try {
       const { id } = req.params;
-      const { companyId } = req.user;
+      const { companyId, userId, permissions } = req.user;
       const db = getDbConnection(companyId);
 
       const amendment = await db('purchase_order_amendments')
@@ -200,6 +266,22 @@ router.get('/:id',
         return res.status(404).json({
           success: false,
           error: 'Amendment not found'
+        });
+      }
+
+      // Check ownership
+      if (!checkAmendmentOwnership(amendment, userId, permissions, 'VIEW')) {
+        auditPermissionDenial('PERMISSION_DENIED', userId, {
+          action: 'VIEW_AMENDMENT',
+          reason: 'Attempted to view another user\'s amendment',
+          amendmentId: id,
+          amendmentCreatedBy: amendment.amended_by,
+          requestedBy: userId
+        });
+
+        return res.status(403).json({
+          success: false,
+          error: 'You can only view your own amendments'
         });
       }
 
@@ -239,7 +321,7 @@ router.get('/:id',
 // POST /api/purchase-order-amendments - Create amendment proposal (doesn't create new PO)
 router.post('/',
   validate(amendmentSchema),
-  requirePermission('CREATE_PURCHASE'),
+  requirePermission('CREATE_AMENDMENTS'),
   async (req, res) => {
     try {
       const { companyId, userId } = req.user;
@@ -383,7 +465,7 @@ router.post('/',
 router.put('/:id/approve',
   validateParams(Joi.object({ id: Joi.number().integer().positive().required() })),
   validate(approvalSchema),
-  requirePermission('APPROVE_PURCHASE'),
+  requirePermission('APPROVE_AMENDMENTS'),
   async (req, res) => {
     try {
       const { id } = req.params;

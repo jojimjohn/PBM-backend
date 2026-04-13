@@ -1,6 +1,6 @@
 const express = require('express');
 const { validate, validateParams, sanitize } = require('../middleware/validation');
-const { requirePermission } = require('../middleware/auth');
+const { requirePermission, requireAnyPermission } = require('../middleware/auth');
 const { logger, auditLog } = require('../utils/logger');
 const { getDbConnection } = require('../config/database');
 const { uploadMultipleToS3, requireFiles } = require('../middleware/upload');
@@ -12,6 +12,32 @@ const router = express.Router();
 
 // Apply sanitization to all routes
 router.use(sanitize);
+
+/**
+ * Check if user has permission to access a supplier
+ * @param {object} supplier - The supplier object (must have 'createdBy' field)
+ * @param {number} userId - The requesting user's ID
+ * @param {array} permissions - The user's permissions array
+ * @param {string} permissionType - Type of permission ('EDIT', 'DELETE', 'VIEW')
+ * @returns {boolean} - True if user has access, false otherwise
+ */
+const checkSupplierOwnership = (supplier, userId, permissions, permissionType = 'EDIT') => {
+  const { hasPermission } = require('../config/permissionsHierarchy');
+
+  // If user has the _ALL variant, they can access any supplier
+  const allPermission = `${permissionType}_SUPPLIERS_ALL`;
+  if (hasPermission(permissions, allPermission)) {
+    return true;
+  }
+
+  // If user has the _OWN variant, check ownership
+  const ownPermission = `${permissionType}_SUPPLIERS_OWN`;
+  if (hasPermission(permissions, ownPermission)) {
+    return supplier.createdBy === userId;
+  }
+
+  return false;
+};
 
 // Supplier validation schema - Based on UPDATED database schema
 const supplierSchema = Joi.object({
@@ -77,22 +103,28 @@ const supplierSchema = Joi.object({
 });
 
 // GET /api/suppliers - List all suppliers
-router.get('/', requirePermission('VIEW_SUPPLIERS'), async (req, res) => {
+router.get('/', requireAnyPermission(['VIEW_SUPPLIERS_ALL', 'VIEW_SUPPLIERS_OWN']), async (req, res) => {
   try {
-    const { companyId } = req.user;
+    const { companyId, userId, permissions } = req.user;
     const db = getDbConnection(companyId);
-    
-    const { 
-      page = 1, 
-      limit = 50, 
-      search = '', 
+    const { hasPermission } = require('../config/permissionsHierarchy');
+
+    const {
+      page = 1,
+      limit = 50,
+      search = '',
       specialization = '',
       isActive = ''
     } = req.query;
 
     const offset = (page - 1) * limit;
-    
+
     let query = db('suppliers').select('*');
+
+    // Apply ownership filtering if user only has VIEW_SUPPLIERS_OWN permission
+    if (!hasPermission(permissions, 'VIEW_SUPPLIERS_ALL')) {
+      query = query.where('createdBy', userId);
+    }
 
     // Search filter
     if (search) {
@@ -155,13 +187,13 @@ router.get('/', requirePermission('VIEW_SUPPLIERS'), async (req, res) => {
 });
 
 // GET /api/suppliers/:id - Get specific supplier
-router.get('/:id', 
+router.get('/:id',
   validateParams(Joi.object({ id: Joi.number().integer().positive().required() })),
-  requirePermission('VIEW_SUPPLIERS'),
+  requireAnyPermission(['VIEW_SUPPLIERS_ALL', 'VIEW_SUPPLIERS_OWN']),
   async (req, res) => {
     try {
       const { id } = req.params;
-      const { companyId } = req.user;
+      const { companyId, userId, permissions } = req.user;
       const db = getDbConnection(companyId);
 
       const supplier = await db('suppliers')
@@ -172,6 +204,21 @@ router.get('/:id',
         return res.status(404).json({
           success: false,
           error: 'Supplier not found'
+        });
+      }
+
+      // Check ownership
+      if (!checkSupplierOwnership(supplier, userId, permissions, 'VIEW')) {
+        auditLog('PERMISSION_DENIED', userId, {
+          reason: 'Attempted to view another user\'s supplier',
+          supplierId: id,
+          supplierCreatedBy: supplier.createdBy,
+          requestedBy: userId
+        });
+
+        return res.status(403).json({
+          success: false,
+          error: 'You can only view your own suppliers'
         });
       }
 
@@ -200,13 +247,13 @@ router.get('/:id',
 );
 
 // POST /api/suppliers - Create new supplier
-router.post('/', 
+router.post('/',
   validate(supplierSchema),
-  requirePermission('MANAGE_SUPPLIERS'),
+  requirePermission('CREATE_SUPPLIERS'),
   async (req, res) => {
     try {
       console.log('Creating supplier - raw request body:', JSON.stringify(req.body, null, 2));
-      const { companyId } = req.user;
+      const { companyId, userId } = req.user;
       const db = getDbConnection(companyId);
 
       // Check if supplier with same code already exists (if code provided)
@@ -243,7 +290,7 @@ router.post('/',
         name: req.body.name,
         email: req.body.email || req.body.contact?.email || null,
         phone: req.body.phone || req.body.contact?.phone || null,
-        address: req.body.address || (req.body.contact?.address ? 
+        address: req.body.address || (req.body.contact?.address ?
           [req.body.contact.address.street, req.body.contact.address.region, req.body.contact.address.country]
           .filter(Boolean).join(', ') : null),
         city: req.body.city || req.body.contact?.address?.city || null,
@@ -253,8 +300,8 @@ router.post('/',
         businessRegistration: req.body.businessRegistration || null,
         nationalId: req.body.nationalId || null,
         taxNumber: req.body.taxNumber || null,
-        specialization: Array.isArray(req.body.specialization) ? 
-          req.body.specialization.map(s => s.toString()).join(',') : 
+        specialization: Array.isArray(req.body.specialization) ?
+          req.body.specialization.map(s => s.toString()).join(',') :
           (req.body.specialization || null),
         creditBalance: req.body.creditBalance || 0,
         paymentTermDays: req.body.paymentTerms || req.body.paymentTermDays || 0,
@@ -263,6 +310,7 @@ router.post('/',
         iban: req.body.iban || req.body.bankDetails?.iban || null,
         notes: req.body.notes || null,
         isActive: req.body.isActive !== false,
+        createdBy: userId,  // ✅ Set createdBy for ownership tracking
         created_at: new Date(),
         updated_at: new Date()
       };
@@ -355,11 +403,11 @@ router.post('/',
 router.put('/:id',
   validateParams(Joi.object({ id: Joi.number().integer().positive().required() })),
   validate(supplierSchema),
-  requirePermission('MANAGE_SUPPLIERS'),
+  requireAnyPermission(['EDIT_SUPPLIERS_ALL', 'EDIT_SUPPLIERS_OWN']),
   async (req, res) => {
     try {
       const { id } = req.params;
-      const { companyId } = req.user;
+      const { companyId, userId, permissions } = req.user;
       const db = getDbConnection(companyId);
 
       // Check if supplier exists
@@ -371,6 +419,21 @@ router.put('/:id',
         return res.status(404).json({
           success: false,
           error: 'Supplier not found'
+        });
+      }
+
+      // Check ownership
+      if (!checkSupplierOwnership(existingSupplier, userId, permissions, 'EDIT')) {
+        auditLog('PERMISSION_DENIED', userId, {
+          reason: 'Attempted to edit another user\'s supplier',
+          supplierId: id,
+          supplierCreatedBy: existingSupplier.createdBy,
+          requestedBy: userId
+        });
+
+        return res.status(403).json({
+          success: false,
+          error: 'You can only edit your own suppliers'
         });
       }
 
@@ -461,11 +524,11 @@ router.put('/:id',
 // DELETE /api/suppliers/:id - Delete supplier
 router.delete('/:id',
   validateParams(Joi.object({ id: Joi.number().integer().positive().required() })),
-  requirePermission('MANAGE_SUPPLIERS'),
+  requireAnyPermission(['DELETE_SUPPLIERS_ALL', 'DELETE_SUPPLIERS_OWN']),
   async (req, res) => {
     try {
       const { id } = req.params;
-      const { companyId } = req.user;
+      const { companyId, userId, permissions } = req.user;
       const db = getDbConnection(companyId);
 
       // Check if supplier exists
@@ -477,6 +540,21 @@ router.delete('/:id',
         return res.status(404).json({
           success: false,
           error: 'Supplier not found'
+        });
+      }
+
+      // Check ownership
+      if (!checkSupplierOwnership(supplier, userId, permissions, 'DELETE')) {
+        auditLog('PERMISSION_DENIED', userId, {
+          reason: 'Attempted to delete another user\'s supplier',
+          supplierId: id,
+          supplierCreatedBy: supplier.createdBy,
+          requestedBy: userId
+        });
+
+        return res.status(403).json({
+          success: false,
+          error: 'You can only delete your own suppliers'
         });
       }
 
@@ -573,13 +651,13 @@ router.delete('/:id',
 // POST /api/suppliers/:id/attachments - Upload attachments to supplier
 router.post('/:id/attachments',
   validateParams(Joi.object({ id: Joi.number().integer().positive().required() })),
-  requirePermission('MANAGE_SUPPLIERS'),
+  requireAnyPermission(['EDIT_SUPPLIERS_ALL', 'EDIT_SUPPLIERS_OWN']),
   uploadMultipleToS3,
   requireFiles,
   async (req, res) => {
     try {
       const { id } = req.params;
-      const { companyId, userId } = req.user;
+      const { companyId, userId, permissions } = req.user;
       const db = getDbConnection(companyId);
 
       // Check if supplier exists
@@ -597,6 +675,30 @@ router.post('/:id/attachments',
         return res.status(404).json({
           success: false,
           error: 'Supplier not found'
+        });
+      }
+
+      // Check ownership
+      if (!checkSupplierOwnership(supplier, userId, permissions, 'EDIT')) {
+        // Delete uploaded S3 files if permission check fails
+        if (req.files && req.files.length > 0) {
+          await Promise.all(req.files.map(file =>
+            storageService.deleteFile(file.key).catch(err =>
+              logger.warn('Failed to delete unauthorized supplier attachment', { key: file.key })
+            )
+          ));
+        }
+
+        auditLog('PERMISSION_DENIED', userId, {
+          reason: 'Attempted to upload attachments to another user\'s supplier',
+          supplierId: id,
+          supplierCreatedBy: supplier.createdBy,
+          requestedBy: userId
+        });
+
+        return res.status(403).json({
+          success: false,
+          error: 'You can only upload attachments to your own suppliers'
         });
       }
 
@@ -644,11 +746,11 @@ router.post('/:id/attachments',
 // GET /api/suppliers/:id/attachments - Get attachments for supplier
 router.get('/:id/attachments',
   validateParams(Joi.object({ id: Joi.number().integer().positive().required() })),
-  requirePermission('VIEW_SUPPLIERS'),
+  requireAnyPermission(['VIEW_SUPPLIERS_ALL', 'VIEW_SUPPLIERS_OWN']),
   async (req, res) => {
     try {
       const { id } = req.params;
-      const { companyId } = req.user;
+      const { companyId, userId, permissions } = req.user;
       const db = getDbConnection(companyId);
 
       // Verify supplier exists
@@ -658,6 +760,21 @@ router.get('/:id/attachments',
         return res.status(404).json({
           success: false,
           error: 'Supplier not found'
+        });
+      }
+
+      // Check ownership
+      if (!checkSupplierOwnership(supplier, userId, permissions, 'VIEW')) {
+        auditLog('PERMISSION_DENIED', userId, {
+          reason: 'Attempted to view attachments from another user\'s supplier',
+          supplierId: id,
+          supplierCreatedBy: supplier.createdBy,
+          requestedBy: userId
+        });
+
+        return res.status(403).json({
+          success: false,
+          error: 'You can only view attachments from your own suppliers'
         });
       }
 
@@ -706,11 +823,11 @@ router.delete('/:id/attachments/:fileId',
     id: Joi.number().integer().positive().required(),
     fileId: Joi.number().integer().positive().required()
   })),
-  requirePermission('MANAGE_SUPPLIERS'),
+  requireAnyPermission(['EDIT_SUPPLIERS_ALL', 'EDIT_SUPPLIERS_OWN']),
   async (req, res) => {
     try {
       const { id, fileId } = req.params;
-      const { companyId, userId } = req.user;
+      const { companyId, userId, permissions } = req.user;
       const db = getDbConnection(companyId);
 
       // Verify supplier exists
@@ -720,6 +837,21 @@ router.delete('/:id/attachments/:fileId',
         return res.status(404).json({
           success: false,
           error: 'Supplier not found'
+        });
+      }
+
+      // Check ownership
+      if (!checkSupplierOwnership(supplier, userId, permissions, 'EDIT')) {
+        auditLog('PERMISSION_DENIED', userId, {
+          reason: 'Attempted to delete attachment from another user\'s supplier',
+          supplierId: id,
+          supplierCreatedBy: supplier.createdBy,
+          requestedBy: userId
+        });
+
+        return res.status(403).json({
+          success: false,
+          error: 'You can only delete attachments from your own suppliers'
         });
       }
 

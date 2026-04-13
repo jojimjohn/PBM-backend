@@ -1,6 +1,6 @@
 const express = require('express');
 const { validate, validateParams, sanitize } = require('../middleware/validation');
-const { requirePermission } = require('../middleware/auth');
+const { requirePermission, requireAnyPermission } = require('../middleware/auth');
 const { projectFilter, applyProjectFilter } = require('../middleware/projectFilter');
 const { logger, auditLog } = require('../utils/logger');
 const { getDbConnection } = require('../config/database');
@@ -11,6 +11,32 @@ const router = express.Router();
 
 // Apply sanitization to all routes
 router.use(sanitize);
+
+/**
+ * Check if user has permission to access a specific invoice based on ownership
+ * @param {Object} invoice - The invoice object
+ * @param {number} userId - The user's ID
+ * @param {Array} permissions - User's permissions array
+ * @param {string} permissionType - Base permission type ('VIEW', 'EDIT', 'DELETE')
+ * @returns {boolean} - True if user has permission, false otherwise
+ */
+const checkInvoiceOwnership = (invoice, userId, permissions, permissionType = 'EDIT') => {
+  const { hasPermission } = require('../config/permissionsHierarchy');
+
+  // If user has the _ALL variant, they can access any invoice
+  const allPermission = `${permissionType}_INVOICES_ALL`;
+  if (hasPermission(permissions, allPermission)) {
+    return true;
+  }
+
+  // If user has the _OWN variant, check ownership
+  const ownPermission = `${permissionType}_INVOICES_OWN`;
+  if (hasPermission(permissions, ownPermission)) {
+    return invoice.created_by === userId;
+  }
+
+  return false;
+};
 
 // Bill type prefixes for clear differentiation
 const BILL_PREFIXES = {
@@ -121,10 +147,11 @@ const paymentSchema = Joi.object({
 }).options({ stripUnknown: true });
 
 // GET /api/purchase-invoices - List all purchase invoices
-router.get('/', requirePermission('VIEW_PURCHASE'), projectFilter, async (req, res) => {
+router.get('/', requireAnyPermission(['VIEW_INVOICES_ALL', 'VIEW_INVOICES_OWN']), projectFilter, async (req, res) => {
   try {
-    const { companyId } = req.user;
+    const { companyId, userId, permissions } = req.user;
     const db = getDbConnection(companyId);
+    const { hasPermission } = require('../config/permissionsHierarchy');
 
     const {
       page = 1,
@@ -197,6 +224,11 @@ router.get('/', requirePermission('VIEW_PURCHASE'), projectFilter, async (req, r
       query = query.where('purchase_invoices.invoice_date', '<=', toDate);
     }
 
+    // Apply ownership filtering if user only has VIEW_INVOICES_OWN permission
+    if (!hasPermission(permissions, 'VIEW_INVOICES_ALL')) {
+      query = query.where('purchase_invoices.created_by', userId);
+    }
+
     // Get total count for pagination
     const totalQuery = query.clone();
     const [{ total }] = await totalQuery.count('* as total');
@@ -254,11 +286,11 @@ router.get('/', requirePermission('VIEW_PURCHASE'), projectFilter, async (req, r
 // GET /api/purchase-invoices/:id - Get specific invoice
 router.get('/:id',
   validateParams(Joi.object({ id: Joi.number().integer().positive().required() })),
-  requirePermission('VIEW_PURCHASE'),
+  requireAnyPermission(['VIEW_INVOICES_ALL', 'VIEW_INVOICES_OWN']),
   async (req, res) => {
     try {
       const { id } = req.params;
-      const { companyId } = req.user;
+      const { companyId, userId, permissions } = req.user;
       const db = getDbConnection(companyId);
 
       const invoice = await db('purchase_invoices')
@@ -284,6 +316,21 @@ router.get('/:id',
         return res.status(404).json({
           success: false,
           error: 'Invoice not found'
+        });
+      }
+
+      // Check ownership
+      if (!checkInvoiceOwnership(invoice, userId, permissions, 'VIEW')) {
+        auditLog('PERMISSION_DENIED', userId, {
+          reason: 'Attempted to view another user\'s invoice',
+          invoiceId: id,
+          invoiceCreatedBy: invoice.created_by,
+          requestedBy: userId
+        });
+
+        return res.status(403).json({
+          success: false,
+          error: 'You can only view your own invoices'
         });
       }
 
@@ -329,7 +376,7 @@ router.get('/:id',
 // POST /api/purchase-invoices - Create new invoice (company or vendor bill)
 router.post('/',
   validate(purchaseInvoiceSchema),
-  requirePermission('CREATE_PURCHASE'),
+  requirePermission('CREATE_INVOICES'),
   async (req, res) => {
     try {
       const { companyId, userId } = req.user;
@@ -591,11 +638,11 @@ const vendorBillUpdateSchema = Joi.object({
 // PUT /api/purchase-invoices/:id - Update invoice (with vendor bill validation)
 router.put('/:id',
   validateParams(Joi.object({ id: Joi.number().integer().positive().required() })),
-  requirePermission('CREATE_PURCHASE'),
+  requireAnyPermission(['EDIT_INVOICES_ALL', 'EDIT_INVOICES_OWN']),
   async (req, res) => {
     try {
       const { id } = req.params;
-      const { companyId, userId } = req.user;
+      const { companyId, userId, permissions } = req.user;
       const db = getDbConnection(companyId);
       const updateData = req.body;
 
@@ -608,6 +655,21 @@ router.put('/:id',
         return res.status(404).json({
           success: false,
           error: 'Invoice not found'
+        });
+      }
+
+      // Check ownership
+      if (!checkInvoiceOwnership(invoice, userId, permissions, 'EDIT')) {
+        auditLog('PERMISSION_DENIED', userId, {
+          reason: 'Attempted to update another user\'s invoice',
+          invoiceId: id,
+          invoiceCreatedBy: invoice.created_by,
+          requestedBy: userId
+        });
+
+        return res.status(403).json({
+          success: false,
+          error: 'You can only update your own invoices'
         });
       }
 
@@ -782,31 +844,58 @@ router.put('/:id',
 router.post('/:id/payment',
   validateParams(Joi.object({ id: Joi.number().integer().positive().required() })),
   validate(paymentSchema),
-  requirePermission('CREATE_PURCHASE'),
+  requireAnyPermission(['EDIT_INVOICES_ALL', 'EDIT_INVOICES_OWN']),
   async (req, res) => {
     try {
       const { id } = req.params;
-      const { companyId, userId } = req.user;
+      const { companyId, userId, permissions } = req.user;
       const db = getDbConnection(companyId);
       const { amount, paymentDate, paymentMethod, reference, notes, bankAccountId } = req.body;
 
+      // Get invoice first to check ownership before transaction
+      const invoice = await db('purchase_invoices')
+        .where({ id })
+        .first();
+
+      if (!invoice) {
+        return res.status(404).json({
+          success: false,
+          error: 'Invoice not found'
+        });
+      }
+
+      // Check ownership
+      if (!checkInvoiceOwnership(invoice, userId, permissions, 'EDIT')) {
+        auditLog('PERMISSION_DENIED', userId, {
+          reason: 'Attempted to record payment on another user\'s invoice',
+          invoiceId: id,
+          invoiceCreatedBy: invoice.created_by,
+          requestedBy: userId
+        });
+
+        return res.status(403).json({
+          success: false,
+          error: 'You can only record payments on your own invoices'
+        });
+      }
+
       await db.transaction(async (trx) => {
-        // Get invoice
-        const invoice = await trx('purchase_invoices')
+        // Re-fetch invoice within transaction for consistency
+        const invoiceInTrx = await trx('purchase_invoices')
           .where({ id })
           .first();
 
-        if (!invoice) {
+        if (!invoiceInTrx) {
           throw new Error('Invoice not found');
         }
 
         // Business Rule: Company bills cannot be paid directly
         // They should only be marked as paid when their linked vendor bill is paid
-        if (invoice.bill_type === 'company') {
+        if (invoiceInTrx.bill_type === 'company') {
           // Check if this company bill's PO is covered by a vendor bill
           const vendorBill = await trx('purchase_invoices')
             .where('bill_type', 'vendor')
-            .whereRaw(`JSON_CONTAINS(covers_purchase_orders, ?)`, [JSON.stringify(invoice.purchase_order_id)])
+            .whereRaw(`JSON_CONTAINS(covers_purchase_orders, ?)`, [JSON.stringify(invoiceInTrx.purchase_order_id)])
             .first();
 
           if (!vendorBill) {
@@ -818,8 +907,8 @@ router.post('/:id/payment',
 
         // Calculate new paid amount and balance
         // Use toFixed(3) to avoid floating-point precision issues (e.g., 0.38999999999987267 instead of 0.39)
-        const currentPaid = parseFloat((parseFloat(invoice.paid_amount) || 0).toFixed(3));
-        const invoiceAmount = parseFloat(parseFloat(invoice.invoice_amount).toFixed(3));
+        const currentPaid = parseFloat((parseFloat(invoiceInTrx.paid_amount) || 0).toFixed(3));
+        const invoiceAmount = parseFloat(parseFloat(invoiceInTrx.invoice_amount).toFixed(3));
         const balanceDue = parseFloat((invoiceAmount - currentPaid).toFixed(3));
         const paymentAmount = parseFloat(parseFloat(amount).toFixed(3));
 
@@ -840,7 +929,7 @@ router.post('/:id/payment',
           paymentStatus = 'paid';
         } else if (newBalance === invoiceAmount) {
           paymentStatus = 'unpaid';
-        } else if (new Date(invoice.due_date) < new Date() && newBalance > 0) {
+        } else if (new Date(invoiceInTrx.due_date) < new Date() && newBalance > 0) {
           paymentStatus = 'overdue';
         }
 
@@ -859,13 +948,13 @@ router.post('/:id/payment',
 
         // Create transaction record for payment (use effectivePayment for precision)
         await trx('transactions').insert({
-          transactionNumber: `INV-PAY-${invoice.invoice_number}-${Date.now()}`,
+          transactionNumber: `INV-PAY-${invoiceInTrx.invoice_number}-${Date.now()}`,
           transactionType: 'payment',
           referenceId: id,
           referenceType: 'purchase_invoice',
           amount: effectivePayment,
           transactionDate: paymentDate,
-          description: `Payment for invoice ${invoice.invoice_number}${reference ? ` (Ref: ${reference})` : ''}`,
+          description: `Payment for invoice ${invoiceInTrx.invoice_number}${reference ? ` (Ref: ${reference})` : ''}`,
           notes: notes || '',
           createdBy: userId,
           created_at: new Date(),
@@ -876,7 +965,7 @@ router.post('/:id/payment',
         if (bankAccountId && paymentMethod === 'bank_transfer') {
           // Get supplier name for description
           const supplier = await trx('suppliers')
-            .where({ id: invoice.supplier_id })
+            .where({ id: invoiceInTrx.supplier_id })
             .select('name')
             .first();
 
@@ -886,7 +975,7 @@ router.post('/:id/payment',
             transaction_type: 'withdrawal',
             amount: effectivePayment,
             transaction_date: paymentDate,
-            description: `Payment to ${supplier?.name || 'Supplier'} - Invoice ${invoice.invoice_number}`,
+            description: `Payment to ${supplier?.name || 'Supplier'} - Invoice ${invoiceInTrx.invoice_number}`,
             reference_type: 'purchase_invoice',
             reference_id: id,
             category: 'supplier_payment',
@@ -911,7 +1000,7 @@ router.post('/:id/payment',
 
         auditLog('PURCHASE_INVOICE_PAYMENT_RECORDED', userId, {
           invoiceId: id,
-          invoiceNumber: invoice.invoice_number,
+          invoiceNumber: invoiceInTrx.invoice_number,
           paymentAmount: effectivePayment,
           paymentMethod,
           reference,
@@ -949,11 +1038,11 @@ router.post('/:id/payment',
 // DELETE /api/purchase-invoices/:id - Delete invoice
 router.delete('/:id',
   validateParams(Joi.object({ id: Joi.number().integer().positive().required() })),
-  requirePermission('DELETE_PURCHASE'),
+  requireAnyPermission(['DELETE_INVOICES_ALL', 'DELETE_INVOICES_OWN']),
   async (req, res) => {
     try {
       const { id } = req.params;
-      const { companyId, userId } = req.user;
+      const { companyId, userId, permissions } = req.user;
       const db = getDbConnection(companyId);
 
       // Get invoice
@@ -965,6 +1054,21 @@ router.delete('/:id',
         return res.status(404).json({
           success: false,
           error: 'Invoice not found'
+        });
+      }
+
+      // Check ownership
+      if (!checkInvoiceOwnership(invoice, userId, permissions, 'DELETE')) {
+        auditLog('PERMISSION_DENIED', userId, {
+          reason: 'Attempted to delete another user\'s invoice',
+          invoiceId: id,
+          invoiceCreatedBy: invoice.created_by,
+          requestedBy: userId
+        });
+
+        return res.status(403).json({
+          success: false,
+          error: 'You can only delete your own invoices'
         });
       }
 
@@ -1014,11 +1118,11 @@ router.delete('/:id',
 router.put('/:id/status',
   validateParams(Joi.object({ id: Joi.number().integer().positive().required() })),
   validate(companyBillStatusSchema),
-  requirePermission('CREATE_PURCHASE'),
+  requireAnyPermission(['EDIT_INVOICES_ALL', 'EDIT_INVOICES_OWN']),
   async (req, res) => {
     try {
       const { id } = req.params;
-      const { companyId, userId } = req.user;
+      const { companyId, userId, permissions } = req.user;
       const db = getDbConnection(companyId);
       const { status } = req.body;
 
@@ -1031,6 +1135,21 @@ router.put('/:id/status',
         return res.status(404).json({
           success: false,
           error: 'Invoice not found'
+        });
+      }
+
+      // Check ownership
+      if (!checkInvoiceOwnership(invoice, userId, permissions, 'EDIT')) {
+        auditLog('PERMISSION_DENIED', userId, {
+          reason: 'Attempted to update status of another user\'s invoice',
+          invoiceId: id,
+          invoiceCreatedBy: invoice.created_by,
+          requestedBy: userId
+        });
+
+        return res.status(403).json({
+          success: false,
+          error: 'You can only update the status of your own invoices'
         });
       }
 
@@ -1088,11 +1207,12 @@ router.put('/:id/status',
 // GET /api/purchase-invoices/unlinked-company-bills - Get company bills available for linking
 // Returns company bills with status 'sent' that are not linked to any vendor bill
 router.get('/unlinked-company-bills',
-  requirePermission('VIEW_PURCHASE'),
+  requireAnyPermission(['VIEW_INVOICES_ALL', 'VIEW_INVOICES_OWN']),
   async (req, res) => {
     try {
-      const { companyId } = req.user;
+      const { companyId, userId, permissions } = req.user;
       const db = getDbConnection(companyId);
+      const { hasPermission } = require('../config/permissionsHierarchy');
       const { supplierId } = req.query;
 
       // Get all vendor bills with covers_company_bills
@@ -1135,6 +1255,11 @@ router.get('/unlinked-company-bills',
         query = query.where('purchase_invoices.supplier_id', supplierId);
       }
 
+      // Apply ownership filtering if user only has VIEW_INVOICES_OWN permission
+      if (!hasPermission(permissions, 'VIEW_INVOICES_ALL')) {
+        query = query.where('purchase_invoices.created_by', userId);
+      }
+
       const companyBills = await query.orderBy('purchase_invoices.invoice_date', 'desc');
 
       // Filter out already linked bills
@@ -1166,7 +1291,7 @@ router.get('/unlinked-company-bills',
 // POST /api/purchase-invoices/reset-orphan-payments - Reset payments on orphan company bills
 // Company bills without vendor bills should not have been paid directly
 router.post('/reset-orphan-payments',
-  requirePermission('CREATE_PURCHASE'),
+  requirePermission('MANAGE_INVOICES_ALL'),
   async (req, res) => {
     try {
       const { companyId, userId } = req.user;
@@ -1259,7 +1384,7 @@ router.post('/reset-orphan-payments',
 // POST /api/purchase-invoices/sync-prefixes - Add bill type prefixes to existing invoices
 // This adds CB-/VB- prefix to invoices that don't have them
 router.post('/sync-prefixes',
-  requirePermission('CREATE_PURCHASE'),
+  requirePermission('MANAGE_INVOICES_ALL'),
   async (req, res) => {
     try {
       const { companyId, userId } = req.user;
@@ -1348,7 +1473,7 @@ router.post('/sync-prefixes',
 // POST /api/purchase-invoices/sync-status - Sync payment status for all invoices
 // This fixes any data inconsistencies where balance=0 but status!='paid'
 router.post('/sync-status',
-  requirePermission('CREATE_PURCHASE'),
+  requirePermission('MANAGE_INVOICES_ALL'),
   async (req, res) => {
     try {
       const { companyId, userId } = req.user;
@@ -1445,10 +1570,54 @@ router.post('/sync-status',
 // POST /api/purchase-invoices/:id/attachment - Upload invoice attachment
 router.post('/:id/attachment',
   validateParams(Joi.object({ id: Joi.number().integer().positive().required() })),
-  requirePermission('CREATE_PURCHASE'),
-  (req, res, next) => {
-    req.params.type = 'invoices';
-    next();
+  requireAnyPermission(['EDIT_INVOICES_ALL', 'EDIT_INVOICES_OWN']),
+  async (req, res, next) => {
+    try {
+      const { id } = req.params;
+      const { companyId, userId, permissions } = req.user;
+      const db = getDbConnection(companyId);
+
+      // Check if invoice exists and user has ownership
+      const invoice = await db('purchase_invoices')
+        .where({ id })
+        .first();
+
+      if (!invoice) {
+        return res.status(404).json({
+          success: false,
+          error: 'Invoice not found'
+        });
+      }
+
+      // Check ownership
+      if (!checkInvoiceOwnership(invoice, userId, permissions, 'EDIT')) {
+        auditLog('PERMISSION_DENIED', userId, {
+          reason: 'Attempted to upload attachment to another user\'s invoice',
+          invoiceId: id,
+          invoiceCreatedBy: invoice.created_by,
+          requestedBy: userId
+        });
+
+        return res.status(403).json({
+          success: false,
+          error: 'You can only upload attachments to your own invoices'
+        });
+      }
+
+      // Set params for upload middleware
+      req.params.type = 'invoices';
+      next();
+    } catch (error) {
+      logger.error('Error checking invoice ownership for attachment', {
+        error: error.message,
+        invoiceId: req.params.id,
+        userId: req.user.userId
+      });
+      return res.status(500).json({
+        success: false,
+        error: 'Failed to check invoice permissions'
+      });
+    }
   },
   uploadSingle,
   async (req, res) => {

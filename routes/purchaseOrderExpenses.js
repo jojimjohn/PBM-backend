@@ -1,10 +1,48 @@
 const express = require('express');
 const router = express.Router();
 const Joi = require('joi');
-const { authenticateToken, requirePermission } = require('../middleware/auth');
+const { authenticateToken, requirePermission, requireAnyPermission } = require('../middleware/auth');
 const { validate, validateParams } = require('../middleware/validation');
 const { getDbConnection } = require('../config/database');
 const { logger } = require('../utils/logger');
+
+/**
+ * Helper function to check PO expense ownership
+ * @param {object} expense - The expense object from database
+ * @param {number} userId - The user ID to check ownership against
+ * @param {array} permissions - User's permissions array
+ * @param {string} permissionType - Type of permission ('VIEW', 'EDIT', 'DELETE')
+ * @returns {boolean} - Whether the user has permission
+ */
+const checkPOExpenseOwnership = (expense, userId, permissions, permissionType = 'EDIT') => {
+  const { hasPermission } = require('../config/permissionsHierarchy');
+
+  // Check if user has ALL permission
+  const allPermission = `${permissionType}_PO_EXPENSES_ALL`;
+  if (hasPermission(permissions, allPermission)) {
+    return true;
+  }
+
+  // Check if user has OWN permission and owns the expense
+  const ownPermission = `${permissionType}_PO_EXPENSES_OWN`;
+  if (hasPermission(permissions, ownPermission)) {
+    return expense.createdBy === userId;
+  }
+
+  return false;
+};
+
+/**
+ * Audit permission denial for security monitoring
+ */
+const auditPermissionDenial = (action, userId, details) => {
+  logger.warn('Permission denied', {
+    action,
+    userId,
+    timestamp: new Date().toISOString(),
+    ...details
+  });
+};
 
 /**
  * Purchase Order Expenses Routes
@@ -61,21 +99,28 @@ async function validateCategoryCode(db, categoryCode, companyId) {
  */
 router.get('/:id/expenses',
   authenticateToken,
-  requirePermission('VIEW_PURCHASE'),
+  requireAnyPermission(['VIEW_PO_EXPENSES_ALL', 'VIEW_PO_EXPENSES_OWN']),
   validateParams(Joi.object({ id: Joi.number().integer().positive().required() })),
   async (req, res) => {
     try {
       const { id } = req.params;
-      const { companyId } = req.user;
+      const { companyId, userId, permissions } = req.user;
       const db = getDbConnection(companyId);
+      const { hasPermission } = require('../config/permissionsHierarchy');
 
       // Get expenses linked to this PO
-      const expenses = await db('unified_expenses')
+      let query = db('unified_expenses')
         .where({
           referenceType: 'purchase_order',
           referenceId: id
-        })
-        .orderBy('expenseDate', 'desc');
+        });
+
+      // Apply ownership filtering if user only has VIEW_PO_EXPENSES_OWN permission
+      if (!hasPermission(permissions, 'VIEW_PO_EXPENSES_ALL')) {
+        query = query.where('unified_expenses.createdBy', userId);
+      }
+
+      const expenses = await query.orderBy('expenseDate', 'desc');
 
       // Calculate totals by category
       const summary = expenses.reduce((acc, exp) => {
@@ -114,7 +159,7 @@ router.get('/:id/expenses',
  */
 router.post('/:id/expenses',
   authenticateToken,
-  requirePermission('CREATE_PURCHASE'),
+  requirePermission('CREATE_PO_EXPENSES'),
   validateParams(Joi.object({ id: Joi.number().integer().positive().required() })),
   validate(expenseSchema),
   async (req, res) => {
@@ -206,13 +251,13 @@ router.post('/:id/expenses',
  */
 router.put('/expenses/:expenseId',
   authenticateToken,
-  requirePermission('EDIT_PURCHASE'),
+  requireAnyPermission(['EDIT_PO_EXPENSES_ALL', 'EDIT_PO_EXPENSES_OWN']),
   validateParams(Joi.object({ expenseId: Joi.number().integer().positive().required() })),
   validate(expenseSchema),
   async (req, res) => {
     try {
       const { expenseId } = req.params;
-      const { companyId, userId } = req.user;
+      const { companyId, userId, permissions } = req.user;
       const db = getDbConnection(companyId);
 
       // Verify expense exists and is linked to PO
@@ -224,6 +269,21 @@ router.put('/expenses/:expenseId',
         return res.status(404).json({
           success: false,
           error: 'Expense not found'
+        });
+      }
+
+      // Check ownership
+      if (!checkPOExpenseOwnership(expense, userId, permissions, 'EDIT')) {
+        auditPermissionDenial('PERMISSION_DENIED', userId, {
+          action: 'EDIT_PO_EXPENSE',
+          reason: 'Attempted to edit another user\'s PO expense',
+          expenseId,
+          expenseCreatedBy: expense.createdBy,
+          requestedBy: userId
+        });
+        return res.status(403).json({
+          success: false,
+          error: 'You can only edit your own PO expenses'
         });
       }
 
@@ -292,12 +352,12 @@ router.put('/expenses/:expenseId',
  */
 router.delete('/expenses/:expenseId',
   authenticateToken,
-  requirePermission('DELETE_PURCHASE'),
+  requireAnyPermission(['DELETE_PO_EXPENSES_ALL', 'DELETE_PO_EXPENSES_OWN']),
   validateParams(Joi.object({ expenseId: Joi.number().integer().positive().required() })),
   async (req, res) => {
     try {
       const { expenseId } = req.params;
-      const { companyId, userId } = req.user;
+      const { companyId, userId, permissions } = req.user;
       const db = getDbConnection(companyId);
 
       // Verify expense exists
@@ -309,6 +369,21 @@ router.delete('/expenses/:expenseId',
         return res.status(404).json({
           success: false,
           error: 'Expense not found'
+        });
+      }
+
+      // Check ownership
+      if (!checkPOExpenseOwnership(expense, userId, permissions, 'DELETE')) {
+        auditPermissionDenial('PERMISSION_DENIED', userId, {
+          action: 'DELETE_PO_EXPENSE',
+          reason: 'Attempted to delete another user\'s PO expense',
+          expenseId,
+          expenseCreatedBy: expense.createdBy,
+          requestedBy: userId
+        });
+        return res.status(403).json({
+          success: false,
+          error: 'You can only delete your own PO expenses'
         });
       }
 
@@ -344,7 +419,7 @@ router.delete('/expenses/:expenseId',
  */
 router.get('/expenses/categories',
   authenticateToken,
-  requirePermission('VIEW_PURCHASE'),
+  requirePermission('VIEW_PO_EXPENSES'),
   async (req, res) => {
     try {
       const categories = {
@@ -379,13 +454,14 @@ router.get('/expenses/categories',
  */
 router.get('/:id/expense-summary',
   authenticateToken,
-  requirePermission('VIEW_PURCHASE'),
+  requireAnyPermission(['VIEW_PO_EXPENSES_ALL', 'VIEW_PO_EXPENSES_OWN']),
   validateParams(Joi.object({ id: Joi.number().integer().positive().required() })),
   async (req, res) => {
     try {
       const { id } = req.params;
-      const { companyId } = req.user;
+      const { companyId, userId, permissions } = req.user;
       const db = getDbConnection(companyId);
+      const { hasPermission } = require('../config/permissionsHierarchy');
 
       // Get PO details
       const po = await db('purchase_orders').where({ id }).first();
@@ -397,12 +473,18 @@ router.get('/:id/expense-summary',
       }
 
       // Get expenses linked to this PO
-      const expenses = await db('unified_expenses')
+      let query = db('unified_expenses')
         .where({
           referenceType: 'purchase_order',
           referenceId: id
-        })
-        .orderBy('expenseDate', 'desc');
+        });
+
+      // Apply ownership filtering if user only has VIEW_PO_EXPENSES_OWN permission
+      if (!hasPermission(permissions, 'VIEW_PO_EXPENSES_ALL')) {
+        query = query.where('unified_expenses.createdBy', userId);
+      }
+
+      const expenses = await query.orderBy('expenseDate', 'desc');
 
       // Calculate totals by category
       const byCategory = {};

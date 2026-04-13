@@ -1,6 +1,6 @@
 const express = require('express');
 const { validate, validateParams, sanitize } = require('../middleware/validation');
-const { requirePermission } = require('../middleware/auth');
+const { requirePermission, requireAnyPermission } = require('../middleware/auth');
 const { projectFilter, applyProjectFilter } = require('../middleware/projectFilter');
 const { logger, auditLog } = require('../utils/logger');
 const { getDbConnection } = require('../config/database');
@@ -77,13 +77,39 @@ const collectionExpenseSchema = Joi.object({
   notes: Joi.string().allow('').optional()
 });
 
+/**
+ * Check if user has permission to access a collection order resource
+ * @param {object} collection - The collection order object (must have 'createdBy' field)
+ * @param {number} userId - The requesting user's ID
+ * @param {array} permissions - The user's permissions array
+ * @param {string} permissionType - Type of permission ('EDIT', 'DELETE', 'VIEW')
+ * @returns {boolean} - True if user has access, false otherwise
+ */
+const checkCollectionOwnership = (collection, userId, permissions, permissionType = 'EDIT') => {
+  const { hasPermission } = require('../config/permissionsHierarchy');
+
+  // If user has the _ALL variant, they can access any collection
+  const allPermission = `${permissionType}_COLLECTIONS_ALL`;
+  if (hasPermission(permissions, allPermission)) {
+    return true;
+  }
+
+  // If user has the _OWN variant, check ownership
+  const ownPermission = `${permissionType}_COLLECTIONS_OWN`;
+  if (hasPermission(permissions, ownPermission)) {
+    return collection.createdBy === userId;
+  }
+
+  return false;
+};
+
 // POST /api/collection-orders/callouts - Create a callout (saved as collection_order with status 'callout')
-router.post('/callouts', 
+router.post('/callouts',
   validate(calloutSchema),
-  requirePermission('CREATE_COLLECTIONS'),
+  requireAnyPermission(['CREATE_COLLECTIONS_ALL', 'CREATE_COLLECTIONS_OWN']),
   async (req, res) => {
     try {
-      const { companyId } = req.user;
+      const { companyId, userId } = req.user;
       const db = getDbConnection(companyId);
 
       const { materials, ...calloutData } = req.body;
@@ -104,7 +130,7 @@ router.post('/callouts',
           priority: calloutData.priority || 'normal',
           totalValue: calloutData.totalEstimatedValue || 0,
           notes: calloutData.specialInstructions || '',
-          createdBy: req.user.userId
+          createdBy: userId
         });
 
         // Insert collection items
@@ -164,11 +190,12 @@ router.post('/callouts',
 );
 
 // GET /api/collection-orders/callouts - List callouts (collection orders with status 'callout')
-router.get('/callouts', requirePermission('VIEW_COLLECTIONS'), projectFilter, async (req, res) => {
+router.get('/callouts', requireAnyPermission(['VIEW_COLLECTIONS_ALL', 'VIEW_COLLECTIONS_OWN']), projectFilter, async (req, res) => {
   try {
-    const { companyId } = req.user;
+    const { companyId, userId, permissions } = req.user;
+    const { hasPermission } = require('../config/permissionsHierarchy');
     const db = getDbConnection(companyId);
-    
+
     const {
       page = 1,
       limit = 50,
@@ -210,6 +237,11 @@ router.get('/callouts', requirePermission('VIEW_COLLECTIONS'), projectFilter, as
 
     // Apply project filter (if user has project restrictions)
     query = applyProjectFilter(query, req.projectFilter, 'collection_orders.project_id');
+
+    // Apply ownership filtering if user only has VIEW_COLLECTIONS_OWN permission
+    if (!hasPermission(permissions, 'VIEW_COLLECTIONS_ALL')) {
+      query = query.where('collection_orders.createdBy', userId);
+    }
 
     // Status filter - supports comma-separated values for multiple statuses
     // Example: status=in_transit,collecting to get both
@@ -298,14 +330,39 @@ router.get('/callouts', requirePermission('VIEW_COLLECTIONS'), projectFilter, as
 router.put('/:id',
   validateParams(Joi.object({ id: Joi.number().integer().positive().required() })),
   validate(calloutSchema),
-  requirePermission('EDIT_COLLECTIONS'),
+  requireAnyPermission(['EDIT_COLLECTIONS_ALL', 'EDIT_COLLECTIONS_OWN']),
   async (req, res) => {
     try {
       const { id } = req.params;
-      const { companyId } = req.user;
+      const { companyId, userId, permissions } = req.user;
       const db = getDbConnection(companyId);
 
       const { materials, ...calloutData } = req.body;
+
+      // Check if collection order exists
+      const existingCollection = await db('collection_orders').where({ id }).first();
+
+      if (!existingCollection) {
+        return res.status(404).json({
+          success: false,
+          error: 'Collection order not found'
+        });
+      }
+
+      // Check ownership permission
+      if (!checkCollectionOwnership(existingCollection, userId, permissions, 'EDIT')) {
+        auditLog('PERMISSION_DENIED', userId, {
+          reason: 'Attempted to edit another user\'s collection order',
+          collectionId: id,
+          collectionCreatedBy: existingCollection.createdBy,
+          requestedBy: userId
+        });
+
+        return res.status(403).json({
+          success: false,
+          error: 'You can only edit your own collection orders'
+        });
+      }
 
       const result = await db.transaction(async (trx) => {
         // Update collection order
@@ -365,11 +422,11 @@ router.put('/:id',
 // DELETE /api/collection-orders/:id - Delete collection order (callout)
 router.delete('/:id',
   validateParams(Joi.object({ id: Joi.number().integer().positive().required() })),
-  requirePermission('DELETE_COLLECTIONS'),
+  requireAnyPermission(['DELETE_COLLECTIONS_ALL', 'DELETE_COLLECTIONS_OWN']),
   async (req, res) => {
     try {
       const { id } = req.params;
-      const { companyId } = req.user;
+      const { companyId, userId, permissions } = req.user;
       const db = getDbConnection(companyId);
 
       const result = await db.transaction(async (trx) => {
@@ -380,6 +437,18 @@ router.delete('/:id',
 
         if (!collectionOrder) {
           throw new Error('Collection order not found');
+        }
+
+        // Check ownership permission
+        if (!checkCollectionOwnership(collectionOrder, userId, permissions, 'DELETE')) {
+          auditLog('PERMISSION_DENIED', userId, {
+            reason: 'Attempted to delete another user\'s collection order',
+            collectionId: id,
+            collectionCreatedBy: collectionOrder.createdBy,
+            requestedBy: userId
+          });
+
+          throw new Error('You can only delete your own collection orders');
         }
 
         // Only allow deletion if status is 'scheduled' (callout status)
@@ -413,7 +482,7 @@ router.delete('/:id',
 );
 
 // PUT /api/collection-orders/:id/driver - Update driver assignment
-router.put('/:id/driver', 
+router.put('/:id/driver',
   validateParams(Joi.object({ id: Joi.number().integer().positive().required() })),
   validate(Joi.object({
     driverName: Joi.string().max(100).required(),
@@ -421,12 +490,12 @@ router.put('/:id/driver',
     vehiclePlate: Joi.string().max(20).required(),
     vehicleType: Joi.string().valid('truck', 'pickup', 'van', 'trailer').required()
   })),
-  requirePermission('EDIT_COLLECTIONS'),
+  requireAnyPermission(['EDIT_COLLECTIONS_ALL', 'EDIT_COLLECTIONS_OWN']),
   async (req, res) => {
     try {
       const { id } = req.params;
       const { driverName, driverPhone, vehiclePlate, vehicleType } = req.body;
-      const { companyId } = req.user;
+      const { companyId, userId, permissions } = req.user;
       const db = getDbConnection(companyId);
 
       // Check if collection order exists and is in appropriate status
@@ -439,6 +508,21 @@ router.put('/:id/driver',
         return res.status(404).json({
           success: false,
           error: 'Collection order not found or not eligible for driver assignment'
+        });
+      }
+
+      // Check ownership
+      if (!checkCollectionOwnership(collectionOrder, userId, permissions, 'EDIT')) {
+        auditLog('PERMISSION_DENIED', userId, {
+          reason: 'Attempted to assign driver to another user\'s collection order',
+          collectionId: id,
+          collectionCreatedBy: collectionOrder.createdBy,
+          requestedBy: userId
+        });
+
+        return res.status(403).json({
+          success: false,
+          error: 'You can only assign drivers to your own collection orders'
         });
       }
 
@@ -485,7 +569,7 @@ router.put('/:id/driver',
 );
 
 // PUT /api/collection-orders/:id/status - Update collection order status
-router.put('/:id/status', 
+router.put('/:id/status',
   validateParams(Joi.object({ id: Joi.number().integer().positive().required() })),
   validate(Joi.object({
     status: Joi.string().valid('scheduled', 'in_transit', 'collecting', 'completed', 'cancelled', 'failed').required(),
@@ -493,12 +577,12 @@ router.put('/:id/status',
     actualCollectionDate: Joi.date().optional(),
     actualQuantity: Joi.number().min(0).precision(3).optional()
   })),
-  requirePermission('EDIT_COLLECTIONS'),
+  requireAnyPermission(['EDIT_COLLECTIONS_ALL', 'EDIT_COLLECTIONS_OWN']),
   async (req, res) => {
     try {
       const { id } = req.params;
       const { status, notes, actualCollectionDate, actualQuantity } = req.body;
-      const { companyId } = req.user;
+      const { companyId, userId, permissions } = req.user;
       const db = getDbConnection(companyId);
 
       // Check if collection order exists
@@ -510,6 +594,21 @@ router.put('/:id/status',
         return res.status(404).json({
           success: false,
           error: 'Collection order not found'
+        });
+      }
+
+      // Check ownership
+      if (!checkCollectionOwnership(collectionOrder, userId, permissions, 'EDIT')) {
+        auditLog('PERMISSION_DENIED', userId, {
+          reason: 'Attempted to update status of another user\'s collection order',
+          collectionId: id,
+          collectionCreatedBy: collectionOrder.createdBy,
+          requestedBy: userId
+        });
+
+        return res.status(403).json({
+          success: false,
+          error: 'You can only update status of your own collection orders'
         });
       }
 
@@ -590,7 +689,7 @@ router.put('/:id/status',
   }
 );
 
-// PUT /api/collection-orders/:id/driver - Update driver details
+// PUT /api/collection-orders/:id/driver - Update driver details (DUPLICATE - Consider removing)
 router.put('/:id/driver',
   validateParams(Joi.object({ id: Joi.number().integer().positive().required() })),
   validate(Joi.object({
@@ -599,12 +698,12 @@ router.put('/:id/driver',
     vehiclePlate: Joi.string().required(),
     vehicleType: Joi.string().valid('truck', 'pickup', 'van', 'trailer').required()
   })),
-  requirePermission('EDIT_COLLECTIONS'),
+  requireAnyPermission(['EDIT_COLLECTIONS_ALL', 'EDIT_COLLECTIONS_OWN']),
   async (req, res) => {
     try {
       const { id } = req.params;
       const { driverName, vehiclePlate, vehicleType } = req.body;
-      const { companyId } = req.user;
+      const { companyId, userId, permissions } = req.user;
       const db = getDbConnection(companyId);
 
       // Check if collection order exists
@@ -616,6 +715,21 @@ router.put('/:id/driver',
         return res.status(404).json({
           success: false,
           error: 'Collection order not found'
+        });
+      }
+
+      // Check ownership
+      if (!checkCollectionOwnership(collectionOrder, userId, permissions, 'EDIT')) {
+        auditLog('PERMISSION_DENIED', userId, {
+          reason: 'Attempted to update driver of another user\'s collection order',
+          collectionId: id,
+          collectionCreatedBy: collectionOrder.createdBy,
+          requestedBy: userId
+        });
+
+        return res.status(403).json({
+          success: false,
+          error: 'You can only update drivers for your own collection orders'
         });
       }
 
@@ -656,10 +770,11 @@ router.put('/:id/driver',
 );
 
 // GET /api/collection-orders - List all collection orders
-router.get('/', requirePermission('VIEW_PURCHASE'), projectFilter, async (req, res) => {
+router.get('/', requireAnyPermission(['VIEW_COLLECTIONS_ALL', 'VIEW_COLLECTIONS_OWN']), projectFilter, async (req, res) => {
   try {
-    const { companyId } = req.user;
+    const { companyId, userId, permissions } = req.user;
     const db = getDbConnection(companyId);
+    const { hasPermission } = require('../config/permissionsHierarchy');
     
     const {
       page = 1,
@@ -706,6 +821,11 @@ router.get('/', requirePermission('VIEW_PURCHASE'), projectFilter, async (req, r
 
     // Apply project filter (if user has project restrictions)
     query = applyProjectFilter(query, req.projectFilter, 'collection_orders.project_id');
+
+    // Apply ownership filtering if user only has VIEW_COLLECTIONS_OWN permission
+    if (!hasPermission(permissions, 'VIEW_COLLECTIONS_ALL')) {
+      query = query.where('collection_orders.createdBy', userId);
+    }
 
     // Status filter
     if (status) {
@@ -809,13 +929,13 @@ router.get('/', requirePermission('VIEW_PURCHASE'), projectFilter, async (req, r
 });
 
 // GET /api/collection-orders/:id - Get specific collection order
-router.get('/:id', 
+router.get('/:id',
   validateParams(Joi.object({ id: Joi.number().integer().positive().required() })),
-  requirePermission('VIEW_COLLECTIONS'),
+  requireAnyPermission(['VIEW_COLLECTIONS_ALL', 'VIEW_COLLECTIONS_OWN']),
   async (req, res) => {
     try {
       const { id } = req.params;
-      const { companyId } = req.user;
+      const { companyId, userId, permissions } = req.user;
       const db = getDbConnection(companyId);
 
       // Get order details with linked purchase order info
@@ -847,6 +967,21 @@ router.get('/:id',
         return res.status(404).json({
           success: false,
           error: 'Collection order not found'
+        });
+      }
+
+      // Check ownership if user only has VIEW_COLLECTIONS_OWN permission
+      if (!checkCollectionOwnership(order, userId, permissions, 'VIEW')) {
+        auditLog('PERMISSION_DENIED', userId, {
+          reason: 'Attempted to view another user\'s collection order',
+          collectionId: id,
+          collectionCreatedBy: order.createdBy,
+          requestedBy: userId
+        });
+
+        return res.status(403).json({
+          success: false,
+          error: 'You can only view your own collection orders'
         });
       }
 
@@ -932,12 +1067,12 @@ router.get('/:id',
 );
 
 // POST /api/collection-orders - Create new collection order from callout
-router.post('/', 
+router.post('/',
   validate(collectionOrderSchema),
-  requirePermission('CREATE_PURCHASE'),
+  requireAnyPermission(['CREATE_COLLECTIONS_ALL', 'CREATE_COLLECTIONS_OWN']),
   async (req, res) => {
     try {
-      const { companyId } = req.user;
+      const { companyId, userId } = req.user;
       const db = getDbConnection(companyId);
 
       // Validate callout exists and is ready for collection
@@ -984,7 +1119,7 @@ router.post('/',
         contractId: callout.contractId,
         supplierId: callout.supplierId,
         locationId: callout.locationId,
-        createdBy: req.user.userId,
+        createdBy: userId,
         created_at: new Date(),
         updated_at: new Date()
       };
@@ -1052,11 +1187,11 @@ router.post('/',
 router.post('/:id/items',
   validateParams(Joi.object({ id: Joi.number().integer().positive().required() })),
   validate(collectionItemSchema),
-  requirePermission('EDIT_PURCHASE'),
+  requireAnyPermission(['EDIT_COLLECTIONS_ALL', 'EDIT_COLLECTIONS_OWN']),
   async (req, res) => {
     try {
       const { id } = req.params;
-      const { companyId } = req.user;
+      const { companyId, userId, permissions } = req.user;
       const db = getDbConnection(companyId);
 
       // Verify order exists and is in progress
@@ -1076,6 +1211,21 @@ router.post('/:id/items',
         return res.status(404).json({
           success: false,
           error: 'Collection order not found or not in progress'
+        });
+      }
+
+      // Check ownership
+      if (!checkCollectionOwnership(order, userId, permissions, 'EDIT')) {
+        auditLog('PERMISSION_DENIED', userId, {
+          reason: 'Attempted to add items to another user\'s collection order',
+          collectionId: id,
+          collectionCreatedBy: order.createdBy,
+          requestedBy: userId
+        });
+
+        return res.status(403).json({
+          success: false,
+          error: 'You can only add items to your own collection orders'
         });
       }
 
@@ -1210,11 +1360,11 @@ router.post('/:id/items',
 router.post('/:id/expenses',
   validateParams(Joi.object({ id: Joi.number().integer().positive().required() })),
   validate(collectionExpenseSchema),
-  requirePermission('EDIT_PURCHASE'),
+  requireAnyPermission(['EDIT_COLLECTIONS_ALL', 'EDIT_COLLECTIONS_OWN']),
   async (req, res) => {
     try {
       const { id } = req.params;
-      const { companyId } = req.user;
+      const { companyId, userId, permissions } = req.user;
       const db = getDbConnection(companyId);
 
       // Verify order exists
@@ -1229,10 +1379,25 @@ router.post('/:id/expenses',
         });
       }
 
+      // Check ownership
+      if (!checkCollectionOwnership(order, userId, permissions, 'EDIT')) {
+        auditLog('PERMISSION_DENIED', userId, {
+          reason: 'Attempted to add expenses to another user\'s collection order',
+          collectionId: id,
+          collectionCreatedBy: order.createdBy,
+          requestedBy: userId
+        });
+
+        return res.status(403).json({
+          success: false,
+          error: 'You can only add expenses to your own collection orders'
+        });
+      }
+
       const expenseData = {
         ...req.body,
         collectionOrderId: id,
-        createdBy: req.user.userId,
+        createdBy: userId,
         created_at: new Date(),
         updated_at: new Date()
       };
@@ -1293,12 +1458,12 @@ router.post('/:id/complete',
     actualEndTime: Joi.date().optional(),
     notes: Joi.string().allow('').optional()
   })),
-  requirePermission('EDIT_PURCHASE'),
+  requireAnyPermission(['EDIT_COLLECTIONS_ALL', 'EDIT_COLLECTIONS_OWN']),
   async (req, res) => {
     try {
       const { id } = req.params;
       const { actualEndTime, notes } = req.body;
-      const { companyId, userId } = req.user;
+      const { companyId, userId, permissions } = req.user;
       const db = getDbConnection(companyId);
 
       const order = await db('collection_orders')
@@ -1310,6 +1475,21 @@ router.post('/:id/complete',
         return res.status(404).json({
           success: false,
           error: 'Collection order not found or not ready for completion'
+        });
+      }
+
+      // Check ownership
+      if (!checkCollectionOwnership(order, userId, permissions, 'EDIT')) {
+        auditLog('PERMISSION_DENIED', userId, {
+          reason: 'Attempted to complete another user\'s collection order',
+          collectionId: id,
+          collectionCreatedBy: order.createdBy,
+          requestedBy: userId
+        });
+
+        return res.status(403).json({
+          success: false,
+          error: 'You can only complete your own collection orders'
         });
       }
 
@@ -1442,7 +1622,7 @@ router.post('/:id/finalize-wcn',
       // This ensures inventory gets FULL verified qty, and wastage only affects inventory upon approval.
     })).optional()
   })),
-  requirePermission('EDIT_PURCHASE'),
+  requirePermission('FINALIZE_WCN'),
   async (req, res) => {
     try {
       const { id } = req.params;
@@ -2342,12 +2522,12 @@ router.post('/:id/rectify-wcn',
     ).min(1).required(),
     notes: Joi.string().allow('').optional()
   })),
-  requirePermission('EDIT_PURCHASE'),
+  requireAnyPermission(['EDIT_COLLECTIONS_ALL', 'EDIT_COLLECTIONS_OWN']),
   async (req, res) => {
     try {
       const { id } = req.params;
       const { itemAdjustments, notes } = req.body;
-      const { companyId, userId } = req.user;
+      const { companyId, userId, permissions } = req.user;
       const db = getDbConnection(companyId);
 
       // Get finalized collection order
@@ -2360,6 +2540,21 @@ router.post('/:id/rectify-wcn',
         return res.status(404).json({
           success: false,
           error: 'Collection order not found or not finalized. Only finalized WCNs can be rectified.'
+        });
+      }
+
+      // Check ownership
+      if (!checkCollectionOwnership(order, userId, permissions, 'EDIT')) {
+        auditLog('PERMISSION_DENIED', userId, {
+          reason: 'Attempted to rectify WCN of another user\'s collection order',
+          collectionId: id,
+          collectionCreatedBy: order.createdBy,
+          requestedBy: userId
+        });
+
+        return res.status(403).json({
+          success: false,
+          error: 'You can only rectify WCN for your own collection orders'
         });
       }
 
@@ -2762,11 +2957,11 @@ router.post('/:id/rectify-wcn',
 // GET /api/collection-orders/:id/wastages - Get wastages linked to a collection order
 router.get('/:id/wastages',
   validateParams(Joi.object({ id: Joi.number().integer().positive().required() })),
-  requirePermission('VIEW_WASTAGE'),
+  requireAnyPermission(['VIEW_COLLECTIONS_ALL', 'VIEW_COLLECTIONS_OWN']),
   async (req, res) => {
     try {
       const { id } = req.params;
-      const { companyId } = req.user;
+      const { companyId, userId, permissions } = req.user;
       const repositoryFactory = getRepositoryFactory(companyId);
       const wastageRepository = repositoryFactory.getWastagesRepository();
 
@@ -2777,6 +2972,21 @@ router.get('/:id/wastages',
         return res.status(404).json({
           success: false,
           error: 'Collection order not found'
+        });
+      }
+
+      // Check ownership
+      if (!checkCollectionOwnership(order, userId, permissions, 'VIEW')) {
+        auditLog('PERMISSION_DENIED', userId, {
+          reason: 'Attempted to view wastages of another user\'s collection order',
+          collectionId: id,
+          collectionCreatedBy: order.createdBy,
+          requestedBy: userId
+        });
+
+        return res.status(403).json({
+          success: false,
+          error: 'You can only view wastages for your own collection orders'
         });
       }
 
@@ -2830,13 +3040,13 @@ router.get('/:id/wastages',
 // POST /api/collection-orders/:id/expense-attachments - Upload expense receipts to collection order
 router.post('/:id/expense-attachments',
   validateParams(Joi.object({ id: Joi.number().integer().positive().required() })),
-  requirePermission('CREATE_COLLECTIONS'),
+  requireAnyPermission(['EDIT_COLLECTIONS_ALL', 'EDIT_COLLECTIONS_OWN']),
   uploadMultipleToS3,
   requireFiles,
   async (req, res) => {
     try {
       const { id } = req.params;
-      const { companyId, userId } = req.user;
+      const { companyId, userId, permissions } = req.user;
       const db = getDbConnection(companyId);
 
       // Check if collection order exists
@@ -2854,6 +3064,30 @@ router.post('/:id/expense-attachments',
         return res.status(404).json({
           success: false,
           error: 'Collection order not found'
+        });
+      }
+
+      // Check ownership
+      if (!checkCollectionOwnership(order, userId, permissions, 'EDIT')) {
+        // Delete uploaded S3 files if permission check fails
+        if (req.files && req.files.length > 0) {
+          await Promise.all(req.files.map(file =>
+            storageService.deleteFile(file.key).catch(err =>
+              logger.warn('Failed to delete unauthorized expense attachment', { key: file.key })
+            )
+          ));
+        }
+
+        auditLog('PERMISSION_DENIED', userId, {
+          reason: 'Attempted to upload expense attachments to another user\'s collection order',
+          collectionId: id,
+          collectionCreatedBy: order.createdBy,
+          requestedBy: userId
+        });
+
+        return res.status(403).json({
+          success: false,
+          error: 'You can only upload expense attachments to your own collection orders'
         });
       }
 
@@ -2901,11 +3135,11 @@ router.post('/:id/expense-attachments',
 // GET /api/collection-orders/:id/expense-attachments - Get expense receipts for collection order
 router.get('/:id/expense-attachments',
   validateParams(Joi.object({ id: Joi.number().integer().positive().required() })),
-  requirePermission('VIEW_COLLECTIONS'),
+  requireAnyPermission(['VIEW_COLLECTIONS_ALL', 'VIEW_COLLECTIONS_OWN']),
   async (req, res) => {
     try {
       const { id } = req.params;
-      const { companyId } = req.user;
+      const { companyId, userId, permissions } = req.user;
       const db = getDbConnection(companyId);
 
       // Verify collection order exists
@@ -2915,6 +3149,21 @@ router.get('/:id/expense-attachments',
         return res.status(404).json({
           success: false,
           error: 'Collection order not found'
+        });
+      }
+
+      // Check ownership
+      if (!checkCollectionOwnership(order, userId, permissions, 'VIEW')) {
+        auditLog('PERMISSION_DENIED', userId, {
+          reason: 'Attempted to view expense attachments of another user\'s collection order',
+          collectionId: id,
+          collectionCreatedBy: order.createdBy,
+          requestedBy: userId
+        });
+
+        return res.status(403).json({
+          success: false,
+          error: 'You can only view expense attachments for your own collection orders'
         });
       }
 
@@ -2963,11 +3212,11 @@ router.delete('/:id/expense-attachments/:fileId',
     id: Joi.number().integer().positive().required(),
     fileId: Joi.number().integer().positive().required()
   })),
-  requirePermission('CREATE_COLLECTIONS'),
+  requireAnyPermission(['EDIT_COLLECTIONS_ALL', 'EDIT_COLLECTIONS_OWN']),
   async (req, res) => {
     try {
       const { id, fileId } = req.params;
-      const { companyId, userId } = req.user;
+      const { companyId, userId, permissions } = req.user;
       const db = getDbConnection(companyId);
 
       // Verify collection order exists
@@ -2977,6 +3226,21 @@ router.delete('/:id/expense-attachments/:fileId',
         return res.status(404).json({
           success: false,
           error: 'Collection order not found'
+        });
+      }
+
+      // Check ownership
+      if (!checkCollectionOwnership(order, userId, permissions, 'EDIT')) {
+        auditLog('PERMISSION_DENIED', userId, {
+          reason: 'Attempted to delete expense attachment from another user\'s collection order',
+          collectionId: id,
+          collectionCreatedBy: order.createdBy,
+          requestedBy: userId
+        });
+
+        return res.status(403).json({
+          success: false,
+          error: 'You can only delete expense attachments from your own collection orders'
         });
       }
 

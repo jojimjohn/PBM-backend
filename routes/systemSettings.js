@@ -408,7 +408,7 @@ router.put('/security/session-timeout', requirePermission('MANAGE_SETTINGS'), as
 // ============================================================================
 
 // GET /api/system-settings - Get all system settings for the company
-router.get('/', async (req, res) => {
+router.get('/', requirePermission('VIEW_SETTINGS'), async (req, res) => {
   try {
     const { companyId } = req.user;
     const db = getDbConnection(companyId);
@@ -438,7 +438,7 @@ router.get('/', async (req, res) => {
 });
 
 // GET /api/system-settings/:key - Get specific setting by key
-router.get('/:key', async (req, res) => {
+router.get('/:key', requirePermission('VIEW_SETTINGS'), async (req, res) => {
   try {
     const { companyId } = req.user;
     const { key } = req.params;

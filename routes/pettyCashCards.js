@@ -1,7 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const { getDbConnection } = require('../config/database');
-const { requirePermission } = require('../middleware/auth');
+const { requirePermission, requireAnyPermission } = require('../middleware/auth');
 const { validate } = require('../middleware/validation');
 const Joi = require('joi');
 const winston = require('winston');
@@ -19,6 +19,48 @@ const {
   getCardAuditTrail
 } = require('../utils/pettyCashBalanceVerifier');
 const pettyCashUserService = require('../services/pettyCashUserService');
+
+/**
+ * Helper function to check petty cash card ownership
+ * Note: For cards, relevant ownership is 'assignedTo' (cardholder), not 'createdBy'
+ * @param {Object} card - Petty cash card object
+ * @param {number} userId - Current user's ID
+ * @param {Array} permissions - User's permissions array
+ * @param {string} permissionType - Type of permission to check (VIEW, EDIT, DELETE)
+ * @returns {boolean} - Whether user has permission
+ */
+const checkCardOwnership = (card, userId, permissions, permissionType = 'EDIT') => {
+  const { hasPermission } = require('../config/permissionsHierarchy');
+
+  // Check if user has permission for ALL cards
+  const allPermission = `${permissionType}_CARDS_ALL`;
+  if (hasPermission(permissions, allPermission)) {
+    return true;
+  }
+
+  // Check if user has permission for ASSIGNED cards and is the cardholder
+  // For petty cash cards, the relevant ownership is who it's assigned to
+  const assignedPermission = `${permissionType}_CARDS_ASSIGNED`;
+  if (hasPermission(permissions, assignedPermission)) {
+    return card.assignedTo === userId;
+  }
+
+  return false;
+};
+
+/**
+ * Helper function to audit permission denials
+ * @param {string} action - Action being attempted
+ * @param {number} userId - User ID
+ * @param {Object} details - Additional details
+ */
+const auditPermissionDenial = (action, userId, details) => {
+  winston.warn(`Permission denied: ${action}`, {
+    userId,
+    ...details,
+    timestamp: new Date().toISOString()
+  });
+};
 
 // Validation schemas
 // Note: assignedTo/staffName are now optional - petty cash users are managed separately via /petty-cash-users
@@ -83,10 +125,14 @@ function generateCardNumber(companyId) {
 }
 
 // GET /petty-cash-cards - List all petty cash cards
-router.get('/', requirePermission('VIEW_PETTY_CASH'), async (req, res) => {
+router.get('/',
+  requireAnyPermission(['VIEW_CARDS_ALL', 'VIEW_CARDS_ASSIGNED']),
+  async (req, res) => {
   try {
-    const db = getDbConnection(req.user.companyId);
-    
+    const { companyId, userId, permissions } = req.user;
+    const db = getDbConnection(companyId);
+    const { hasPermission } = require('../config/permissionsHierarchy');
+
     const {
       page = 1,
       limit = 50,
@@ -96,9 +142,9 @@ router.get('/', requirePermission('VIEW_PETTY_CASH'), async (req, res) => {
       department,
       search
     } = req.query;
-    
+
     const offset = (page - 1) * limit;
-    
+
     let query = db('petty_cash_cards')
       .select(
         'petty_cash_cards.*',
@@ -119,6 +165,15 @@ router.get('/', requirePermission('VIEW_PETTY_CASH'), async (req, res) => {
       .leftJoin('users as createdByUser', 'petty_cash_cards.createdBy', 'createdByUser.id')
       .leftJoin('petty_cash_users', 'petty_cash_cards.id', 'petty_cash_users.card_id')
       .orderBy('petty_cash_cards.created_at', 'desc');
+
+    // Apply ownership filtering if user only has VIEW_CARDS_ASSIGNED permission
+    if (!hasPermission(permissions, 'VIEW_CARDS_ALL')) {
+      query = query.where('petty_cash_cards.assignedTo', userId);
+      winston.info('Filtering petty cash cards to user\'s assigned cards', {
+        userId,
+        companyId
+      });
+    }
     
     // Apply filters
     if (status) {
@@ -290,11 +345,14 @@ router.get('/user-cards/:userId', requirePermission('VIEW_PETTY_CASH'), async (r
 });
 
 // GET /petty-cash-cards/:id - Get specific petty cash card
-router.get('/:id', requirePermission('VIEW_PETTY_CASH'), async (req, res) => {
+router.get('/:id',
+  requireAnyPermission(['VIEW_CARDS_ALL', 'VIEW_CARDS_ASSIGNED']),
+  async (req, res) => {
   try {
-    const db = getDbConnection(req.user.companyId);
+    const { companyId, userId, permissions } = req.user;
+    const db = getDbConnection(companyId);
     const { id } = req.params;
-    
+
     const card = await db('petty_cash_cards')
       .select(
         'petty_cash_cards.*',
@@ -317,11 +375,27 @@ router.get('/:id', requirePermission('VIEW_PETTY_CASH'), async (req, res) => {
       .leftJoin('petty_cash_users', 'petty_cash_cards.id', 'petty_cash_users.card_id')
       .where('petty_cash_cards.id', id)
       .first();
-    
+
     if (!card) {
       return res.status(404).json({
         success: false,
         error: 'Petty cash card not found'
+      });
+    }
+
+    // Check ownership
+    if (!checkCardOwnership(card, userId, permissions, 'VIEW')) {
+      auditPermissionDenial('PERMISSION_DENIED', userId, {
+        action: 'VIEW_CARD',
+        reason: 'Attempted to view another user\'s assigned card',
+        cardId: id,
+        cardAssignedTo: card.assignedTo,
+        requestedBy: userId
+      });
+
+      return res.status(403).json({
+        success: false,
+        error: 'You can only view cards assigned to you'
       });
     }
     
@@ -365,7 +439,7 @@ router.get('/:id', requirePermission('VIEW_PETTY_CASH'), async (req, res) => {
 
 // POST /petty-cash-cards - Create new petty cash card
 router.post('/',
-  requirePermission('MANAGE_PETTY_CASH'),
+  requirePermission('CREATE_CARDS'),
   validate(pettyCashCardSchema),
   async (req, res) => {
     try {

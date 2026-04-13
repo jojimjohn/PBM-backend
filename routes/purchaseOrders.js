@@ -1,6 +1,6 @@
 const express = require('express');
 const { validate, validateParams, sanitize } = require('../middleware/validation');
-const { requirePermission } = require('../middleware/auth');
+const { requirePermission, requireAnyPermission } = require('../middleware/auth');
 const { projectFilter, applyProjectFilter } = require('../middleware/projectFilter');
 const { logger, auditLog } = require('../utils/logger');
 const { getDbConnection } = require('../config/database');
@@ -16,6 +16,32 @@ const router = express.Router();
 
 // Apply sanitization to all routes
 router.use(sanitize);
+
+/**
+ * Check if user has permission to access a purchase order
+ * @param {object} order - The purchase order object
+ * @param {number} userId - The requesting user's ID
+ * @param {array} permissions - The user's permissions array
+ * @param {string} permissionType - Type of permission ('EDIT', 'DELETE', 'VIEW')
+ * @returns {boolean} - True if user has access, false otherwise
+ */
+const checkOrderOwnership = (order, userId, permissions, permissionType = 'EDIT') => {
+  const { hasPermission } = require('../config/permissionsHierarchy');
+
+  // If user has the _ALL variant, they can access any order
+  const allPermission = `${permissionType}_PURCHASE_ALL`;
+  if (hasPermission(permissions, allPermission)) {
+    return true;
+  }
+
+  // If user has the _OWN variant, check ownership
+  const ownPermission = `${permissionType}_PURCHASE_OWN`;
+  if (hasPermission(permissions, ownPermission)) {
+    return order.createdBy === userId;
+  }
+
+  return false;
+};
 
 // Helper function to format payment terms for display
 const formatPaymentTermsForDisplay = (paymentTerms) => {
@@ -409,9 +435,10 @@ router.get('/:id',
 );
 
 // POST /api/purchase-orders - Create new purchase order
-router.post('/', 
+// Requires CREATE_PURCHASE_ALL or CREATE_PURCHASE_OWN (hierarchy handles this automatically)
+router.post('/',
   validate(purchaseOrderSchema),
-  requirePermission('CREATE_PURCHASE'),
+  requireAnyPermission(['CREATE_PURCHASE_ALL', 'CREATE_PURCHASE_OWN']),
   async (req, res) => {
     try {
       const { companyId, userId } = req.user;
@@ -553,15 +580,17 @@ router.post('/',
 );
 
 // PUT /api/purchase-orders/:id - Update purchase order
+// Requires EDIT_PURCHASE_ALL (any order) or EDIT_PURCHASE_OWN (own orders only)
 router.put('/:id',
   validateParams(Joi.object({ id: Joi.number().integer().positive().required() })),
   validate(purchaseOrderSchema),
-  requirePermission('EDIT_PURCHASE'),
+  requireAnyPermission(['EDIT_PURCHASE_ALL', 'EDIT_PURCHASE_OWN']),
   async (req, res) => {
     try {
       const { id } = req.params;
-      const { companyId, userId } = req.user;
+      const { companyId, userId, permissions } = req.user;
       const db = getDbConnection(companyId);
+      const { hasPermission } = require('../config/permissionsHierarchy');
 
       // Check if order exists
       const existingOrder = await db('purchase_orders')
@@ -572,6 +601,21 @@ router.put('/:id',
         return res.status(404).json({
           success: false,
           error: 'Purchase order not found'
+        });
+      }
+
+      // Ownership check: verify user has permission to edit this order
+      if (!checkOrderOwnership(existingOrder, userId, permissions, 'EDIT')) {
+        auditLog('PERMISSION_DENIED', userId, {
+          reason: 'Attempted to edit another user\'s purchase order',
+          purchaseOrderId: id,
+          orderCreatedBy: existingOrder.createdBy,
+          requestedBy: userId
+        });
+
+        return res.status(403).json({
+          success: false,
+          error: 'You can only edit your own purchase orders'
         });
       }
 
@@ -686,14 +730,15 @@ router.put('/:id',
 );
 
 // POST /api/purchase-orders/:id/items - Add item to purchase order
+// Requires EDIT_PURCHASE_ALL (any order) or EDIT_PURCHASE_OWN (own orders only)
 router.post('/:id/items',
   validateParams(Joi.object({ id: Joi.number().integer().positive().required() })),
   validate(purchaseOrderItemSchema.fork('purchaseOrderId', schema => schema.optional())),
-  requirePermission('CREATE_PURCHASE'),
+  requireAnyPermission(['EDIT_PURCHASE_ALL', 'EDIT_PURCHASE_OWN']),
   async (req, res) => {
     try {
       const { id } = req.params;
-      const { companyId } = req.user;
+      const { companyId, userId, permissions } = req.user;
       const db = getDbConnection(companyId);
 
       // Verify order exists and is editable
@@ -711,6 +756,21 @@ router.post('/:id/items',
         return res.status(404).json({
           success: false,
           error: 'Purchase order not found or not editable'
+        });
+      }
+
+      // Ownership check: verify user has permission to edit this order
+      if (!checkOrderOwnership(order, userId, permissions, 'EDIT')) {
+        auditLog('PERMISSION_DENIED', userId, {
+          reason: 'Attempted to add items to another user\'s purchase order',
+          purchaseOrderId: id,
+          orderCreatedBy: order.createdBy,
+          requestedBy: userId
+        });
+
+        return res.status(403).json({
+          success: false,
+          error: 'You can only modify your own purchase orders'
         });
       }
 
@@ -858,6 +918,7 @@ router.post('/:id/items',
 );
 
 // PUT /api/purchase-orders/:id/receive - Receive purchase order (update inventory)
+// Requires RECEIVE_PURCHASE permission (no ownership scoping - receive is privileged operation)
 router.put('/:id/receive',
   validateParams(Joi.object({ id: Joi.number().integer().positive().required() })),
   validate(Joi.object({
@@ -874,7 +935,7 @@ router.put('/:id/receive',
     ).required(),
     notes: Joi.string().allow('').optional()
   })),
-  requirePermission('EDIT_PURCHASE'),
+  requirePermission('RECEIVE_PURCHASE'),
   async (req, res) => {
     try {
       const { id } = req.params;
@@ -1233,6 +1294,7 @@ router.post('/:id/approve',
 );
 
 // PATCH /api/purchase-orders/:id/status - Update purchase order status
+// Requires EDIT_PURCHASE_ALL (any order) or EDIT_PURCHASE_OWN (own orders only)
 router.patch('/:id/status',
   validateParams(Joi.object({
     id: Joi.number().integer().positive().required()
@@ -1241,12 +1303,12 @@ router.patch('/:id/status',
     status: Joi.string().valid('draft', 'pending', 'approved', 'sent', 'received', 'completed', 'cancelled').required(),
     notes: Joi.string().allow('').optional()
   })),
-  requirePermission('EDIT_PURCHASE'),
+  requireAnyPermission(['EDIT_PURCHASE_ALL', 'EDIT_PURCHASE_OWN']),
   async (req, res) => {
     try {
       const { id } = req.params;
       const { status, notes } = req.body;
-      const { companyId, userId } = req.user;
+      const { companyId, userId, permissions } = req.user;
       const db = getDbConnection(companyId);
 
       const order = await db('purchase_orders')
@@ -1257,6 +1319,21 @@ router.patch('/:id/status',
         return res.status(404).json({
           success: false,
           error: 'Purchase order not found'
+        });
+      }
+
+      // Ownership check: verify user has permission to edit this order
+      if (!checkOrderOwnership(order, userId, permissions, 'EDIT')) {
+        auditLog('PERMISSION_DENIED', userId, {
+          reason: 'Attempted to change status of another user\'s purchase order',
+          purchaseOrderId: id,
+          orderCreatedBy: order.createdBy,
+          requestedBy: userId
+        });
+
+        return res.status(403).json({
+          success: false,
+          error: 'You can only modify your own purchase orders'
         });
       }
 
@@ -1489,15 +1566,16 @@ router.get('/contract-rate/:supplierId/:materialId',
 );
 
 // POST /api/purchase-orders/:id/attachments - Upload attachments to purchase order (S3/MinIO)
+// Requires EDIT_PURCHASE_ALL (any order) or EDIT_PURCHASE_OWN (own orders only)
 router.post('/:id/attachments',
   validateParams(Joi.object({ id: Joi.number().integer().positive().required() })),
-  requirePermission('CREATE_PURCHASE'),
+  requireAnyPermission(['EDIT_PURCHASE_ALL', 'EDIT_PURCHASE_OWN']),
   uploadMultipleToS3,
   requireFiles,
   async (req, res) => {
     try {
       const { id } = req.params;
-      const { companyId, userId } = req.user;
+      const { companyId, userId, permissions } = req.user;
       const db = getDbConnection(companyId);
 
       // Check if purchase order exists
@@ -1517,6 +1595,30 @@ router.post('/:id/attachments',
         return res.status(404).json({
           success: false,
           error: 'Purchase order not found'
+        });
+      }
+
+      // Ownership check: verify user has permission to edit this order
+      if (!checkOrderOwnership(order, userId, permissions, 'EDIT')) {
+        // Delete uploaded S3 files if user lacks permission
+        if (req.files && req.files.length > 0) {
+          await Promise.all(req.files.map(file =>
+            storageService.deleteFile(file.key).catch(err =>
+              logger.warn('Failed to delete unauthorized S3 file', { key: file.key, error: err.message })
+            )
+          ));
+        }
+
+        auditLog('PERMISSION_DENIED', userId, {
+          reason: 'Attempted to upload attachments to another user\'s purchase order',
+          purchaseOrderId: id,
+          orderCreatedBy: order.createdBy,
+          requestedBy: userId
+        });
+
+        return res.status(403).json({
+          success: false,
+          error: 'You can only modify your own purchase orders'
         });
       }
 
@@ -1623,16 +1725,17 @@ router.get('/:id/attachments',
 );
 
 // DELETE /api/purchase-orders/:id/attachments/:fileId - Delete attachment from purchase order (S3/MinIO)
+// Requires EDIT_PURCHASE_ALL (any order) or EDIT_PURCHASE_OWN (own orders only)
 router.delete('/:id/attachments/:fileId',
   validateParams(Joi.object({
     id: Joi.number().integer().positive().required(),
     fileId: Joi.number().integer().positive().required()
   })),
-  requirePermission('CREATE_PURCHASE'),
+  requireAnyPermission(['EDIT_PURCHASE_ALL', 'EDIT_PURCHASE_OWN']),
   async (req, res) => {
     try {
       const { id, fileId } = req.params;
-      const { companyId, userId } = req.user;
+      const { companyId, userId, permissions } = req.user;
       const db = getDbConnection(companyId);
 
       // Verify purchase order exists
@@ -1644,6 +1747,21 @@ router.delete('/:id/attachments/:fileId',
         return res.status(404).json({
           success: false,
           error: 'Purchase order not found'
+        });
+      }
+
+      // Ownership check: verify user has permission to edit this order
+      if (!checkOrderOwnership(order, userId, permissions, 'EDIT')) {
+        auditLog('PERMISSION_DENIED', userId, {
+          reason: 'Attempted to delete attachment from another user\'s purchase order',
+          purchaseOrderId: id,
+          orderCreatedBy: order.createdBy,
+          requestedBy: userId
+        });
+
+        return res.status(403).json({
+          success: false,
+          error: 'You can only modify your own purchase orders'
         });
       }
 

@@ -1,6 +1,6 @@
 const express = require('express');
 const { validate, validateParams, sanitize } = require('../middleware/validation');
-const { requirePermission } = require('../middleware/auth');
+const { requirePermission, requireAnyPermission } = require('../middleware/auth');
 const { logger, auditLog } = require('../utils/logger');
 const { getDbConnection } = require('../config/database');
 const Joi = require('joi');
@@ -9,6 +9,32 @@ const router = express.Router();
 
 // Apply sanitization to all routes
 router.use(sanitize);
+
+/**
+ * Check if user has permission to access a callout
+ * @param {object} callout - The callout object (must have 'createdBy' field)
+ * @param {number} userId - The requesting user's ID
+ * @param {array} permissions - The user's permissions array
+ * @param {string} permissionType - Type of permission ('EDIT', 'DELETE', 'VIEW')
+ * @returns {boolean} - True if user has access, false otherwise
+ */
+const checkCalloutOwnership = (callout, userId, permissions, permissionType = 'EDIT') => {
+  const { hasPermission } = require('../config/permissionsHierarchy');
+
+  // If user has the _ALL variant, they can access any callout
+  const allPermission = `${permissionType}_CALLOUTS_ALL`;
+  if (hasPermission(permissions, allPermission)) {
+    return true;
+  }
+
+  // If user has the _OWN variant, check ownership
+  const ownPermission = `${permissionType}_CALLOUTS_OWN`;
+  if (hasPermission(permissions, ownPermission)) {
+    return callout.createdBy === userId;
+  }
+
+  return false;
+};
 
 // Collection Callout validation schema
 const calloutSchema = Joi.object({
@@ -36,10 +62,11 @@ const calloutItemSchema = Joi.object({
 });
 
 // GET /api/callouts - List all collection callouts
-router.get('/', requirePermission('VIEW_PURCHASE'), async (req, res) => {
+router.get('/', requireAnyPermission(['VIEW_CALLOUTS_ALL', 'VIEW_CALLOUTS_OWN']), async (req, res) => {
   try {
-    const { companyId } = req.user;
+    const { companyId, userId, permissions } = req.user;
     const db = getDbConnection(companyId);
+    const { hasPermission } = require('../config/permissionsHierarchy');
     
     const { 
       page = 1, 
@@ -118,6 +145,11 @@ router.get('/', requirePermission('VIEW_PURCHASE'), async (req, res) => {
       query = query.where('collection_callouts.calloutDate', '<=', toDate);
     }
 
+    // Apply ownership filtering if user only has VIEW_CALLOUTS_OWN permission
+    if (!hasPermission(permissions, 'VIEW_CALLOUTS_ALL')) {
+      query = query.where('collection_callouts.createdBy', userId);
+    }
+
     // Get total count for pagination
     const totalQuery = query.clone();
     const [{ total }] = await totalQuery.count('* as total');
@@ -160,13 +192,13 @@ router.get('/', requirePermission('VIEW_PURCHASE'), async (req, res) => {
 });
 
 // GET /api/callouts/:id - Get specific callout with items
-router.get('/:id', 
+router.get('/:id',
   validateParams(Joi.object({ id: Joi.number().integer().positive().required() })),
-  requirePermission('VIEW_PURCHASE'),
+  requireAnyPermission(['VIEW_CALLOUTS_ALL', 'VIEW_CALLOUTS_OWN']),
   async (req, res) => {
     try {
       const { id } = req.params;
-      const { companyId } = req.user;
+      const { companyId, userId, permissions } = req.user;
       const db = getDbConnection(companyId);
 
       // Get callout details
@@ -202,6 +234,21 @@ router.get('/:id',
         return res.status(404).json({
           success: false,
           error: 'Callout not found'
+        });
+      }
+
+      // Check ownership
+      if (!checkCalloutOwnership(callout, userId, permissions, 'VIEW')) {
+        auditLog('PERMISSION_DENIED', userId, {
+          reason: 'Attempted to view another user\'s callout',
+          calloutId: id,
+          calloutCreatedBy: callout.createdBy,
+          requestedBy: userId
+        });
+
+        return res.status(403).json({
+          success: false,
+          error: 'You can only view your own callouts'
         });
       }
 
@@ -278,12 +325,12 @@ router.get('/:id',
 );
 
 // POST /api/callouts - Create new callout
-router.post('/', 
+router.post('/',
   validate(calloutSchema),
-  requirePermission('CREATE_PURCHASE'),
+  requirePermission('CREATE_CALLOUTS'),
   async (req, res) => {
     try {
-      const { companyId } = req.user;
+      const { companyId, userId } = req.user;
       const db = getDbConnection(companyId);
 
       // Validate contract exists and is active
@@ -384,11 +431,11 @@ router.post('/',
 router.post('/:id/items',
   validateParams(Joi.object({ id: Joi.number().integer().positive().required() })),
   validate(calloutItemSchema),
-  requirePermission('CREATE_PURCHASE'),
+  requireAnyPermission(['EDIT_CALLOUTS_ALL', 'EDIT_CALLOUTS_OWN']),
   async (req, res) => {
     try {
       const { id } = req.params;
-      const { companyId } = req.user;
+      const { companyId, userId, permissions } = req.user;
       const db = getDbConnection(companyId);
 
       // Verify callout exists and is editable
@@ -401,6 +448,21 @@ router.post('/:id/items',
         return res.status(404).json({
           success: false,
           error: 'Callout not found or not editable'
+        });
+      }
+
+      // Check ownership
+      if (!checkCalloutOwnership(callout, userId, permissions, 'EDIT')) {
+        auditLog('PERMISSION_DENIED', userId, {
+          reason: 'Attempted to add items to another user\'s callout',
+          calloutId: id,
+          calloutCreatedBy: callout.createdBy,
+          requestedBy: userId
+        });
+
+        return res.status(403).json({
+          success: false,
+          error: 'You can only add items to your own callouts'
         });
       }
 
@@ -486,12 +548,12 @@ router.patch('/:id/status',
     notes: Joi.string().allow('').optional(),
     assignedTo: Joi.number().integer().positive().optional()
   })),
-  requirePermission('EDIT_PURCHASE'),
+  requireAnyPermission(['EDIT_CALLOUTS_ALL', 'EDIT_CALLOUTS_OWN']),
   async (req, res) => {
     try {
       const { id } = req.params;
       const { status, notes, assignedTo } = req.body;
-      const { companyId, userId } = req.user;
+      const { companyId, userId, permissions } = req.user;
       const db = getDbConnection(companyId);
 
       const callout = await db('collection_callouts')
@@ -502,6 +564,21 @@ router.patch('/:id/status',
         return res.status(404).json({
           success: false,
           error: 'Callout not found'
+        });
+      }
+
+      // Check ownership
+      if (!checkCalloutOwnership(callout, userId, permissions, 'EDIT')) {
+        auditLog('PERMISSION_DENIED', userId, {
+          reason: 'Attempted to update status of another user\'s callout',
+          calloutId: id,
+          calloutCreatedBy: callout.createdBy,
+          requestedBy: userId
+        });
+
+        return res.status(403).json({
+          success: false,
+          error: 'You can only update your own callouts'
         });
       }
 
@@ -551,14 +628,15 @@ router.patch('/:id/status',
 );
 
 // GET /api/callouts/active - Get active callouts for dashboard
-router.get('/active/summary', 
-  requirePermission('VIEW_PURCHASE'),
+router.get('/active/summary',
+  requireAnyPermission(['VIEW_CALLOUTS_ALL', 'VIEW_CALLOUTS_OWN']),
   async (req, res) => {
     try {
-      const { companyId } = req.user;
+      const { companyId, userId, permissions } = req.user;
       const db = getDbConnection(companyId);
-      
-      const activeCallouts = await db('collection_callouts')
+      const { hasPermission } = require('../config/permissionsHierarchy');
+
+      let calloutsQuery = db('collection_callouts')
         .leftJoin('contracts', 'collection_callouts.contractId', 'contracts.id')
         .leftJoin('suppliers', 'collection_callouts.supplierId', 'suppliers.id')
         .leftJoin('contract_locations', 'collection_callouts.locationId', 'contract_locations.id')
@@ -569,13 +647,9 @@ router.get('/active/summary',
           'contract_locations.locationName',
           db.raw('(SELECT COUNT(*) FROM callout_items WHERE callout_items.calloutId = collection_callouts.id) as itemCount')
         )
-        .whereIn('collection_callouts.status', ['pending', 'scheduled', 'in_progress'])
-        .orderBy('collection_callouts.priority', 'desc')
-        .orderBy('collection_callouts.requestedPickupDate', 'asc')
-        .limit(20);
+        .whereIn('collection_callouts.status', ['pending', 'scheduled', 'in_progress']);
 
-      // Get summary statistics
-      const stats = await db('collection_callouts')
+      let statsQuery = db('collection_callouts')
         .select(
           db.raw('COUNT(*) as totalActive'),
           db.raw('SUM(CASE WHEN status = "pending" THEN 1 ELSE 0 END) as pending'),
@@ -584,8 +658,21 @@ router.get('/active/summary',
           db.raw('SUM(CASE WHEN priority = "urgent" THEN 1 ELSE 0 END) as urgent'),
           db.raw('SUM(CASE WHEN priority = "high" THEN 1 ELSE 0 END) as high')
         )
-        .whereIn('status', ['pending', 'scheduled', 'in_progress'])
-        .first();
+        .whereIn('status', ['pending', 'scheduled', 'in_progress']);
+
+      // Apply ownership filtering if user only has VIEW_CALLOUTS_OWN permission
+      if (!hasPermission(permissions, 'VIEW_CALLOUTS_ALL')) {
+        calloutsQuery = calloutsQuery.where('collection_callouts.createdBy', userId);
+        statsQuery = statsQuery.where('createdBy', userId);
+      }
+
+      const activeCallouts = await calloutsQuery
+        .orderBy('collection_callouts.priority', 'desc')
+        .orderBy('collection_callouts.requestedPickupDate', 'asc')
+        .limit(20);
+
+      // Get summary statistics
+      const stats = await statsQuery.first();
 
       res.json({
         success: true,

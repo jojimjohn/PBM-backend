@@ -1,10 +1,14 @@
 const express = require('express');
 const router = express.Router();
+const { authenticateToken, requirePermission } = require('../middleware/auth');
 const { getDbConnection } = require('../config/database');
 const { logger } = require('../utils/logger');
 
 // GET /api/customer-types - Get all active customer types
-router.get('/', async (req, res) => {
+router.get('/',
+  authenticateToken,
+  requirePermission('VIEW_CUSTOMER_TYPES'),
+  async (req, res) => {
   try {
     const { companyId } = req.user;
     const db = getDbConnection(companyId);

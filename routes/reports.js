@@ -84,7 +84,7 @@ const exportSchema = Joi.object({
  * Returns purchase orders with collection expense attribution
  * Shows actual cost = base cost + collection expenses
  */
-router.get('/purchase-cost', requirePermission('VIEW_PURCHASE'), async (req, res) => {
+router.get('/purchase-cost', requirePermission('VIEW_REPORTS'), async (req, res) => {
   try {
     const { companyId } = req.user;
     const db = getDbConnection(companyId);
@@ -224,7 +224,7 @@ router.get('/purchase-cost', requirePermission('VIEW_PURCHASE'), async (req, res
  *
  * Export Purchase Cost Analysis to CSV or XLSX
  */
-router.get('/purchase-cost/export', requirePermission('VIEW_PURCHASE'), async (req, res) => {
+router.get('/purchase-cost/export', requirePermission('VIEW_REPORTS'), async (req, res) => {
   try {
     const { companyId } = req.user;
     const db = getDbConnection(companyId);
@@ -301,7 +301,7 @@ router.get('/purchase-cost/export', requirePermission('VIEW_PURCHASE'), async (r
  *
  * Returns list of all Waste Consignment Notes with status and linked PO info
  */
-router.get('/wcn-register', requirePermission('VIEW_COLLECTIONS'), async (req, res) => {
+router.get('/wcn-register', requirePermission('VIEW_REPORTS'), async (req, res) => {
   try {
     const { companyId } = req.user;
     const db = getDbConnection(companyId);
@@ -468,7 +468,7 @@ router.get('/wcn-register', requirePermission('VIEW_COLLECTIONS'), async (req, r
  *
  * Export WCN Register to CSV or XLSX
  */
-router.get('/wcn-register/export', requirePermission('VIEW_COLLECTIONS'), async (req, res) => {
+router.get('/wcn-register/export', requirePermission('VIEW_REPORTS'), async (req, res) => {
   try {
     const { companyId } = req.user;
     const db = getDbConnection(companyId);
@@ -545,7 +545,7 @@ router.get('/wcn-register/export', requirePermission('VIEW_COLLECTIONS'), async 
  *
  * Returns collection expense analysis with category breakdown and trends
  */
-router.get('/collection-expenses', requirePermission('VIEW_COLLECTIONS'), async (req, res) => {
+router.get('/collection-expenses', requirePermission('VIEW_REPORTS'), async (req, res) => {
   try {
     const { companyId } = req.user;
     const db = getDbConnection(companyId);
@@ -704,7 +704,7 @@ router.get('/collection-expenses', requirePermission('VIEW_COLLECTIONS'), async 
  *
  * Export Collection Expenses to CSV or XLSX
  */
-router.get('/collection-expenses/export', requirePermission('VIEW_COLLECTIONS'), async (req, res) => {
+router.get('/collection-expenses/export', requirePermission('VIEW_REPORTS'), async (req, res) => {
   try {
     const { companyId } = req.user;
     const db = getDbConnection(companyId);
@@ -773,7 +773,7 @@ router.get('/collection-expenses/export', requirePermission('VIEW_COLLECTIONS'),
  *
  * Returns vendor bills with payment status and multi-PO coverage
  */
-router.get('/vendor-bills', requirePermission('VIEW_PURCHASE'), async (req, res) => {
+router.get('/vendor-bills', requirePermission('VIEW_REPORTS'), async (req, res) => {
   try {
     const { companyId } = req.user;
     const db = getDbConnection(companyId);
@@ -923,7 +923,7 @@ router.get('/vendor-bills', requirePermission('VIEW_PURCHASE'), async (req, res)
  *
  * Export Vendor Bills to CSV or XLSX
  */
-router.get('/vendor-bills/export', requirePermission('VIEW_PURCHASE'), async (req, res) => {
+router.get('/vendor-bills/export', requirePermission('VIEW_REPORTS'), async (req, res) => {
   try {
     const { companyId } = req.user;
     const db = getDbConnection(companyId);

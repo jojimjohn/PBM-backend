@@ -21,7 +21,7 @@ const restoreBackupSchema = Joi.object({
 });
 
 // GET /backups - List all backups
-router.get('/', requirePermission(['system:admin']), async (req, res) => {
+router.get('/', requirePermission('MANAGE_BACKUPS'), async (req, res) => {
   try {
     const { companyId } = req.query;
     const backups = await backupManager.listBackups(companyId);
@@ -51,7 +51,7 @@ router.get('/', requirePermission(['system:admin']), async (req, res) => {
 });
 
 // GET /backups/stats - Get backup statistics
-router.get('/stats', requirePermission(['system:admin']), async (req, res) => {
+router.get('/stats', requirePermission('MANAGE_BACKUPS'), async (req, res) => {
   try {
     const stats = await backupManager.getBackupStats();
     
@@ -81,7 +81,7 @@ router.get('/stats', requirePermission(['system:admin']), async (req, res) => {
 
 // POST /backups - Create new backup
 router.post('/', 
-  requirePermission(['system:admin']),
+  requirePermission('MANAGE_BACKUPS'),
   validate(createBackupSchema),
   async (req, res) => {
     try {
@@ -137,7 +137,7 @@ router.post('/',
 
 // POST /backups/restore - Restore database from backup
 router.post('/restore',
-  requirePermission(['system:admin']),
+  requirePermission('MANAGE_BACKUPS'),
   validate(restoreBackupSchema),
   async (req, res) => {
     try {
@@ -183,7 +183,7 @@ router.post('/restore',
 );
 
 // DELETE /backups/:filename - Delete a specific backup
-router.delete('/:filename', requirePermission(['system:admin']), async (req, res) => {
+router.delete('/:filename', requirePermission('MANAGE_BACKUPS'), async (req, res) => {
   try {
     const { filename } = req.params;
     const fs = require('fs').promises;
@@ -236,7 +236,7 @@ router.delete('/:filename', requirePermission(['system:admin']), async (req, res
 });
 
 // POST /backups/cleanup - Clean up old backups
-router.post('/cleanup', requirePermission(['system:admin']), async (req, res) => {
+router.post('/cleanup', requirePermission('MANAGE_BACKUPS'), async (req, res) => {
   try {
     const result = await backupManager.cleanupOldBackups();
     
@@ -265,7 +265,7 @@ router.post('/cleanup', requirePermission(['system:admin']), async (req, res) =>
 });
 
 // GET /backups/test - Test backup system
-router.get('/test', requirePermission(['system:admin']), async (req, res) => {
+router.get('/test', requirePermission('MANAGE_BACKUPS'), async (req, res) => {
   try {
     const result = await backupManager.testBackupSystem();
     
