@@ -55,6 +55,7 @@ const vehicleTypesRoutes = require('./routes/vehicleTypes');
 const storageTanksRoutes = require('./routes/storageTanks');
 const tankLogsRoutes = require('./routes/tankLogs');
 const vehicleExpenseSheetsRoutes = require('./routes/vehicleExpenseSheets');
+const dashboardsRoutes = require('./routes/dashboards');
 const { authenticateToken } = require('./middleware/auth');
 const { checkSessionTimeout, _devSessionStore } = require('./middleware/sessionTimeout');
 const { validateCsrfToken, ensureCsrfToken } = require('./middleware/csrf');
@@ -323,6 +324,7 @@ app.use('/api/vehicle-types', vehicleTypesRoutes);
 app.use('/api/storage-tanks', storageTanksRoutes);
 app.use('/api/tank-logs', tankLogsRoutes);
 app.use('/api/vehicle-expense-sheets', vehicleExpenseSheetsRoutes);
+app.use('/api/dashboards', dashboardsRoutes);
 
 // 404 handler
 app.use('*', (req, res) => {

@@ -257,7 +257,12 @@ router.get('/me', async (req, res) => {
           companyId: user.companyId,
           permissions,
           mfaEnabled: !!user.mfa_enabled
-        }
+        },
+        impersonation: decoded.impersonated_by ? {
+          active: true,
+          impersonator_id: decoded.impersonated_by,
+          impersonator_email: decoded.impersonator_email || null
+        } : { active: false }
       }
     });
 
@@ -820,6 +825,183 @@ router.post('/migrate-to-cookies', async (req, res) => {
       error: 'Invalid token - please login again',
       code: 'INVALID_TOKEN'
     });
+  }
+});
+
+// ============================================================================
+// IMPERSONATION
+// ============================================================================
+//
+// Allows super admins to "log in as" another user for testing/support.
+// The impersonation JWT carries an `impersonated_by` claim that:
+//   1. Makes every action auditable back to the real super admin
+//   2. Enables the /stop-impersonating endpoint to restore the original session
+//
+// Safety rules:
+//   - Only super admins can impersonate
+//   - Cannot impersonate another super admin
+//   - Tokens are short-lived (1 hour)
+//   - All actions during impersonation are audit-logged
+// ============================================================================
+
+// POST /auth/impersonate/:userId - Start impersonating a user
+router.post('/impersonate/:userId', authenticateToken, async (req, res) => {
+  try {
+    const { userId: actorId, role: actorRole, companyId } = req.user;
+    const targetId = parseInt(req.params.userId);
+
+    // Normalize role check — super-admin only
+    const normalizedActorRole = (actorRole || '').toLowerCase().replace(/[-_\s]/g, '');
+    if (normalizedActorRole !== 'superadmin' && req.user.roleId !== 1) {
+      return res.status(403).json({ success: false, error: 'Only super admins can impersonate users' });
+    }
+
+    if (targetId === actorId) {
+      return res.status(400).json({ success: false, error: 'Cannot impersonate yourself' });
+    }
+
+    if (req.user.impersonated_by) {
+      return res.status(400).json({ success: false, error: 'Already impersonating. Stop the current impersonation first.' });
+    }
+
+    const db = getDbConnection(companyId);
+    const targetUser = await db('users').where({ id: targetId }).first();
+    if (!targetUser) {
+      return res.status(404).json({ success: false, error: 'Target user not found' });
+    }
+
+    if (!targetUser.isActive) {
+      return res.status(400).json({ success: false, error: 'Cannot impersonate an inactive user' });
+    }
+
+    // Prevent impersonating another super admin
+    const targetNormalized = (targetUser.role || '').toLowerCase().replace(/[-_\s]/g, '');
+    if (targetNormalized === 'superadmin') {
+      return res.status(403).json({ success: false, error: 'Cannot impersonate another super admin' });
+    }
+
+    // Map the target user's role to JWT format
+    const roleMapping = {
+      'super-admin': 'SUPER_ADMIN', 'company-admin': 'COMPANY_ADMIN',
+      'manager': 'MANAGER', 'sales-staff': 'SALES_STAFF',
+      'purchase-staff': 'PURCHASE_STAFF', 'accounts-staff': 'ACCOUNTS_STAFF'
+    };
+    const mappedTargetRole = roleMapping[targetUser.role] || targetUser.role;
+
+    // Get target user's permissions
+    const permissions = await getUserPermissions(targetUser.role_id || mappedTargetRole, companyId, db);
+
+    // Build custom JWT with impersonator_id claim
+    const { generateToken, generateRefreshToken } = require('../utils/jwt');
+    const accessToken = generateToken({
+      userId: targetUser.id,
+      email: targetUser.email,
+      role: mappedTargetRole,
+      companyId: targetUser.companyId,
+      permissions,
+      roleId: targetUser.role_id,
+      tokenType: 'access',
+      impersonated_by: actorId,
+      impersonator_email: req.user.email
+    }, '1h'); // short-lived 1 hour
+
+    const refreshToken = generateRefreshToken({
+      userId: targetUser.id,
+      email: targetUser.email,
+      tokenType: 'refresh',
+      impersonated_by: actorId
+    });
+
+    setAuthCookies(res, accessToken, refreshToken);
+
+    auditLog('IMPERSONATION_START', actorId, {
+      actorEmail: req.user.email,
+      targetUserId: targetId,
+      targetEmail: targetUser.email,
+      targetRole: mappedTargetRole,
+      ip: req.ip
+    });
+
+    res.json({
+      success: true,
+      message: `Now impersonating ${targetUser.firstName} ${targetUser.lastName}`,
+      data: {
+        impersonating: {
+          id: targetUser.id,
+          email: targetUser.email,
+          firstName: targetUser.firstName,
+          lastName: targetUser.lastName,
+          role: mappedTargetRole
+        },
+        impersonator: {
+          id: actorId,
+          email: req.user.email
+        }
+      }
+    });
+  } catch (error) {
+    logger.error('Impersonation error', { error: error.message });
+    res.status(500).json({ success: false, error: 'Failed to impersonate user' });
+  }
+});
+
+// POST /auth/stop-impersonating - Restore the original super admin session
+router.post('/stop-impersonating', authenticateToken, async (req, res) => {
+  try {
+    const { impersonated_by } = req.user;
+    if (!impersonated_by) {
+      return res.status(400).json({ success: false, error: 'You are not currently impersonating anyone' });
+    }
+
+    // Restore the original super admin's session
+    const db = getDbConnection(req.user.companyId);
+    const originalUser = await db('users').where({ id: impersonated_by }).first();
+    if (!originalUser || !originalUser.isActive) {
+      return res.status(400).json({ success: false, error: 'Original user session could not be restored' });
+    }
+
+    const roleMapping = {
+      'super-admin': 'SUPER_ADMIN', 'company-admin': 'COMPANY_ADMIN',
+      'manager': 'MANAGER', 'sales-staff': 'SALES_STAFF',
+      'purchase-staff': 'PURCHASE_STAFF', 'accounts-staff': 'ACCOUNTS_STAFF'
+    };
+    const mappedRole = roleMapping[originalUser.role] || originalUser.role;
+    const permissions = await getUserPermissions(originalUser.role_id || mappedRole, originalUser.companyId, db);
+
+    const tokens = generateTokenPair(
+      originalUser.id,
+      originalUser.email,
+      mappedRole,
+      originalUser.companyId,
+      permissions,
+      originalUser.role_id,
+      null
+    );
+
+    setAuthCookies(res, tokens.accessToken, tokens.refreshToken);
+
+    auditLog('IMPERSONATION_STOP', impersonated_by, {
+      actorEmail: originalUser.email,
+      wasImpersonating: req.user.userId,
+      ip: req.ip
+    });
+
+    res.json({
+      success: true,
+      message: 'Impersonation ended',
+      data: {
+        user: {
+          id: originalUser.id,
+          email: originalUser.email,
+          firstName: originalUser.firstName,
+          lastName: originalUser.lastName,
+          role: mappedRole
+        }
+      }
+    });
+  } catch (error) {
+    logger.error('Stop impersonation error', { error: error.message });
+    res.status(500).json({ success: false, error: 'Failed to stop impersonation' });
   }
 });
 
