@@ -69,6 +69,26 @@ const vendorBillsSchema = baseReportSchema.keys({
   bill_type: Joi.string().valid('company', 'vendor', 'all').default('all')
 });
 
+// VAT Return specific params
+const vatReturnSchema = baseReportSchema.keys({
+  taxable_only: Joi.boolean().default(false)
+});
+
+// Receivables Aging specific params (no date range needed; always "as of today")
+const receivablesAgingSchema = Joi.object({
+  customer_id: Joi.number().integer().positive().optional(),
+  include_paid: Joi.boolean().default(false),
+  page: Joi.number().integer().min(1).default(1),
+  limit: Joi.number().integer().min(1).max(500).default(100),
+  sort_by: Joi.string().optional(),
+  sort_order: Joi.string().valid('asc', 'desc').default('desc')
+}).unknown(true);
+
+// Profit & Loss specific params
+const profitLossSchema = baseReportSchema.keys({
+  group_by: Joi.string().valid('month', 'quarter', 'year', 'none').default('month')
+});
+
 // Export params
 const exportSchema = Joi.object({
   format: Joi.string().valid('csv', 'xlsx').default('csv')
@@ -999,6 +1019,410 @@ router.get('/vendor-bills/export', requirePermission('VIEW_REPORTS'), async (req
   } catch (error) {
     logger.error('Vendor Bills Export Error:', error);
     res.status(500).json({ success: false, error: 'Export failed' });
+  }
+});
+
+// ============================================================================
+// REPORT 5: VAT RETURN
+// ============================================================================
+//
+// Oman VAT filing — shows output VAT (from sales) and input VAT (from purchases)
+// for a period, with net VAT payable.
+// Standard Oman VAT rate: 5%
+//
+router.get('/vat-return', requirePermission('VIEW_REPORTS'), async (req, res) => {
+  try {
+    const { companyId } = req.user;
+    const { error, value } = vatReturnSchema.validate(req.query);
+    if (error) return res.status(400).json({ success: false, error: error.details[0].message });
+
+    const db = getDbConnection(companyId);
+    const { from, to } = buildDateRangeFilter(value.from_date, value.to_date);
+
+    // Output VAT: from sales orders
+    const salesRows = await db('sales_orders as s')
+      .leftJoin('customers as c', 'c.id', 's.customerId')
+      .whereBetween('s.orderDate', [from, to])
+      .whereNot('s.status', 'cancelled')
+      .select(
+        's.id', 's.orderNumber', 's.orderDate',
+        's.subtotal', 's.taxAmount as vatAmount', 's.totalAmount',
+        's.paymentStatus',
+        'c.id as customerId', 'c.name as customerName',
+        'c.vatRegistration as customerVat', 'c.is_taxable as customerTaxable'
+      )
+      .orderBy('s.orderDate', 'asc');
+
+    // Input VAT: from purchase orders
+    const purchaseRows = await db('purchase_orders as p')
+      .leftJoin('suppliers as sup', 'sup.id', 'p.supplierId')
+      .whereBetween('p.orderDate', [from, to])
+      .whereNot('p.status', 'cancelled')
+      .select(
+        'p.id', 'p.orderNumber', 'p.orderDate',
+        'p.subtotal', 'p.taxAmount as vatAmount', 'p.totalAmount',
+        'sup.id as supplierId', 'sup.name as supplierName',
+        'sup.vatRegistration as supplierVat'
+      )
+      .orderBy('p.orderDate', 'asc');
+
+    const outputVat = salesRows.reduce((s, r) => s + parseFloat(r.vatAmount || 0), 0);
+    const outputTaxable = salesRows.reduce((s, r) => s + parseFloat(r.subtotal || 0), 0);
+    const inputVat = purchaseRows.reduce((s, r) => s + parseFloat(r.vatAmount || 0), 0);
+    const inputTaxable = purchaseRows.reduce((s, r) => s + parseFloat(r.subtotal || 0), 0);
+    const netVatPayable = outputVat - inputVat;
+
+    const summary = {
+      period: `${from} to ${to}`,
+      outputVat: parseFloat(outputVat.toFixed(3)),
+      outputTaxable: parseFloat(outputTaxable.toFixed(3)),
+      inputVat: parseFloat(inputVat.toFixed(3)),
+      inputTaxable: parseFloat(inputTaxable.toFixed(3)),
+      netVatPayable: parseFloat(netVatPayable.toFixed(3)),
+      salesCount: salesRows.length,
+      purchaseCount: purchaseRows.length,
+      vatRate: 0.05
+    };
+
+    res.json({
+      success: true,
+      data: {
+        summary,
+        sales: salesRows,
+        purchases: purchaseRows,
+        dateRange: { from, to }
+      }
+    });
+  } catch (error) {
+    logger.error('VAT Return Report Error:', error);
+    res.status(500).json({ success: false, error: 'Failed to generate VAT return' });
+  }
+});
+
+router.get('/vat-return/export', requirePermission('VIEW_REPORTS'), async (req, res) => {
+  try {
+    const { companyId } = req.user;
+    const db = getDbConnection(companyId);
+    const { from, to } = buildDateRangeFilter(req.query.from_date, req.query.to_date);
+
+    const sales = await db('sales_orders as s')
+      .leftJoin('customers as c', 'c.id', 's.customerId')
+      .whereBetween('s.orderDate', [from, to])
+      .whereNot('s.status', 'cancelled')
+      .select(
+        's.orderNumber', 's.orderDate',
+        'c.name as customerName', 'c.vatRegistration',
+        's.subtotal', 's.taxAmount', 's.totalAmount'
+      );
+
+    const exportData = sales.map(s => ({
+      'Invoice Number': s.orderNumber,
+      'Date': s.orderDate,
+      'Customer': s.customerName,
+      'VAT Reg': s.vatRegistration || '',
+      'Net': parseFloat(s.subtotal || 0).toFixed(3),
+      'VAT (5%)': parseFloat(s.taxAmount || 0).toFixed(3),
+      'Total': parseFloat(s.totalAmount || 0).toFixed(3)
+    }));
+
+    const format = req.query.format === 'xlsx' ? 'xlsx' : 'csv';
+    const filename = `vat-return-${from}-to-${to}`;
+    if (format === 'xlsx') exportToXlsx(exportData, filename, res);
+    else exportToCsv(exportData, filename, res);
+  } catch (error) {
+    logger.error('VAT Return Export Error:', error);
+    res.status(500).json({ success: false, error: 'Export failed' });
+  }
+});
+
+// ============================================================================
+// REPORT 6: RECEIVABLES AGING
+// ============================================================================
+//
+// Unpaid sales orders bucketed by age (0-30, 31-60, 61-90, 90+).
+// Per-customer totals and grand total.
+//
+router.get('/receivables-aging', requirePermission('VIEW_REPORTS'), async (req, res) => {
+  try {
+    const { companyId } = req.user;
+    const { error, value } = receivablesAgingSchema.validate(req.query);
+    if (error) return res.status(400).json({ success: false, error: error.details[0].message });
+
+    const db = getDbConnection(companyId);
+    const today = new Date();
+    const todayStr = today.toISOString().split('T')[0];
+
+    let query = db('sales_orders as s')
+      .leftJoin('customers as c', 'c.id', 's.customerId')
+      .whereNot('s.status', 'cancelled')
+      .select(
+        's.id', 's.orderNumber', 's.orderDate',
+        's.totalAmount', 's.paymentStatus',
+        'c.id as customerId', 'c.name as customerName',
+        'c.paymentTermDays'
+      );
+
+    if (!value.include_paid) {
+      query = query.whereIn('s.paymentStatus', ['pending', 'partial', 'overdue']);
+    }
+    if (value.customer_id) {
+      query = query.where('s.customerId', value.customer_id);
+    }
+
+    const orders = await query.orderBy('s.orderDate', 'asc');
+
+    // Compute aging buckets
+    const buckets = {
+      current: { label: '0-30 days', count: 0, total: 0, orders: [] },
+      bucket_31_60: { label: '31-60 days', count: 0, total: 0, orders: [] },
+      bucket_61_90: { label: '61-90 days', count: 0, total: 0, orders: [] },
+      bucket_90_plus: { label: '90+ days', count: 0, total: 0, orders: [] }
+    };
+
+    const enriched = orders.map(o => {
+      const orderDate = new Date(o.orderDate);
+      const ageDays = Math.floor((today - orderDate) / (1000 * 60 * 60 * 24));
+      const amount = parseFloat(o.totalAmount || 0);
+      let bucket;
+      if (ageDays <= 30) bucket = 'current';
+      else if (ageDays <= 60) bucket = 'bucket_31_60';
+      else if (ageDays <= 90) bucket = 'bucket_61_90';
+      else bucket = 'bucket_90_plus';
+
+      buckets[bucket].count += 1;
+      buckets[bucket].total += amount;
+      buckets[bucket].orders.push(o.id);
+
+      return { ...o, ageDays, bucket };
+    });
+
+    // Per-customer grouping
+    const byCustomer = {};
+    enriched.forEach(o => {
+      const key = o.customerId || 'unknown';
+      if (!byCustomer[key]) {
+        byCustomer[key] = {
+          customerId: o.customerId,
+          customerName: o.customerName || 'Unknown',
+          current: 0, bucket_31_60: 0, bucket_61_90: 0, bucket_90_plus: 0,
+          total: 0, orderCount: 0
+        };
+      }
+      byCustomer[key][o.bucket] += parseFloat(o.totalAmount || 0);
+      byCustomer[key].total += parseFloat(o.totalAmount || 0);
+      byCustomer[key].orderCount += 1;
+    });
+
+    // Round everything
+    Object.values(buckets).forEach(b => { b.total = parseFloat(b.total.toFixed(3)); });
+    Object.values(byCustomer).forEach(c => {
+      c.current = parseFloat(c.current.toFixed(3));
+      c.bucket_31_60 = parseFloat(c.bucket_31_60.toFixed(3));
+      c.bucket_61_90 = parseFloat(c.bucket_61_90.toFixed(3));
+      c.bucket_90_plus = parseFloat(c.bucket_90_plus.toFixed(3));
+      c.total = parseFloat(c.total.toFixed(3));
+    });
+
+    const grandTotal = enriched.reduce((s, o) => s + parseFloat(o.totalAmount || 0), 0);
+
+    res.json({
+      success: true,
+      data: {
+        summary: {
+          asOf: todayStr,
+          grandTotal: parseFloat(grandTotal.toFixed(3)),
+          orderCount: enriched.length,
+          buckets: Object.values(buckets).map(b => ({ label: b.label, count: b.count, total: b.total }))
+        },
+        byCustomer: Object.values(byCustomer).sort((a, b) => b.total - a.total),
+        records: enriched
+      }
+    });
+  } catch (error) {
+    logger.error('Receivables Aging Report Error:', error);
+    res.status(500).json({ success: false, error: 'Failed to generate receivables aging' });
+  }
+});
+
+router.get('/receivables-aging/export', requirePermission('VIEW_REPORTS'), async (req, res) => {
+  try {
+    const { companyId } = req.user;
+    const db = getDbConnection(companyId);
+    const today = new Date();
+
+    const orders = await db('sales_orders as s')
+      .leftJoin('customers as c', 'c.id', 's.customerId')
+      .whereNot('s.status', 'cancelled')
+      .whereIn('s.paymentStatus', ['pending', 'partial', 'overdue'])
+      .select(
+        's.orderNumber', 's.orderDate',
+        's.totalAmount', 's.paymentStatus',
+        'c.name as customerName'
+      );
+
+    const exportData = orders.map(o => {
+      const ageDays = Math.floor((today - new Date(o.orderDate)) / (1000 * 60 * 60 * 24));
+      let bucket = '0-30';
+      if (ageDays > 90) bucket = '90+';
+      else if (ageDays > 60) bucket = '61-90';
+      else if (ageDays > 30) bucket = '31-60';
+
+      return {
+        'Invoice': o.orderNumber,
+        'Date': o.orderDate,
+        'Customer': o.customerName,
+        'Age (days)': ageDays,
+        'Bucket': bucket,
+        'Amount': parseFloat(o.totalAmount || 0).toFixed(3),
+        'Status': o.paymentStatus
+      };
+    });
+
+    const format = req.query.format === 'xlsx' ? 'xlsx' : 'csv';
+    const filename = `receivables-aging-${today.toISOString().split('T')[0]}`;
+    if (format === 'xlsx') exportToXlsx(exportData, filename, res);
+    else exportToCsv(exportData, filename, res);
+  } catch (error) {
+    logger.error('Receivables Aging Export Error:', error);
+    res.status(500).json({ success: false, error: 'Export failed' });
+  }
+});
+
+// ============================================================================
+// REPORT 7: PROFIT & LOSS
+// ============================================================================
+//
+// Net Profit = Revenue - COGS - Operating Expenses - Wastage Cost
+// Grouped by period (month/quarter/year/none)
+//
+router.get('/profit-loss', requirePermission('VIEW_REPORTS'), async (req, res) => {
+  try {
+    const { companyId } = req.user;
+    const { error, value } = profitLossSchema.validate(req.query);
+    if (error) return res.status(400).json({ success: false, error: error.details[0].message });
+
+    const db = getDbConnection(companyId);
+    const { from, to } = buildDateRangeFilter(value.from_date, value.to_date);
+
+    // Revenue: sales orders (excluding cancelled)
+    const [{ revenue }] = await db('sales_orders')
+      .whereBetween('orderDate', [from, to])
+      .whereNot('status', 'cancelled')
+      .sum('totalAmount as revenue');
+
+    // COGS: purchase orders (excluding cancelled)
+    const [{ cogs }] = await db('purchase_orders')
+      .whereBetween('orderDate', [from, to])
+      .whereNot('status', 'cancelled')
+      .sum('totalAmount as cogs');
+
+    // Operating expenses: collection expenses (fuel, transport, etc.)
+    let collectionOpEx = 0;
+    try {
+      const [{ sum }] = await db('collection_expenses')
+        .whereBetween('expenseDate', [from, to])
+        .sum('amount as sum');
+      collectionOpEx = parseFloat(sum || 0);
+    } catch (e) { /* table may not exist in some deployments */ }
+
+    // Petty cash expenses (approved only)
+    let pettyCashOpEx = 0;
+    try {
+      const [{ sum }] = await db('petty_cash_expenses')
+        .whereBetween('expenseDate', [from, to])
+        .where('status', 'approved')
+        .sum('amount as sum');
+      pettyCashOpEx = parseFloat(sum || 0);
+    } catch (e) { /* ignore */ }
+
+    // Vehicle daily expense sheets (approved only)
+    let vehicleOpEx = 0;
+    try {
+      const [{ sum }] = await db('vehicle_daily_expense_sheets')
+        .whereBetween('sheet_date', [from, to])
+        .whereIn('status', ['approved', 'closed'])
+        .sum('total_expenses as sum');
+      vehicleOpEx = parseFloat(sum || 0);
+    } catch (e) { /* ignore */ }
+
+    // Wastage cost (approved wastages)
+    let wastageCost = 0;
+    try {
+      const [{ sum }] = await db('wastages')
+        .whereBetween('wastageDate', [from, to])
+        .where('status', 'approved')
+        .sum('cost as sum');
+      wastageCost = parseFloat(sum || 0);
+    } catch (e) { /* ignore */ }
+
+    const revenueValue = parseFloat(revenue || 0);
+    const cogsValue = parseFloat(cogs || 0);
+    const totalOpEx = collectionOpEx + pettyCashOpEx + vehicleOpEx;
+    const grossProfit = revenueValue - cogsValue;
+    const netProfit = grossProfit - totalOpEx - wastageCost;
+    const grossMargin = revenueValue > 0 ? (grossProfit / revenueValue) * 100 : 0;
+    const netMargin = revenueValue > 0 ? (netProfit / revenueValue) * 100 : 0;
+
+    // Monthly breakdown if requested
+    let breakdown = [];
+    if (value.group_by === 'month') {
+      const monthlyRevenue = await db('sales_orders')
+        .whereBetween('orderDate', [from, to])
+        .whereNot('status', 'cancelled')
+        .select(db.raw("DATE_FORMAT(orderDate, '%Y-%m') as period"))
+        .sum('totalAmount as revenue')
+        .groupBy('period');
+
+      const monthlyCogs = await db('purchase_orders')
+        .whereBetween('orderDate', [from, to])
+        .whereNot('status', 'cancelled')
+        .select(db.raw("DATE_FORMAT(orderDate, '%Y-%m') as period"))
+        .sum('totalAmount as cogs')
+        .groupBy('period');
+
+      const periods = new Set([
+        ...monthlyRevenue.map(r => r.period),
+        ...monthlyCogs.map(r => r.period)
+      ]);
+
+      breakdown = [...periods].sort().map(period => {
+        const rev = parseFloat(monthlyRevenue.find(r => r.period === period)?.revenue || 0);
+        const cg = parseFloat(monthlyCogs.find(r => r.period === period)?.cogs || 0);
+        return {
+          period,
+          revenue: parseFloat(rev.toFixed(3)),
+          cogs: parseFloat(cg.toFixed(3)),
+          grossProfit: parseFloat((rev - cg).toFixed(3))
+        };
+      });
+    }
+
+    res.json({
+      success: true,
+      data: {
+        summary: {
+          period: `${from} to ${to}`,
+          revenue: parseFloat(revenueValue.toFixed(3)),
+          cogs: parseFloat(cogsValue.toFixed(3)),
+          grossProfit: parseFloat(grossProfit.toFixed(3)),
+          grossMargin: parseFloat(grossMargin.toFixed(2)),
+          operatingExpenses: {
+            collection: parseFloat(collectionOpEx.toFixed(3)),
+            pettyCash: parseFloat(pettyCashOpEx.toFixed(3)),
+            vehicle: parseFloat(vehicleOpEx.toFixed(3)),
+            total: parseFloat(totalOpEx.toFixed(3))
+          },
+          wastageCost: parseFloat(wastageCost.toFixed(3)),
+          netProfit: parseFloat(netProfit.toFixed(3)),
+          netMargin: parseFloat(netMargin.toFixed(2))
+        },
+        breakdown,
+        dateRange: { from, to }
+      }
+    });
+  } catch (error) {
+    logger.error('Profit & Loss Report Error:', error);
+    res.status(500).json({ success: false, error: 'Failed to generate P&L statement' });
   }
 });
 
