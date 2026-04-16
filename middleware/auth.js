@@ -160,12 +160,17 @@ const requirePermission = (requiredPermission) => {
       });
     }
 
-    // Super Admin bypass: role-based override grants all permissions
-    // This ensures super admins are never blocked, even if their JWT
-    // doesn't contain every individual permission string
+    // Super Admin bypass: role-based + permission-based + roleId-based overrides
+    // Ensures super admins are never blocked regardless of JWT structure
     const rawRole = (req.user.role || '').toString();
     const normalizedRole = rawRole.toLowerCase().replace(/[-_\s]/g, '');
-    if (normalizedRole === 'superadmin') {
+    const userPerms = req.user.permissions || [];
+    if (
+      normalizedRole === 'superadmin' ||
+      userPerms.includes('SUPER_ADMIN') ||
+      userPerms.includes('*') ||
+      req.user.roleId === 1  // Role ID 1 is typically super admin
+    ) {
       return next();
     }
 

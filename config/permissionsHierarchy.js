@@ -63,10 +63,24 @@ const PERMISSION_TREE = {
     implies: [
       'VIEW_SETTINGS',
       'EDIT_SETTINGS',
+      'VIEW_BRANCHES',
       'MANAGE_BRANCHES',
+      'CREATE_BRANCHES',
+      'EDIT_BRANCHES',
+      'DELETE_BRANCHES',
       'MANAGE_EXPENSE_CATEGORIES',
+      'VIEW_EXPENSE_CATEGORIES',
       'CONFIGURE_VAT',
       'CONFIGURE_SECURITY'
+    ]
+  },
+
+  MANAGE_BRANCHES: {
+    implies: [
+      'VIEW_BRANCHES',
+      'CREATE_BRANCHES',
+      'EDIT_BRANCHES',
+      'DELETE_BRANCHES'
     ]
   },
 
