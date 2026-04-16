@@ -914,6 +914,9 @@ router.post('/impersonate/:userId', authenticateToken, async (req, res) => {
 
     setAuthCookies(res, accessToken, refreshToken);
 
+    // Initialize session for the target user so session timeout check passes
+    await initializeSession(targetUser.id, targetUser.companyId);
+
     auditLog('IMPERSONATION_START', actorId, {
       actorEmail: req.user.email,
       targetUserId: targetId,
@@ -979,6 +982,9 @@ router.post('/stop-impersonating', authenticateToken, async (req, res) => {
     );
 
     setAuthCookies(res, tokens.accessToken, tokens.refreshToken);
+
+    // Re-initialize session for the original super admin
+    await initializeSession(originalUser.id, originalUser.companyId);
 
     auditLog('IMPERSONATION_STOP', impersonated_by, {
       actorEmail: originalUser.email,
