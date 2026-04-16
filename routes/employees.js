@@ -41,6 +41,7 @@ const documentSchema = Joi.object({
 
 const locationAssignmentSchema = Joi.object({
   location_id: Joi.number().integer().positive().required(),
+  location_source: Joi.string().valid('branch', 'supplier_location').default('branch'),
   role: Joi.string().valid('in_charge', 'staff', 'driver', 'helper').required(),
   assigned_from: Joi.date().required(),
   assigned_to: Joi.date().allow(null)
@@ -75,6 +76,113 @@ async function generateEmployeeCode(db) {
   }
   return `EMP-${String(seq).padStart(3, '0')}`;
 }
+
+// ============================================================================
+// LOCATION MANAGERS — GET /managers
+// Returns all current in-charge assignments with employee + location details.
+// Provides two views: grouped by employee, and grouped by location.
+// Must be registered BEFORE /:id to avoid route collision
+// ============================================================================
+router.get('/managers', requirePermission('VIEW_EMPLOYEES'), async (req, res) => {
+  try {
+    const db = getDbConnection(req.user.companyId);
+
+    // Active in-charge assignments only (assigned_to IS NULL means still active)
+    const assignments = await db('employee_location_assignments as a')
+      .join('employees as e', 'e.id', 'a.employee_id')
+      .where('a.role', 'in_charge')
+      .whereNull('a.assigned_to')
+      .where('e.status', 'active')
+      .select(
+        'a.id as assignmentId',
+        'a.location_id',
+        'a.location_source',
+        'a.assigned_from',
+        'e.id as employeeId',
+        'e.employee_code',
+        'e.full_name',
+        'e.phone',
+        'e.email',
+        'e.employee_type',
+        'e.designation'
+      );
+
+    // Enrich with location names
+    const enriched = await Promise.all(assignments.map(async (a) => {
+      const source = a.location_source || 'branch';
+      let locationName = 'Unknown';
+      let locationCode = null;
+
+      if (source === 'branch') {
+        const b = await db('branches').where('id', a.location_id).first();
+        if (b) { locationName = b.name; locationCode = b.code; }
+      } else {
+        const sl = await db('supplier_locations').where('id', a.location_id).first();
+        if (sl) { locationName = sl.locationName; locationCode = sl.locationCode; }
+      }
+
+      return { ...a, locationName, locationCode };
+    }));
+
+    // Group by employee (one employee, many locations)
+    const byEmployee = {};
+    enriched.forEach(a => {
+      if (!byEmployee[a.employeeId]) {
+        byEmployee[a.employeeId] = {
+          employeeId: a.employeeId,
+          employee_code: a.employee_code,
+          full_name: a.full_name,
+          phone: a.phone,
+          email: a.email,
+          employee_type: a.employee_type,
+          designation: a.designation,
+          locations: []
+        };
+      }
+      byEmployee[a.employeeId].locations.push({
+        locationId: a.location_id,
+        locationSource: a.location_source,
+        locationName: a.locationName,
+        locationCode: a.locationCode,
+        assignedFrom: a.assigned_from
+      });
+    });
+
+    // Group by location (one location, potentially many managers — though usually one)
+    const byLocation = {};
+    enriched.forEach(a => {
+      const key = `${a.location_source}:${a.location_id}`;
+      if (!byLocation[key]) {
+        byLocation[key] = {
+          locationId: a.location_id,
+          locationSource: a.location_source,
+          locationName: a.locationName,
+          locationCode: a.locationCode,
+          managers: []
+        };
+      }
+      byLocation[key].managers.push({
+        employeeId: a.employeeId,
+        employee_code: a.employee_code,
+        full_name: a.full_name,
+        phone: a.phone,
+        assignedFrom: a.assigned_from
+      });
+    });
+
+    res.json({
+      success: true,
+      data: {
+        byEmployee: Object.values(byEmployee),
+        byLocation: Object.values(byLocation),
+        total: enriched.length
+      }
+    });
+  } catch (error) {
+    logger.error('Error fetching location managers', { error: error.message });
+    res.status(500).json({ success: false, error: 'Failed to fetch managers' });
+  }
+});
 
 // ============================================================================
 // EXPIRY ALERTS  — GET /expiry-alerts?days=30
@@ -146,13 +254,23 @@ router.get('/expiry-alerts', requirePermission('VIEW_EMPLOYEES'), async (req, re
 router.get('/', requirePermission('VIEW_EMPLOYEES'), async (req, res) => {
   try {
     const db = getDbConnection(req.user.companyId);
-    const { status, search, department, employee_type, page = 1, limit = 50 } = req.query;
+    const { status, search, department, employee_type, is_manager, page = 1, limit = 50 } = req.query;
 
     let query = db('employees');
 
     if (status) query = query.where('status', status);
     if (department) query = query.where('department', department);
     if (employee_type) query = query.where('employee_type', employee_type);
+
+    // Filter: only employees with at least one active in-charge assignment
+    if (is_manager === 'true' || is_manager === '1') {
+      const managerIds = await db('employee_location_assignments')
+        .where('role', 'in_charge')
+        .whereNull('assigned_to')
+        .distinct('employee_id')
+        .pluck('employee_id');
+      query = query.whereIn('id', managerIds.length > 0 ? managerIds : [0]);
+    }
     if (search) {
       query = query.where(function () {
         this.where('full_name', 'like', `%${search}%`)
@@ -171,9 +289,27 @@ router.get('/', requirePermission('VIEW_EMPLOYEES'), async (req, res) => {
       .limit(parseInt(limit))
       .offset(offset);
 
+    // Enrich with in-charge location count (active assignments only)
+    const empIds = employees.map(e => e.id);
+    let inChargeMap = {};
+    if (empIds.length > 0) {
+      const counts = await db('employee_location_assignments')
+        .whereIn('employee_id', empIds)
+        .where('role', 'in_charge')
+        .whereNull('assigned_to')
+        .groupBy('employee_id')
+        .select('employee_id', db.raw('COUNT(*) as count'));
+      counts.forEach(c => { inChargeMap[c.employee_id] = parseInt(c.count); });
+    }
+
+    const enriched = employees.map(e => ({
+      ...e,
+      in_charge_count: inChargeMap[e.id] || 0
+    }));
+
     res.json({
       success: true,
-      data: employees,
+      data: enriched,
       pagination: {
         page: parseInt(page),
         limit: parseInt(limit),
@@ -187,7 +323,7 @@ router.get('/', requirePermission('VIEW_EMPLOYEES'), async (req, res) => {
   }
 });
 
-// GET /:id — single employee with addresses
+// GET /:id — single employee with addresses and in-charge locations
 router.get('/:id', requirePermission('VIEW_EMPLOYEES'), async (req, res) => {
   try {
     const db = getDbConnection(req.user.companyId);
@@ -195,7 +331,32 @@ router.get('/:id', requirePermission('VIEW_EMPLOYEES'), async (req, res) => {
     if (!employee) return res.status(404).json({ success: false, error: 'Employee not found' });
 
     const addresses = await db('employee_addresses').where('employee_id', employee.id);
-    res.json({ success: true, data: { ...employee, addresses } });
+
+    // Fetch current in-charge locations for the header summary
+    const inChargeRows = await db('employee_location_assignments')
+      .where('employee_id', employee.id)
+      .where('role', 'in_charge')
+      .whereNull('assigned_to');
+
+    const inChargeLocations = await Promise.all(inChargeRows.map(async (row) => {
+      const source = row.location_source || 'branch';
+      if (source === 'branch') {
+        const b = await db('branches').where('id', row.location_id).first();
+        return b ? { id: b.id, name: b.name, code: b.code, source: 'branch' } : null;
+      } else {
+        const sl = await db('supplier_locations').where('id', row.location_id).first();
+        return sl ? { id: sl.id, name: sl.locationName, code: sl.locationCode, source: 'supplier_location' } : null;
+      }
+    }));
+
+    res.json({
+      success: true,
+      data: {
+        ...employee,
+        addresses,
+        in_charge_locations: inChargeLocations.filter(Boolean)
+      }
+    });
   } catch (error) {
     logger.error('Error fetching employee', { error: error.message });
     res.status(500).json({ success: false, error: 'Failed to fetch employee' });
@@ -393,18 +554,39 @@ router.put('/:id/documents/:docId', requirePermission('MANAGE_EMPLOYEES'), valid
 router.get('/:id/location-assignments', requirePermission('VIEW_EMPLOYEES'), async (req, res) => {
   try {
     const db = getDbConnection(req.user.companyId);
-    const assignments = await db('employee_location_assignments as a')
-      .join('supplier_locations as l', 'l.id', 'a.location_id')
-      .where('a.employee_id', req.params.id)
-      .select(
-        'a.*',
-        'l.locationName',
-        'l.locationCode',
-        'l.address as locationAddress'
-      )
-      .orderBy('a.assigned_from', 'desc');
+    const rows = await db('employee_location_assignments')
+      .where('employee_id', req.params.id)
+      .orderBy('assigned_from', 'desc');
 
-    res.json({ success: true, data: assignments });
+    // Enrich with location details from the correct source table
+    const enriched = await Promise.all(rows.map(async (row) => {
+      const source = row.location_source || 'branch';
+      let locationDetails = { locationName: 'Unknown Location', locationCode: null, locationAddress: null };
+
+      if (source === 'branch') {
+        const branch = await db('branches').where('id', row.location_id).first();
+        if (branch) {
+          locationDetails = {
+            locationName: branch.name,
+            locationCode: branch.code,
+            locationAddress: branch.address
+          };
+        }
+      } else {
+        const sl = await db('supplier_locations').where('id', row.location_id).first();
+        if (sl) {
+          locationDetails = {
+            locationName: sl.locationName,
+            locationCode: sl.locationCode,
+            locationAddress: sl.address
+          };
+        }
+      }
+
+      return { ...row, ...locationDetails };
+    }));
+
+    res.json({ success: true, data: enriched });
   } catch (error) {
     logger.error('Error fetching location assignments', { error: error.message });
     res.status(500).json({ success: false, error: 'Failed to fetch assignments' });
@@ -418,28 +600,34 @@ router.post('/:id/location-assignments', requirePermission('MANAGE_EMPLOYEES'), 
     const employee = await db('employees').where('id', req.params.id).first();
     if (!employee) return res.status(404).json({ success: false, error: 'Employee not found' });
 
-    // Verify location exists
-    const location = await db('supplier_locations').where('id', req.body.location_id).first();
-    if (!location) return res.status(404).json({ success: false, error: 'Location not found' });
+    const { location_id, location_source = 'branch' } = req.body;
+
+    // Verify location exists in the correct source table
+    const table = location_source === 'branch' ? 'branches' : 'supplier_locations';
+    const location = await db(table).where('id', location_id).first();
+    if (!location) return res.status(404).json({ success: false, error: `Location not found in ${table}` });
 
     const [id] = await db('employee_location_assignments').insert({
       ...req.body,
       employee_id: req.params.id
     });
 
-    const created = await db('employee_location_assignments as a')
-      .join('supplier_locations as l', 'l.id', 'a.location_id')
-      .where('a.id', id)
-      .select('a.*', 'l.locationName', 'l.locationCode')
-      .first();
+    const created = await db('employee_location_assignments').where('id', id).first();
+    const locationName = location_source === 'branch' ? location.name : location.locationName;
+    const locationCode = location_source === 'branch' ? location.code : location.locationCode;
 
     auditLog('EMPLOYEE_LOCATION_ASSIGNED', req.user.userId, {
       employeeId: req.params.id,
-      locationId: req.body.location_id,
+      locationId: location_id,
+      locationSource: location_source,
       role: req.body.role
     });
 
-    res.status(201).json({ success: true, data: created, message: 'Location assigned' });
+    res.status(201).json({
+      success: true,
+      data: { ...created, locationName, locationCode },
+      message: 'Location assigned'
+    });
   } catch (error) {
     logger.error('Error assigning location', { error: error.message });
     res.status(500).json({ success: false, error: 'Failed to assign location' });
