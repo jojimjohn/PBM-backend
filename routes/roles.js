@@ -152,12 +152,15 @@ router.get('/', async (req, res, next) => {
     const db = getDbConnection(companyId);
 
     // Get roles with user counts
+    // Include both company-specific roles AND system-wide roles (company_id IS NULL)
     const roles = await db('roles')
       .select(
         'roles.*',
         db.raw('(SELECT COUNT(*) FROM users WHERE users.role_id = roles.id) as user_count')
       )
-      .where('roles.company_id', companyId)
+      .where(function () {
+        this.where('roles.company_id', companyId).orWhereNull('roles.company_id');
+      })
       .orderBy('roles.hierarchy_level', 'desc')
       .orderBy('roles.name', 'asc');
 
@@ -199,7 +202,10 @@ router.get('/:id', requirePermission('VIEW_ROLES'), async (req, res) => {
         'roles.*',
         db.raw('(SELECT COUNT(*) FROM users WHERE users.role_id = roles.id) as user_count')
       )
-      .where({ 'roles.id': id, 'roles.company_id': companyId })
+      .where('roles.id', id)
+      .where(function () {
+        this.where('roles.company_id', companyId).orWhereNull('roles.company_id');
+      })
       .first();
 
     if (!role) {
