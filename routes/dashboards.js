@@ -5,7 +5,17 @@ const { getDbConnection } = require('../config/database');
 
 const router = express.Router();
 
-// Helper: get today's date range and month-to-date range
+// Helper: safely run a DB query, return default on error (with logging)
+async function safeQuery(fn, defaultValue, context = 'query') {
+  try {
+    return await fn();
+  } catch (err) {
+    logger.warn(`Dashboard ${context} failed (returning default)`, { error: err.message });
+    return defaultValue;
+  }
+}
+
+// Helper: get today / month / year date ranges
 function getDateRanges() {
   const now = new Date();
   const today = now.toISOString().split('T')[0];
@@ -15,204 +25,276 @@ function getDateRanges() {
 }
 
 // ============================================================================
-// EXECUTIVE DASHBOARD — Owner/GM strategic view
+// EXECUTIVE DASHBOARD
 // ============================================================================
 router.get('/executive', requirePermission('VIEW_DASHBOARD'), async (req, res) => {
   try {
     const db = getDbConnection(req.user.companyId);
     const { today, monthStart, yearStart } = getDateRanges();
 
-    // Today's sales + MTD + YTD revenue
-    const [todayRev] = await db('sales_orders').where('orderDate', today).whereNot('status', 'cancelled').sum('totalAmount as total');
-    const [mtdRev] = await db('sales_orders').whereBetween('orderDate', [monthStart, today]).whereNot('status', 'cancelled').sum('totalAmount as total');
-    const [ytdRev] = await db('sales_orders').whereBetween('orderDate', [yearStart, today]).whereNot('status', 'cancelled').sum('totalAmount as total');
+    const todayRev = await safeQuery(
+      () => db('sales_orders').where('orderDate', today).whereNot('status', 'cancelled').sum('totalAmount as total').first(),
+      { total: 0 }, 'today revenue'
+    );
+    const mtdRev = await safeQuery(
+      () => db('sales_orders').whereBetween('orderDate', [monthStart, today]).whereNot('status', 'cancelled').sum('totalAmount as total').first(),
+      { total: 0 }, 'mtd revenue'
+    );
+    const ytdRev = await safeQuery(
+      () => db('sales_orders').whereBetween('orderDate', [yearStart, today]).whereNot('status', 'cancelled').sum('totalAmount as total').first(),
+      { total: 0 }, 'ytd revenue'
+    );
+    const mtdCogs = await safeQuery(
+      () => db('purchase_orders').whereBetween('orderDate', [monthStart, today]).whereNot('status', 'cancelled').sum('totalAmount as total').first(),
+      { total: 0 }, 'mtd cogs'
+    );
+    const receivables = await safeQuery(
+      () => db('sales_orders').whereIn('paymentStatus', ['pending', 'partial', 'overdue']).whereNot('status', 'cancelled').sum('totalAmount as total').first(),
+      { total: 0 }, 'receivables'
+    );
 
-    // MTD COGS + P&L snapshot
-    const [mtdCogs] = await db('purchase_orders').whereBetween('orderDate', [monthStart, today]).whereNot('status', 'cancelled').sum('totalAmount as total');
-    const mtdGrossProfit = parseFloat(mtdRev.total || 0) - parseFloat(mtdCogs.total || 0);
+    const topCustomers = await safeQuery(
+      () => db('sales_orders as s')
+        .leftJoin('customers as c', 'c.id', 's.customerId')
+        .whereBetween('s.orderDate', [monthStart, today])
+        .whereNot('s.status', 'cancelled')
+        .select('c.id', 'c.name', db.raw('SUM(s.totalAmount) as total'), db.raw('COUNT(s.id) as orderCount'))
+        .groupBy('c.id', 'c.name')
+        .orderBy('total', 'desc')
+        .limit(5),
+      [], 'top customers'
+    );
 
-    // Outstanding receivables (unpaid sales)
-    const [receivables] = await db('sales_orders').whereIn('paymentStatus', ['pending', 'partial', 'overdue']).whereNot('status', 'cancelled').sum('totalAmount as total');
+    const topSuppliers = await safeQuery(
+      () => db('purchase_orders as p')
+        .leftJoin('suppliers as sup', 'sup.id', 'p.supplierId')
+        .whereBetween('p.orderDate', [monthStart, today])
+        .whereNot('p.status', 'cancelled')
+        .select('sup.id', 'sup.name', db.raw('SUM(p.totalAmount) as total'), db.raw('COUNT(p.id) as orderCount'))
+        .groupBy('sup.id', 'sup.name')
+        .orderBy('total', 'desc')
+        .limit(5),
+      [], 'top suppliers'
+    );
 
-    // Top 5 customers by MTD revenue
-    const topCustomers = await db('sales_orders as s')
-      .leftJoin('customers as c', 'c.id', 's.customerId')
-      .whereBetween('s.orderDate', [monthStart, today])
-      .whereNot('s.status', 'cancelled')
-      .select('c.id', 'c.name', db.raw('SUM(s.totalAmount) as total'), db.raw('COUNT(s.id) as orderCount'))
-      .groupBy('c.id', 'c.name')
-      .orderBy('total', 'desc')
-      .limit(5);
-
-    // Top 5 suppliers by MTD volume
-    const topSuppliers = await db('purchase_orders as p')
-      .leftJoin('suppliers as sup', 'sup.id', 'p.supplierId')
-      .whereBetween('p.orderDate', [monthStart, today])
-      .whereNot('p.status', 'cancelled')
-      .select('sup.id', 'sup.name', db.raw('SUM(p.totalAmount) as total'), db.raw('COUNT(p.id) as orderCount'))
-      .groupBy('sup.id', 'sup.name')
-      .orderBy('total', 'desc')
-      .limit(5);
-
-    // Vehicle status
     let vehicleStats = { active: 0, inactive: 0, under_maintenance: 0 };
-    try {
-      const stats = await db('vehicles').groupBy('status').select('status', db.raw('COUNT(*) as count'));
-      stats.forEach(s => { vehicleStats[s.status] = parseInt(s.count); });
-    } catch (e) { /* table may not exist */ }
+    await safeQuery(
+      async () => {
+        const stats = await db('vehicles').groupBy('status').select('status', db.raw('COUNT(*) as count'));
+        stats.forEach(s => { if (vehicleStats[s.status] !== undefined) vehicleStats[s.status] = parseInt(s.count); });
+        return null;
+      },
+      null, 'vehicles status'
+    );
 
-    // Pending WCN finalizations
-    const [pendingWcn] = await db('collection_orders').where('status', 'completed').where('is_finalized', 0).count('id as count');
+    const pendingWcn = await safeQuery(
+      () => db('collection_orders').where('status', 'completed').where('is_finalized', 0).count('id as count').first(),
+      { count: 0 }, 'pending wcn'
+    );
 
-    // Document expiry alerts (within 30 days)
-    let expiringDocs = 0;
-    try {
-      const future = new Date(); future.setDate(future.getDate() + 30);
-      const futureStr = future.toISOString().split('T')[0];
-      const [count] = await db('employee_documents').whereNotNull('expiry_date').where('expiry_date', '<=', futureStr).count('id as count');
-      expiringDocs = parseInt(count.count);
-    } catch (e) { /* ignore */ }
+    const expiringDocs = await safeQuery(
+      async () => {
+        const future = new Date(); future.setDate(future.getDate() + 30);
+        const futureStr = future.toISOString().split('T')[0];
+        const r = await db('employee_documents').whereNotNull('expiry_date').where('expiry_date', '<=', futureStr).count('id as count').first();
+        return r;
+      },
+      { count: 0 }, 'expiring docs'
+    );
 
-    // Revenue trend (last 6 months)
-    const sixMonthsAgo = new Date();
-    sixMonthsAgo.setMonth(sixMonthsAgo.getMonth() - 6);
+    const sixMonthsAgo = new Date(); sixMonthsAgo.setMonth(sixMonthsAgo.getMonth() - 6);
     const trendFrom = sixMonthsAgo.toISOString().split('T')[0];
-    const revenueTrend = await db('sales_orders')
-      .whereBetween('orderDate', [trendFrom, today])
-      .whereNot('status', 'cancelled')
-      .select(db.raw("DATE_FORMAT(orderDate, '%Y-%m') as month"), db.raw('SUM(totalAmount) as revenue'))
-      .groupBy('month')
-      .orderBy('month', 'asc');
+    const revenueTrend = await safeQuery(
+      () => db('sales_orders')
+        .whereBetween('orderDate', [trendFrom, today])
+        .whereNot('status', 'cancelled')
+        .select(db.raw("DATE_FORMAT(orderDate, '%Y-%m') as month"), db.raw('SUM(totalAmount) as revenue'))
+        .groupBy('month')
+        .orderBy('month', 'asc'),
+      [], 'revenue trend'
+    );
+
+    const mtdRevenueValue = parseFloat(mtdRev.total || 0);
+    const mtdCogsValue = parseFloat(mtdCogs.total || 0);
 
     res.json({
       success: true,
       data: {
         kpis: {
           todayRevenue: parseFloat(todayRev.total || 0),
-          mtdRevenue: parseFloat(mtdRev.total || 0),
+          mtdRevenue: mtdRevenueValue,
           ytdRevenue: parseFloat(ytdRev.total || 0),
-          mtdCogs: parseFloat(mtdCogs.total || 0),
-          mtdGrossProfit: parseFloat(mtdGrossProfit.toFixed(3)),
+          mtdCogs: mtdCogsValue,
+          mtdGrossProfit: parseFloat((mtdRevenueValue - mtdCogsValue).toFixed(3)),
           outstandingReceivables: parseFloat(receivables.total || 0),
-          pendingWcn: parseInt(pendingWcn.count),
-          expiringDocuments: expiringDocs
+          pendingWcn: parseInt(pendingWcn.count || 0),
+          expiringDocuments: parseInt(expiringDocs.count || 0)
         },
-        topCustomers: topCustomers.map(c => ({ ...c, total: parseFloat(c.total), orderCount: parseInt(c.orderCount) })),
-        topSuppliers: topSuppliers.map(s => ({ ...s, total: parseFloat(s.total), orderCount: parseInt(s.orderCount) })),
+        topCustomers: topCustomers.map(c => ({ ...c, total: parseFloat(c.total || 0), orderCount: parseInt(c.orderCount || 0) })),
+        topSuppliers: topSuppliers.map(s => ({ ...s, total: parseFloat(s.total || 0), orderCount: parseInt(s.orderCount || 0) })),
         vehicles: vehicleStats,
-        revenueTrend: revenueTrend.map(r => ({ month: r.month, revenue: parseFloat(r.revenue) }))
+        revenueTrend: revenueTrend.map(r => ({ month: r.month, revenue: parseFloat(r.revenue || 0) }))
       }
     });
   } catch (error) {
-    logger.error('Executive dashboard error', { error: error.message });
-    res.status(500).json({ success: false, error: 'Failed to load executive dashboard' });
+    logger.error('Executive dashboard error', { error: error.message, stack: error.stack });
+    res.status(500).json({ success: false, error: 'Failed to load executive dashboard', detail: error.message });
   }
 });
 
 // ============================================================================
-// OPERATIONS DASHBOARD — Manager view
+// OPERATIONS DASHBOARD
 // ============================================================================
 router.get('/operations', requirePermission('VIEW_DASHBOARD'), async (req, res) => {
   try {
     const db = getDbConnection(req.user.companyId);
     const { today } = getDateRanges();
 
-    // Today's scheduled collections grouped by driver
-    const todaySchedule = await db('collection_orders as co')
-      .leftJoin('callouts as ca', 'ca.id', 'co.calloutId')
-      .leftJoin('employees as drv', 'drv.id', 'co.driver_employee_id')
-      .leftJoin('vehicles as v', 'v.id', 'co.vehicle_id')
-      .where('co.scheduledDate', today)
-      .select(
-        'co.id', 'co.orderNumber', 'co.status', 'co.is_finalized',
-        'co.driverName', 'co.vehiclePlate',
-        'drv.full_name as driver_full_name',
-        'v.make as vehicle_make', 'v.model as vehicle_model'
-      )
-      .orderBy('co.id');
+    // Today's schedule — try with joins first, fall back to simple query if columns don't exist
+    const todaySchedule = await safeQuery(
+      async () => {
+        // Check if the new FK columns exist by trying the full query
+        return await db('collection_orders as co')
+          .leftJoin('employees as drv', 'drv.id', 'co.driver_employee_id')
+          .leftJoin('vehicles as v', 'v.id', 'co.vehicle_id')
+          .where('co.scheduledDate', today)
+          .select(
+            'co.id', 'co.orderNumber', 'co.status', 'co.is_finalized',
+            'co.driverName', 'co.vehiclePlate',
+            'drv.full_name as driver_full_name',
+            'v.make as vehicle_make', 'v.model as vehicle_model'
+          )
+          .orderBy('co.id');
+      },
+      // Fallback: just collection_orders without joins
+      await safeQuery(
+        () => db('collection_orders').where('scheduledDate', today)
+          .select('id', 'orderNumber', 'status', 'is_finalized', 'driverName', 'vehiclePlate')
+          .orderBy('id'),
+        [], 'today schedule fallback'
+      ),
+      'today schedule with joins'
+    );
 
-    // Pending approvals count
-    const [pendingWcn] = await db('collection_orders').where('status', 'completed').where('is_finalized', 0).count('id as count');
-    let pendingWastage = 0;
-    try {
-      const [c] = await db('wastages').where('status', 'pending').count('id as count');
-      pendingWastage = parseInt(c.count);
-    } catch (e) {}
+    const pendingWcn = await safeQuery(
+      () => db('collection_orders').where('status', 'completed').where('is_finalized', 0).count('id as count').first(),
+      { count: 0 }, 'pending wcn'
+    );
 
-    let pendingExpenseSheets = 0;
-    try {
-      const [c] = await db('vehicle_daily_expense_sheets').where('status', 'submitted').count('id as count');
-      pendingExpenseSheets = parseInt(c.count);
-    } catch (e) {}
+    const pendingWastage = await safeQuery(
+      async () => {
+        const c = await db('wastages').where('status', 'pending').count('id as count').first();
+        return parseInt(c.count || 0);
+      },
+      0, 'pending wastage'
+    );
 
-    let pendingPettyCash = 0;
-    try {
-      const [c] = await db('petty_cash_expenses').where('status', 'pending').count('id as count');
-      pendingPettyCash = parseInt(c.count);
-    } catch (e) {}
+    const pendingExpenseSheets = await safeQuery(
+      async () => {
+        const c = await db('vehicle_daily_expense_sheets').where('status', 'submitted').count('id as count').first();
+        return parseInt(c.count || 0);
+      },
+      0, 'pending expense sheets'
+    );
 
-    // Vehicle status
+    const pendingPettyCash = await safeQuery(
+      async () => {
+        const c = await db('petty_cash_expenses').where('status', 'pending').count('id as count').first();
+        return parseInt(c.count || 0);
+      },
+      0, 'pending petty cash'
+    );
+
     let vehicles = { active: 0, inactive: 0, under_maintenance: 0, total: 0 };
-    try {
-      const stats = await db('vehicles').groupBy('status').select('status', db.raw('COUNT(*) as count'));
-      stats.forEach(s => { vehicles[s.status] = parseInt(s.count); vehicles.total += parseInt(s.count); });
-    } catch (e) {}
+    await safeQuery(
+      async () => {
+        const stats = await db('vehicles').groupBy('status').select('status', db.raw('COUNT(*) as count'));
+        stats.forEach(s => {
+          if (vehicles[s.status] !== undefined) vehicles[s.status] = parseInt(s.count);
+          vehicles.total += parseInt(s.count);
+        });
+      },
+      null, 'vehicles'
+    );
 
-    // Driver productivity (last 7 days)
     const weekAgo = new Date(); weekAgo.setDate(weekAgo.getDate() - 7);
     const weekStr = weekAgo.toISOString().split('T')[0];
-    const driverProductivity = await db('collection_orders as co')
-      .leftJoin('employees as drv', 'drv.id', 'co.driver_employee_id')
-      .whereBetween('co.scheduledDate', [weekStr, today])
-      .where('co.is_finalized', 1)
-      .select(
-        db.raw('COALESCE(drv.full_name, co.driverName) as driver_name'),
-        db.raw('COUNT(co.id) as collections'),
-        db.raw('SUM(co.totalValue) as totalValue')
-      )
-      .groupBy('driver_name')
-      .orderBy('collections', 'desc')
-      .limit(10);
+    const driverProductivity = await safeQuery(
+      async () => {
+        // Try with employees join
+        return await db('collection_orders as co')
+          .leftJoin('employees as drv', 'drv.id', 'co.driver_employee_id')
+          .whereBetween('co.scheduledDate', [weekStr, today])
+          .where('co.is_finalized', 1)
+          .select(
+            db.raw('COALESCE(drv.full_name, co.driverName) as driver_name'),
+            db.raw('COUNT(co.id) as collections'),
+            db.raw('SUM(co.totalValue) as totalValue')
+          )
+          .groupBy('driver_name')
+          .orderBy('collections', 'desc')
+          .limit(10);
+      },
+      // Fallback: just by driverName string
+      await safeQuery(
+        () => db('collection_orders')
+          .whereBetween('scheduledDate', [weekStr, today])
+          .where('is_finalized', 1)
+          .whereNotNull('driverName')
+          .select(
+            db.raw('driverName as driver_name'),
+            db.raw('COUNT(id) as collections'),
+            db.raw('SUM(totalValue) as totalValue')
+          )
+          .groupBy('driverName')
+          .orderBy('collections', 'desc')
+          .limit(10),
+        [], 'driver productivity fallback'
+      ),
+      'driver productivity'
+    );
 
     res.json({
       success: true,
       data: {
         todaySchedule,
         pendingApprovals: {
-          wcn: parseInt(pendingWcn.count),
+          wcn: parseInt(pendingWcn.count || 0),
           wastage: pendingWastage,
           expenseSheets: pendingExpenseSheets,
           pettyCash: pendingPettyCash,
-          total: parseInt(pendingWcn.count) + pendingWastage + pendingExpenseSheets + pendingPettyCash
+          total: parseInt(pendingWcn.count || 0) + pendingWastage + pendingExpenseSheets + pendingPettyCash
         },
         vehicles,
         driverProductivity: driverProductivity.map(d => ({
-          driver_name: d.driver_name,
-          collections: parseInt(d.collections),
+          driver_name: d.driver_name || 'Unknown',
+          collections: parseInt(d.collections || 0),
           totalValue: parseFloat(d.totalValue || 0)
         }))
       }
     });
   } catch (error) {
-    logger.error('Operations dashboard error', { error: error.message });
-    res.status(500).json({ success: false, error: 'Failed to load operations dashboard' });
+    logger.error('Operations dashboard error', { error: error.message, stack: error.stack });
+    res.status(500).json({ success: false, error: 'Failed to load operations dashboard', detail: error.message });
   }
 });
 
 // ============================================================================
-// ACCOUNTANT DASHBOARD — Accounts Staff view
+// ACCOUNTANT DASHBOARD
 // ============================================================================
 router.get('/accountant', requirePermission('VIEW_DASHBOARD'), async (req, res) => {
   try {
     const db = getDbConnection(req.user.companyId);
     const { today, monthStart } = getDateRanges();
 
-    // Receivables aging buckets
-    const unpaid = await db('sales_orders as s')
-      .leftJoin('customers as c', 'c.id', 's.customerId')
-      .whereIn('s.paymentStatus', ['pending', 'partial', 'overdue'])
-      .whereNot('s.status', 'cancelled')
-      .select('s.id', 's.orderNumber', 's.orderDate', 's.totalAmount', 's.paymentStatus', 'c.name as customerName');
+    const unpaid = await safeQuery(
+      () => db('sales_orders as s')
+        .leftJoin('customers as c', 'c.id', 's.customerId')
+        .whereIn('s.paymentStatus', ['pending', 'partial', 'overdue'])
+        .whereNot('s.status', 'cancelled')
+        .select('s.id', 's.orderNumber', 's.orderDate', 's.totalAmount', 's.paymentStatus', 'c.name as customerName'),
+      [], 'unpaid sales orders'
+    );
 
     const now = new Date();
     const buckets = { current: 0, bucket_31_60: 0, bucket_61_90: 0, bucket_90_plus: 0 };
@@ -226,38 +308,51 @@ router.get('/accountant', requirePermission('VIEW_DASHBOARD'), async (req, res) 
       else { buckets.bucket_90_plus += amt; overdueList.push({ ...o, ageDays: age }); }
     });
 
-    // MTD VAT snapshot
-    const [mtdOutputVat] = await db('sales_orders').whereBetween('orderDate', [monthStart, today]).whereNot('status', 'cancelled').sum('taxAmount as total');
-    const [mtdInputVat] = await db('purchase_orders').whereBetween('orderDate', [monthStart, today]).whereNot('status', 'cancelled').sum('taxAmount as total');
+    const mtdOutputVat = await safeQuery(
+      () => db('sales_orders').whereBetween('orderDate', [monthStart, today]).whereNot('status', 'cancelled').sum('taxAmount as total').first(),
+      { total: 0 }, 'mtd output vat'
+    );
+    const mtdInputVat = await safeQuery(
+      () => db('purchase_orders').whereBetween('orderDate', [monthStart, today]).whereNot('status', 'cancelled').sum('taxAmount as total').first(),
+      { total: 0 }, 'mtd input vat'
+    );
 
-    // Pending approvals (accountant-relevant)
-    let pendingPettyCash = 0;
-    try {
-      const [c] = await db('petty_cash_expenses').where('status', 'pending').count('id as count');
-      pendingPettyCash = parseInt(c.count);
-    } catch (e) {}
+    const pendingPettyCash = await safeQuery(
+      async () => {
+        const c = await db('petty_cash_expenses').where('status', 'pending').count('id as count').first();
+        return parseInt(c.count || 0);
+      },
+      0, 'pending petty cash (accountant)'
+    );
 
-    let pendingExpenseSheets = 0;
-    try {
-      const [c] = await db('vehicle_daily_expense_sheets').where('status', 'submitted').count('id as count');
-      pendingExpenseSheets = parseInt(c.count);
-    } catch (e) {}
+    const pendingExpenseSheets = await safeQuery(
+      async () => {
+        const c = await db('vehicle_daily_expense_sheets').where('status', 'submitted').count('id as count').first();
+        return parseInt(c.count || 0);
+      },
+      0, 'pending expense sheets (accountant)'
+    );
 
-    // Today's receipts & payments
-    let todayReceipts = 0;
-    let todayPayments = 0;
-    try {
-      const [rcpt] = await db('bank_transactions').where('transactionDate', today).where('transactionType', 'credit').sum('amount as total');
-      todayReceipts = parseFloat(rcpt.total || 0);
-      const [pmt] = await db('bank_transactions').where('transactionDate', today).where('transactionType', 'debit').sum('amount as total');
-      todayPayments = parseFloat(pmt.total || 0);
-    } catch (e) {}
+    const todayReceipts = await safeQuery(
+      async () => {
+        const r = await db('bank_transactions').where('transactionDate', today).where('transactionType', 'credit').sum('amount as total').first();
+        return parseFloat(r.total || 0);
+      },
+      0, 'today receipts'
+    );
+    const todayPayments = await safeQuery(
+      async () => {
+        const r = await db('bank_transactions').where('transactionDate', today).where('transactionType', 'debit').sum('amount as total').first();
+        return parseFloat(r.total || 0);
+      },
+      0, 'today payments'
+    );
 
     res.json({
       success: true,
       data: {
         receivables: {
-          total: Object.values(buckets).reduce((s, v) => s + v, 0),
+          total: parseFloat(Object.values(buckets).reduce((s, v) => s + v, 0).toFixed(3)),
           buckets: {
             current: parseFloat(buckets.current.toFixed(3)),
             bucket_31_60: parseFloat(buckets.bucket_31_60.toFixed(3)),
@@ -284,84 +379,111 @@ router.get('/accountant', requirePermission('VIEW_DASHBOARD'), async (req, res) 
       }
     });
   } catch (error) {
-    logger.error('Accountant dashboard error', { error: error.message });
-    res.status(500).json({ success: false, error: 'Failed to load accountant dashboard' });
+    logger.error('Accountant dashboard error', { error: error.message, stack: error.stack });
+    res.status(500).json({ success: false, error: 'Failed to load accountant dashboard', detail: error.message });
   }
 });
 
 // ============================================================================
-// SALES DASHBOARD — Sales Staff view
+// SALES DASHBOARD
 // ============================================================================
 router.get('/sales', requirePermission('VIEW_DASHBOARD'), async (req, res) => {
   try {
     const db = getDbConnection(req.user.companyId);
     const { today, monthStart, yearStart } = getDateRanges();
 
-    // Today's / MTD / YTD sales
-    const [todaySales] = await db('sales_orders').where('orderDate', today).whereNot('status', 'cancelled').sum('totalAmount as total').count('id as count');
-    const [mtdSales] = await db('sales_orders').whereBetween('orderDate', [monthStart, today]).whereNot('status', 'cancelled').sum('totalAmount as total').count('id as count');
-    const [ytdSales] = await db('sales_orders').whereBetween('orderDate', [yearStart, today]).whereNot('status', 'cancelled').sum('totalAmount as total').count('id as count');
+    const todaySales = await safeQuery(
+      async () => {
+        const total = await db('sales_orders').where('orderDate', today).whereNot('status', 'cancelled').sum('totalAmount as total').first();
+        const count = await db('sales_orders').where('orderDate', today).whereNot('status', 'cancelled').count('id as count').first();
+        return { total: parseFloat(total.total || 0), count: parseInt(count.count || 0) };
+      },
+      { total: 0, count: 0 }, 'today sales'
+    );
 
-    // Pending invoices (unpaid)
-    const [unpaid] = await db('sales_orders').whereIn('paymentStatus', ['pending', 'partial', 'overdue']).whereNot('status', 'cancelled').sum('totalAmount as total').count('id as count');
+    const mtdSales = await safeQuery(
+      async () => {
+        const total = await db('sales_orders').whereBetween('orderDate', [monthStart, today]).whereNot('status', 'cancelled').sum('totalAmount as total').first();
+        const count = await db('sales_orders').whereBetween('orderDate', [monthStart, today]).whereNot('status', 'cancelled').count('id as count').first();
+        return { total: parseFloat(total.total || 0), count: parseInt(count.count || 0) };
+      },
+      { total: 0, count: 0 }, 'mtd sales'
+    );
 
-    // Top 5 customers YTD
-    const topCustomers = await db('sales_orders as s')
-      .leftJoin('customers as c', 'c.id', 's.customerId')
-      .whereBetween('s.orderDate', [yearStart, today])
-      .whereNot('s.status', 'cancelled')
-      .select('c.id', 'c.name', db.raw('SUM(s.totalAmount) as total'), db.raw('COUNT(s.id) as orderCount'))
-      .groupBy('c.id', 'c.name')
-      .orderBy('total', 'desc')
-      .limit(5);
+    const ytdSales = await safeQuery(
+      async () => {
+        const total = await db('sales_orders').whereBetween('orderDate', [yearStart, today]).whereNot('status', 'cancelled').sum('totalAmount as total').first();
+        const count = await db('sales_orders').whereBetween('orderDate', [yearStart, today]).whereNot('status', 'cancelled').count('id as count').first();
+        return { total: parseFloat(total.total || 0), count: parseInt(count.count || 0) };
+      },
+      { total: 0, count: 0 }, 'ytd sales'
+    );
 
-    // Recent sales (last 10)
-    const recentSales = await db('sales_orders as s')
-      .leftJoin('customers as c', 'c.id', 's.customerId')
-      .whereNot('s.status', 'cancelled')
-      .select('s.id', 's.orderNumber', 's.orderDate', 's.totalAmount', 's.paymentStatus', 'c.name as customerName')
-      .orderBy('s.orderDate', 'desc')
-      .orderBy('s.id', 'desc')
-      .limit(10);
+    const unpaidInv = await safeQuery(
+      async () => {
+        const total = await db('sales_orders').whereIn('paymentStatus', ['pending', 'partial', 'overdue']).whereNot('status', 'cancelled').sum('totalAmount as total').first();
+        const count = await db('sales_orders').whereIn('paymentStatus', ['pending', 'partial', 'overdue']).whereNot('status', 'cancelled').count('id as count').first();
+        return { total: parseFloat(total.total || 0), count: parseInt(count.count || 0) };
+      },
+      { total: 0, count: 0 }, 'unpaid invoices'
+    );
 
-    // Inventory availability (low stock alert)
-    let lowStock = [];
-    try {
-      lowStock = await db('inventory as i')
+    const topCustomers = await safeQuery(
+      () => db('sales_orders as s')
+        .leftJoin('customers as c', 'c.id', 's.customerId')
+        .whereBetween('s.orderDate', [yearStart, today])
+        .whereNot('s.status', 'cancelled')
+        .select('c.id', 'c.name', db.raw('SUM(s.totalAmount) as total'), db.raw('COUNT(s.id) as orderCount'))
+        .groupBy('c.id', 'c.name')
+        .orderBy('total', 'desc')
+        .limit(5),
+      [], 'top customers (sales)'
+    );
+
+    const recentSales = await safeQuery(
+      () => db('sales_orders as s')
+        .leftJoin('customers as c', 'c.id', 's.customerId')
+        .whereNot('s.status', 'cancelled')
+        .select('s.id', 's.orderNumber', 's.orderDate', 's.totalAmount', 's.paymentStatus', 'c.name as customerName')
+        .orderBy('s.orderDate', 'desc')
+        .orderBy('s.id', 'desc')
+        .limit(10),
+      [], 'recent sales'
+    );
+
+    const lowStock = await safeQuery(
+      () => db('inventory as i')
         .leftJoin('materials as m', 'm.id', 'i.materialId')
         .whereRaw('i.quantity <= i.minimumStockLevel')
         .where('i.minimumStockLevel', '>', 0)
         .select('m.name', 'i.quantity', 'i.minimumStockLevel')
-        .limit(10);
-    } catch (e) {}
+        .limit(10),
+      [], 'low stock'
+    );
 
     res.json({
       success: true,
       data: {
         sales: {
-          todayTotal: parseFloat(todaySales.total || 0),
-          todayCount: parseInt(todaySales.count),
-          mtdTotal: parseFloat(mtdSales.total || 0),
-          mtdCount: parseInt(mtdSales.count),
-          ytdTotal: parseFloat(ytdSales.total || 0),
-          ytdCount: parseInt(ytdSales.count)
+          todayTotal: todaySales.total,
+          todayCount: todaySales.count,
+          mtdTotal: mtdSales.total,
+          mtdCount: mtdSales.count,
+          ytdTotal: ytdSales.total,
+          ytdCount: ytdSales.count
         },
         pendingInvoices: {
-          total: parseFloat(unpaid.total || 0),
-          count: parseInt(unpaid.count)
+          total: unpaidInv.total,
+          count: unpaidInv.count
         },
-        topCustomers: topCustomers.map(c => ({
-          ...c,
-          total: parseFloat(c.total),
-          orderCount: parseInt(c.orderCount)
-        })),
+        topCustomers: topCustomers.map(c => ({ ...c, total: parseFloat(c.total || 0), orderCount: parseInt(c.orderCount || 0) })),
         recentSales: recentSales.map(s => ({ ...s, totalAmount: parseFloat(s.totalAmount || 0) })),
-        lowStock: lowStock.map(l => ({ ...l, quantity: parseFloat(l.quantity), minimumStockLevel: parseFloat(l.minimumStockLevel) }))
+        lowStock: lowStock.map(l => ({ ...l, quantity: parseFloat(l.quantity || 0), minimumStockLevel: parseFloat(l.minimumStockLevel || 0) }))
       }
     });
   } catch (error) {
-    logger.error('Sales dashboard error', { error: error.message });
-    res.status(500).json({ success: false, error: 'Failed to load sales dashboard' });
+    logger.error('Sales dashboard error', { error: error.message, stack: error.stack });
+    res.status(500).json({ success: false, error: 'Failed to load sales dashboard', detail: error.message });
   }
 });
 
