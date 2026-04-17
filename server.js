@@ -56,6 +56,8 @@ const storageTanksRoutes = require('./routes/storageTanks');
 const tankLogsRoutes = require('./routes/tankLogs');
 const vehicleExpenseSheetsRoutes = require('./routes/vehicleExpenseSheets');
 const dashboardsRoutes = require('./routes/dashboards');
+const complianceRoutes = require('./routes/compliance');
+const einvoicingRoutes = require('./routes/einvoicing');
 const { authenticateToken } = require('./middleware/auth');
 const { checkSessionTimeout, _devSessionStore } = require('./middleware/sessionTimeout');
 const { validateCsrfToken, ensureCsrfToken } = require('./middleware/csrf');
@@ -272,6 +274,10 @@ app.use('/api/auth', authRoutes);
 // Must be registered BEFORE authenticateToken middleware
 app.use('/api/pc-portal', pettyCashUserPortalRoutes);
 
+// Public compliance verify (QR scans by regulators) — no auth required
+const publicCompliance = require('./routes/publicCompliance');
+app.use('/api/compliance-public', publicCompliance);
+
 // Protected routes (require authentication + session timeout check + CSRF validation)
 app.use('/api', authenticateToken);
 app.use('/api', checkSessionTimeout);
@@ -325,6 +331,8 @@ app.use('/api/storage-tanks', storageTanksRoutes);
 app.use('/api/tank-logs', tankLogsRoutes);
 app.use('/api/vehicle-expense-sheets', vehicleExpenseSheetsRoutes);
 app.use('/api/dashboards', dashboardsRoutes);
+app.use('/api/compliance', complianceRoutes);
+app.use('/api/einvoicing', einvoicingRoutes);
 
 // 404 handler
 app.use('*', (req, res) => {
