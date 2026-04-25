@@ -800,7 +800,7 @@ router.get('/pending-actions',
  */
 router.get('/activity',
   projectFilter,
-  requirePermission('VIEW_DASHBOARD'),
+  requirePermission('VIEW_SETTINGS'),
   async (req, res) => {
     const user = req.user;
     const companyId = user.companyId;
@@ -1133,7 +1133,7 @@ router.get('/activity',
  */
 router.get('/stats',
   projectFilter,
-  requirePermission('VIEW_DASHBOARD'),
+  requirePermission('VIEW_SETTINGS'),
   async (req, res) => {
     const companyId = req.user.companyId;
 
@@ -1386,7 +1386,7 @@ router.get('/stats',
  */
 router.get('/notifications',
   projectFilter,
-  requirePermission('VIEW_DASHBOARD'),
+  requirePermission('VIEW_SETTINGS'),
   async (req, res) => {
     const user = req.user;
     const companyId = user.companyId;

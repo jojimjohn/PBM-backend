@@ -1433,7 +1433,7 @@ router.post('/',
 router.put('/:id/adjust',
   validateParams(Joi.object({ id: Joi.number().integer().positive().required() })),
   validate(stockAdjustmentSchema),
-  requirePermission('UPDATE_STOCK'),
+  requirePermission('EDIT_INVENTORY'),
   async (req, res) => {
     try {
       const { id } = req.params;

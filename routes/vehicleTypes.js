@@ -32,7 +32,7 @@ router.get('/', requirePermission('VIEW_VEHICLES'), async (req, res) => {
 });
 
 // POST / — create vehicle type
-router.post('/', requirePermission('MANAGE_VEHICLE_TYPES'), validate(vehicleTypeSchema), async (req, res) => {
+router.post('/', requirePermission('MANAGE_VEHICLES'), validate(vehicleTypeSchema), async (req, res) => {
   try {
     const db = getDbConnection(req.user.companyId);
     const [id] = await db('vehicle_types').insert(req.body);
@@ -49,7 +49,7 @@ router.post('/', requirePermission('MANAGE_VEHICLE_TYPES'), validate(vehicleType
 });
 
 // PUT /:id — update vehicle type
-router.put('/:id', requirePermission('MANAGE_VEHICLE_TYPES'), validate(vehicleTypeSchema), async (req, res) => {
+router.put('/:id', requirePermission('MANAGE_VEHICLES'), validate(vehicleTypeSchema), async (req, res) => {
   try {
     const db = getDbConnection(req.user.companyId);
     const existing = await db('vehicle_types').where('id', req.params.id).first();
@@ -69,7 +69,7 @@ router.put('/:id', requirePermission('MANAGE_VEHICLE_TYPES'), validate(vehicleTy
 });
 
 // DELETE /:id — soft delete via is_active
-router.delete('/:id', requirePermission('MANAGE_VEHICLE_TYPES'), async (req, res) => {
+router.delete('/:id', requirePermission('MANAGE_VEHICLES'), async (req, res) => {
   try {
     const db = getDbConnection(req.user.companyId);
     const existing = await db('vehicle_types').where('id', req.params.id).first();

@@ -97,7 +97,7 @@ const approvalSchema = Joi.object({
 
 // GET /api/purchase-order-amendments - List all amendments
 router.get('/',
-  requireAnyPermission(['VIEW_AMENDMENTS_ALL', 'VIEW_AMENDMENTS_OWN']),
+  requirePermission('VIEW_PURCHASE'),
   async (req, res) => {
   try {
     const { companyId, userId, permissions } = req.user;
@@ -194,7 +194,7 @@ router.get('/',
 // This endpoint returns counts grouped by original_order_id in a single query
 // Used to avoid N+1 queries when loading the PO list
 router.get('/counts',
-  requireAnyPermission(['VIEW_AMENDMENTS_ALL', 'VIEW_AMENDMENTS_OWN']),
+  requirePermission('VIEW_PURCHASE'),
   async (req, res) => {
   try {
     const { companyId, userId, permissions } = req.user;
@@ -241,7 +241,7 @@ router.get('/counts',
 // GET /api/purchase-order-amendments/:id - Get specific amendment
 router.get('/:id',
   validateParams(Joi.object({ id: Joi.number().integer().positive().required() })),
-  requireAnyPermission(['VIEW_AMENDMENTS_ALL', 'VIEW_AMENDMENTS_OWN']),
+  requirePermission('VIEW_PURCHASE'),
   async (req, res) => {
     try {
       const { id } = req.params;
@@ -321,7 +321,7 @@ router.get('/:id',
 // POST /api/purchase-order-amendments - Create amendment proposal (doesn't create new PO)
 router.post('/',
   validate(amendmentSchema),
-  requirePermission('CREATE_AMENDMENTS'),
+  requirePermission('CREATE_PURCHASE'),
   async (req, res) => {
     try {
       const { companyId, userId } = req.user;
@@ -465,7 +465,7 @@ router.post('/',
 router.put('/:id/approve',
   validateParams(Joi.object({ id: Joi.number().integer().positive().required() })),
   validate(approvalSchema),
-  requirePermission('APPROVE_AMENDMENTS'),
+  requirePermission('EDIT_PURCHASE'),
   async (req, res) => {
     try {
       const { id } = req.params;

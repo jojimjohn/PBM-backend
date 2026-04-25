@@ -27,7 +27,7 @@ const updateBranchSchema = branchSchema.fork(
 ).options({ stripUnknown: true });
 
 // GET /api/branches - List all branches
-router.get('/', requirePermission('VIEW_BRANCHES'), async (req, res) => {
+router.get('/', requirePermission('VIEW_SETTINGS'), async (req, res) => {
   try {
     const { companyId } = req.user;
     const db = getDbConnection(companyId);
@@ -106,7 +106,7 @@ router.get('/', requirePermission('VIEW_BRANCHES'), async (req, res) => {
 // GET /api/branches/:id - Get specific branch
 router.get('/:id',
   validateParams(Joi.object({ id: Joi.number().integer().positive().required() })),
-  requirePermission('VIEW_BRANCHES'),
+  requirePermission('VIEW_SETTINGS'),
   async (req, res) => {
     try {
       const { companyId } = req.user;

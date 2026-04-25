@@ -106,7 +106,7 @@ const checkCollectionOwnership = (collection, userId, permissions, permissionTyp
 // POST /api/collection-orders/callouts - Create a callout (saved as collection_order with status 'callout')
 router.post('/callouts',
   validate(calloutSchema),
-  requireAnyPermission(['CREATE_COLLECTIONS_ALL', 'CREATE_COLLECTIONS_OWN']),
+  requirePermission('CREATE_COLLECTIONS'),
   async (req, res) => {
     try {
       const { companyId, userId } = req.user;
@@ -190,7 +190,7 @@ router.post('/callouts',
 );
 
 // GET /api/collection-orders/callouts - List callouts (collection orders with status 'callout')
-router.get('/callouts', requireAnyPermission(['VIEW_COLLECTIONS_ALL', 'VIEW_COLLECTIONS_OWN']), projectFilter, async (req, res) => {
+router.get('/callouts', requirePermission('VIEW_COLLECTIONS'), projectFilter, async (req, res) => {
   try {
     const { companyId, userId, permissions } = req.user;
     const { hasPermission } = require('../config/permissionsHierarchy');
@@ -330,7 +330,7 @@ router.get('/callouts', requireAnyPermission(['VIEW_COLLECTIONS_ALL', 'VIEW_COLL
 router.put('/:id',
   validateParams(Joi.object({ id: Joi.number().integer().positive().required() })),
   validate(calloutSchema),
-  requireAnyPermission(['EDIT_COLLECTIONS_ALL', 'EDIT_COLLECTIONS_OWN']),
+  requirePermission('EDIT_COLLECTIONS'),
   async (req, res) => {
     try {
       const { id } = req.params;
@@ -422,7 +422,7 @@ router.put('/:id',
 // DELETE /api/collection-orders/:id - Delete collection order (callout)
 router.delete('/:id',
   validateParams(Joi.object({ id: Joi.number().integer().positive().required() })),
-  requireAnyPermission(['DELETE_COLLECTIONS_ALL', 'DELETE_COLLECTIONS_OWN']),
+  requirePermission('DELETE_COLLECTIONS'),
   async (req, res) => {
     try {
       const { id } = req.params;
@@ -490,7 +490,7 @@ router.put('/:id/driver',
     vehiclePlate: Joi.string().max(20).required(),
     vehicleType: Joi.string().valid('truck', 'pickup', 'van', 'trailer').required()
   })),
-  requireAnyPermission(['EDIT_COLLECTIONS_ALL', 'EDIT_COLLECTIONS_OWN']),
+  requirePermission('EDIT_COLLECTIONS'),
   async (req, res) => {
     try {
       const { id } = req.params;
@@ -577,7 +577,7 @@ router.put('/:id/status',
     actualCollectionDate: Joi.date().optional(),
     actualQuantity: Joi.number().min(0).precision(3).optional()
   })),
-  requireAnyPermission(['EDIT_COLLECTIONS_ALL', 'EDIT_COLLECTIONS_OWN']),
+  requirePermission('EDIT_COLLECTIONS'),
   async (req, res) => {
     try {
       const { id } = req.params;
@@ -698,7 +698,7 @@ router.put('/:id/driver',
     vehiclePlate: Joi.string().required(),
     vehicleType: Joi.string().valid('truck', 'pickup', 'van', 'trailer').required()
   })),
-  requireAnyPermission(['EDIT_COLLECTIONS_ALL', 'EDIT_COLLECTIONS_OWN']),
+  requirePermission('EDIT_COLLECTIONS'),
   async (req, res) => {
     try {
       const { id } = req.params;
@@ -770,7 +770,7 @@ router.put('/:id/driver',
 );
 
 // GET /api/collection-orders - List all collection orders
-router.get('/', requireAnyPermission(['VIEW_COLLECTIONS_ALL', 'VIEW_COLLECTIONS_OWN']), projectFilter, async (req, res) => {
+router.get('/', requirePermission('VIEW_COLLECTIONS'), projectFilter, async (req, res) => {
   try {
     const { companyId, userId, permissions } = req.user;
     const db = getDbConnection(companyId);
@@ -931,7 +931,7 @@ router.get('/', requireAnyPermission(['VIEW_COLLECTIONS_ALL', 'VIEW_COLLECTIONS_
 // GET /api/collection-orders/:id - Get specific collection order
 router.get('/:id',
   validateParams(Joi.object({ id: Joi.number().integer().positive().required() })),
-  requireAnyPermission(['VIEW_COLLECTIONS_ALL', 'VIEW_COLLECTIONS_OWN']),
+  requirePermission('VIEW_COLLECTIONS'),
   async (req, res) => {
     try {
       const { id } = req.params;
@@ -1069,7 +1069,7 @@ router.get('/:id',
 // POST /api/collection-orders - Create new collection order from callout
 router.post('/',
   validate(collectionOrderSchema),
-  requireAnyPermission(['CREATE_COLLECTIONS_ALL', 'CREATE_COLLECTIONS_OWN']),
+  requirePermission('CREATE_COLLECTIONS'),
   async (req, res) => {
     try {
       const { companyId, userId } = req.user;
@@ -1187,7 +1187,7 @@ router.post('/',
 router.post('/:id/items',
   validateParams(Joi.object({ id: Joi.number().integer().positive().required() })),
   validate(collectionItemSchema),
-  requireAnyPermission(['EDIT_COLLECTIONS_ALL', 'EDIT_COLLECTIONS_OWN']),
+  requirePermission('EDIT_COLLECTIONS'),
   async (req, res) => {
     try {
       const { id } = req.params;
@@ -1360,7 +1360,7 @@ router.post('/:id/items',
 router.post('/:id/expenses',
   validateParams(Joi.object({ id: Joi.number().integer().positive().required() })),
   validate(collectionExpenseSchema),
-  requireAnyPermission(['EDIT_COLLECTIONS_ALL', 'EDIT_COLLECTIONS_OWN']),
+  requirePermission('EDIT_COLLECTIONS'),
   async (req, res) => {
     try {
       const { id } = req.params;
@@ -1458,7 +1458,7 @@ router.post('/:id/complete',
     actualEndTime: Joi.date().optional(),
     notes: Joi.string().allow('').optional()
   })),
-  requireAnyPermission(['EDIT_COLLECTIONS_ALL', 'EDIT_COLLECTIONS_OWN']),
+  requirePermission('EDIT_COLLECTIONS'),
   async (req, res) => {
     try {
       const { id } = req.params;
@@ -1624,7 +1624,7 @@ router.post('/:id/finalize-wcn',
       // This ensures inventory gets FULL verified qty, and wastage only affects inventory upon approval.
     })).optional()
   })),
-  requirePermission('FINALIZE_WCN'),
+  requirePermission('EDIT_COLLECTIONS'),
   async (req, res) => {
     try {
       const { id } = req.params;
@@ -2592,7 +2592,7 @@ router.post('/:id/rectify-wcn',
     ).min(1).required(),
     notes: Joi.string().allow('').optional()
   })),
-  requireAnyPermission(['EDIT_COLLECTIONS_ALL', 'EDIT_COLLECTIONS_OWN']),
+  requirePermission('EDIT_COLLECTIONS'),
   async (req, res) => {
     try {
       const { id } = req.params;
@@ -3027,7 +3027,7 @@ router.post('/:id/rectify-wcn',
 // GET /api/collection-orders/:id/wastages - Get wastages linked to a collection order
 router.get('/:id/wastages',
   validateParams(Joi.object({ id: Joi.number().integer().positive().required() })),
-  requireAnyPermission(['VIEW_COLLECTIONS_ALL', 'VIEW_COLLECTIONS_OWN']),
+  requirePermission('VIEW_COLLECTIONS'),
   async (req, res) => {
     try {
       const { id } = req.params;
@@ -3110,7 +3110,7 @@ router.get('/:id/wastages',
 // POST /api/collection-orders/:id/expense-attachments - Upload expense receipts to collection order
 router.post('/:id/expense-attachments',
   validateParams(Joi.object({ id: Joi.number().integer().positive().required() })),
-  requireAnyPermission(['EDIT_COLLECTIONS_ALL', 'EDIT_COLLECTIONS_OWN']),
+  requirePermission('EDIT_COLLECTIONS'),
   uploadMultipleToS3,
   requireFiles,
   async (req, res) => {
@@ -3205,7 +3205,7 @@ router.post('/:id/expense-attachments',
 // GET /api/collection-orders/:id/expense-attachments - Get expense receipts for collection order
 router.get('/:id/expense-attachments',
   validateParams(Joi.object({ id: Joi.number().integer().positive().required() })),
-  requireAnyPermission(['VIEW_COLLECTIONS_ALL', 'VIEW_COLLECTIONS_OWN']),
+  requirePermission('VIEW_COLLECTIONS'),
   async (req, res) => {
     try {
       const { id } = req.params;
@@ -3282,7 +3282,7 @@ router.delete('/:id/expense-attachments/:fileId',
     id: Joi.number().integer().positive().required(),
     fileId: Joi.number().integer().positive().required()
   })),
-  requireAnyPermission(['EDIT_COLLECTIONS_ALL', 'EDIT_COLLECTIONS_OWN']),
+  requirePermission('EDIT_COLLECTIONS'),
   async (req, res) => {
     try {
       const { id, fileId } = req.params;

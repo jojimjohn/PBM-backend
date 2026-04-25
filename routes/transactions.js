@@ -76,7 +76,7 @@ function generateTransactionNumber(companyId, transactionType) {
 
 // GET /transactions - List all transactions with comprehensive filtering
 // Allow VIEW_INVENTORY for stock movements display on Inventory page
-router.get('/', requireAnyPermission(['VIEW_TRANSACTIONS_ALL', 'VIEW_TRANSACTIONS_OWN', 'VIEW_INVENTORY']), async (req, res) => {
+router.get('/', requireAnyPermission(['VIEW_FINANCE', 'VIEW_INVENTORY']), async (req, res) => {
   try {
     const db = getDbConnection(req.user.companyId);
     const { userId, permissions } = req.user;
@@ -203,7 +203,7 @@ router.get('/', requireAnyPermission(['VIEW_TRANSACTIONS_ALL', 'VIEW_TRANSACTION
 
 // GET /transactions/:id - Get specific transaction
 router.get('/:id',
-  requireAnyPermission(['VIEW_TRANSACTIONS_ALL', 'VIEW_TRANSACTIONS_OWN']),
+  requirePermission('VIEW_FINANCE'),
   async (req, res) => {
     try {
       const db = getDbConnection(req.user.companyId);
@@ -317,7 +317,7 @@ router.get('/:id',
 
 // POST /transactions - Create new transaction
 router.post('/',
-  requirePermission(['CREATE_TRANSACTIONS']),
+  requirePermission('CREATE_FINANCE'),
   validate(transactionSchema),
   async (req, res) => {
     try {
@@ -415,7 +415,7 @@ router.post('/',
 
 // POST /transactions/bulk - Create multiple transactions
 router.post('/bulk',
-  requirePermission(['CREATE_TRANSACTIONS']),
+  requirePermission('CREATE_FINANCE'),
   validate(bulkTransactionSchema),
   async (req, res) => {
     try {
@@ -481,7 +481,7 @@ router.post('/bulk',
 
 // GET /transactions/analytics/summary - Get comprehensive financial analytics
 router.get('/analytics/summary',
-  requireAnyPermission(['VIEW_TRANSACTIONS_ALL', 'VIEW_TRANSACTIONS_OWN']),
+  requirePermission('VIEW_FINANCE'),
   async (req, res) => {
     try {
       const db = getDbConnection(req.user.companyId);
@@ -600,7 +600,7 @@ router.get('/analytics/summary',
 
 // GET /transactions/balance-sheet - Get balance sheet data
 router.get('/balance-sheet',
-  requireAnyPermission(['VIEW_TRANSACTIONS_ALL', 'VIEW_TRANSACTIONS_OWN']),
+  requirePermission('VIEW_FINANCE'),
   async (req, res) => {
     try {
       const db = getDbConnection(req.user.companyId);

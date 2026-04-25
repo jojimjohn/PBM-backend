@@ -58,7 +58,7 @@ const previewAllocationSchema = Joi.object({
 }).options({ stripUnknown: true });
 
 // GET /api/inventory-batches - List all batches
-router.get('/', requirePermission('VIEW_INVENTORY_BATCHES'), async (req, res) => {
+router.get('/', requirePermission('VIEW_INVENTORY'), async (req, res) => {
   try {
     const { companyId } = req.user;
     const db = getDbConnection(companyId);
@@ -182,7 +182,7 @@ router.get('/', requirePermission('VIEW_INVENTORY_BATCHES'), async (req, res) =>
 });
 
 // GET /api/inventory-batches/material/:materialId/summary - Get batch summary for a material
-router.get('/material/:materialId/summary', requirePermission('VIEW_INVENTORY_BATCHES'), async (req, res) => {
+router.get('/material/:materialId/summary', requirePermission('VIEW_INVENTORY'), async (req, res) => {
   try {
     const { materialId } = req.params;
     const { companyId } = req.user;
@@ -221,7 +221,7 @@ router.get('/material/:materialId/summary', requirePermission('VIEW_INVENTORY_BA
 // POST /api/inventory-batches/preview-allocation - Preview FIFO allocation
 router.post('/preview-allocation',
   validate(previewAllocationSchema),
-  requirePermission('VIEW_INVENTORY_BATCHES'),
+  requirePermission('VIEW_INVENTORY'),
   async (req, res) => {
     try {
       const { materialId, quantity, branchId } = req.body;
@@ -263,7 +263,7 @@ router.post('/preview-allocation',
 // GET /api/inventory-batches/:id - Get batch details with movements
 router.get('/:id',
   validateParams(Joi.object({ id: Joi.number().integer().positive().required() })),
-  requirePermission('VIEW_INVENTORY_BATCHES'),
+  requirePermission('VIEW_INVENTORY'),
   async (req, res) => {
     try {
       const { id } = req.params;
@@ -357,7 +357,7 @@ router.get('/:id',
 // POST /api/inventory-batches - Create new batch (manual receipt)
 router.post('/',
   validate(batchCreateSchema),
-  requirePermission('MANAGE_INVENTORY_BATCHES'),
+  requirePermission('EDIT_INVENTORY'),
   async (req, res) => {
     try {
       const { companyId, userId } = req.user;
@@ -438,7 +438,7 @@ router.post('/',
 router.put('/:id',
   validateParams(Joi.object({ id: Joi.number().integer().positive().required() })),
   validate(batchUpdateSchema),
-  requirePermission('MANAGE_INVENTORY_BATCHES'),
+  requirePermission('EDIT_INVENTORY'),
   async (req, res) => {
     try {
       const { id } = req.params;
@@ -488,7 +488,7 @@ router.put('/:id',
 router.post('/:id/adjustment',
   validateParams(Joi.object({ id: Joi.number().integer().positive().required() })),
   validate(adjustmentSchema),
-  requirePermission('MANAGE_INVENTORY_BATCHES'),
+  requirePermission('EDIT_INVENTORY'),
   async (req, res) => {
     try {
       const { id } = req.params;
@@ -573,7 +573,7 @@ router.post('/:id/adjustment',
 router.post('/:id/transfer',
   validateParams(Joi.object({ id: Joi.number().integer().positive().required() })),
   validate(transferSchema),
-  requirePermission('MANAGE_INVENTORY_BATCHES'),
+  requirePermission('EDIT_INVENTORY'),
   async (req, res) => {
     try {
       const { id } = req.params;
@@ -687,7 +687,7 @@ router.post('/:id/transfer',
 // GET /api/inventory-batches/:id/movements - Get movement history
 router.get('/:id/movements',
   validateParams(Joi.object({ id: Joi.number().integer().positive().required() })),
-  requirePermission('VIEW_INVENTORY_BATCHES'),
+  requirePermission('VIEW_INVENTORY'),
   async (req, res) => {
     try {
       const { id } = req.params;

@@ -103,7 +103,7 @@ const supplierSchema = Joi.object({
 });
 
 // GET /api/suppliers - List all suppliers
-router.get('/', requireAnyPermission(['VIEW_SUPPLIERS_ALL', 'VIEW_SUPPLIERS_OWN']), async (req, res) => {
+router.get('/', requirePermission('VIEW_SUPPLIERS'), async (req, res) => {
   try {
     const { companyId, userId, permissions } = req.user;
     const db = getDbConnection(companyId);
@@ -189,7 +189,7 @@ router.get('/', requireAnyPermission(['VIEW_SUPPLIERS_ALL', 'VIEW_SUPPLIERS_OWN'
 // GET /api/suppliers/:id - Get specific supplier
 router.get('/:id',
   validateParams(Joi.object({ id: Joi.number().integer().positive().required() })),
-  requireAnyPermission(['VIEW_SUPPLIERS_ALL', 'VIEW_SUPPLIERS_OWN']),
+  requirePermission('VIEW_SUPPLIERS'),
   async (req, res) => {
     try {
       const { id } = req.params;
@@ -403,7 +403,7 @@ router.post('/',
 router.put('/:id',
   validateParams(Joi.object({ id: Joi.number().integer().positive().required() })),
   validate(supplierSchema),
-  requireAnyPermission(['EDIT_SUPPLIERS_ALL', 'EDIT_SUPPLIERS_OWN']),
+  requirePermission('EDIT_SUPPLIERS'),
   async (req, res) => {
     try {
       const { id } = req.params;
@@ -524,7 +524,7 @@ router.put('/:id',
 // DELETE /api/suppliers/:id - Delete supplier
 router.delete('/:id',
   validateParams(Joi.object({ id: Joi.number().integer().positive().required() })),
-  requireAnyPermission(['DELETE_SUPPLIERS_ALL', 'DELETE_SUPPLIERS_OWN']),
+  requirePermission('DELETE_SUPPLIERS'),
   async (req, res) => {
     try {
       const { id } = req.params;
@@ -651,7 +651,7 @@ router.delete('/:id',
 // POST /api/suppliers/:id/attachments - Upload attachments to supplier
 router.post('/:id/attachments',
   validateParams(Joi.object({ id: Joi.number().integer().positive().required() })),
-  requireAnyPermission(['EDIT_SUPPLIERS_ALL', 'EDIT_SUPPLIERS_OWN']),
+  requirePermission('EDIT_SUPPLIERS'),
   uploadMultipleToS3,
   requireFiles,
   async (req, res) => {
@@ -746,7 +746,7 @@ router.post('/:id/attachments',
 // GET /api/suppliers/:id/attachments - Get attachments for supplier
 router.get('/:id/attachments',
   validateParams(Joi.object({ id: Joi.number().integer().positive().required() })),
-  requireAnyPermission(['VIEW_SUPPLIERS_ALL', 'VIEW_SUPPLIERS_OWN']),
+  requirePermission('VIEW_SUPPLIERS'),
   async (req, res) => {
     try {
       const { id } = req.params;
@@ -823,7 +823,7 @@ router.delete('/:id/attachments/:fileId',
     id: Joi.number().integer().positive().required(),
     fileId: Joi.number().integer().positive().required()
   })),
-  requireAnyPermission(['EDIT_SUPPLIERS_ALL', 'EDIT_SUPPLIERS_OWN']),
+  requirePermission('EDIT_SUPPLIERS'),
   async (req, res) => {
     try {
       const { id, fileId } = req.params;

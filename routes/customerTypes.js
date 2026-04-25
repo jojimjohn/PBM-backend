@@ -7,7 +7,7 @@ const { logger } = require('../utils/logger');
 // GET /api/customer-types - Get all active customer types
 router.get('/',
   authenticateToken,
-  requirePermission('VIEW_CUSTOMER_TYPES'),
+  requirePermission('VIEW_CUSTOMERS'),
   async (req, res) => {
   try {
     const { companyId } = req.user;

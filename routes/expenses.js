@@ -113,7 +113,7 @@ const checkExpenseOwnership = (expense, userId, permissions, permissionType = 'E
 };
 
 // GET /api/expenses - List all expenses with filtering
-router.get('/', requireAnyPermission(['VIEW_EXPENSE_ALL', 'VIEW_EXPENSE_OWN']), projectFilter, async (req, res) => {
+router.get('/', requirePermission('VIEW_FINANCE'), projectFilter, async (req, res) => {
   try {
     const { companyId, userId, permissions } = req.user;
     const db = getDbConnection(companyId);
@@ -255,7 +255,7 @@ router.get('/', requireAnyPermission(['VIEW_EXPENSE_ALL', 'VIEW_EXPENSE_OWN']), 
 });
 
 // GET /api/expenses/:id - Get specific expense
-router.get('/:id', requireAnyPermission(['VIEW_EXPENSE_ALL', 'VIEW_EXPENSE_OWN']), validateParams(['id']), async (req, res) => {
+router.get('/:id', requirePermission('VIEW_FINANCE'), validateParams(['id']), async (req, res) => {
   try {
     const { companyId, userId, permissions } = req.user;
     const { id } = req.params;
@@ -321,7 +321,7 @@ router.get('/:id', requireAnyPermission(['VIEW_EXPENSE_ALL', 'VIEW_EXPENSE_OWN']
 });
 
 // POST /api/expenses - Create expenses (bulk)
-router.post('/', requireAnyPermission(['CREATE_EXPENSE_ALL', 'CREATE_EXPENSE_OWN']), validate(bulkExpenseSchema), async (req, res) => {
+router.post('/', requirePermission('CREATE_FINANCE'), validate(bulkExpenseSchema), async (req, res) => {
   const { companyId, userId } = req.user;
   const { referenceId, referenceType, expenseType, expenses, totalAmount } = req.body;
   const db = getDbConnection(companyId);
@@ -483,7 +483,7 @@ const updateExpenseSchema = Joi.object({
   notes: Joi.string().trim().max(1000).allow('').optional()
 });
 
-router.put('/:id', requireAnyPermission(['EDIT_EXPENSE_ALL', 'EDIT_EXPENSE_OWN']), validateParams(['id']), validate(updateExpenseSchema), async (req, res) => {
+router.put('/:id', requirePermission('EDIT_FINANCE'), validateParams(['id']), validate(updateExpenseSchema), async (req, res) => {
   const { companyId, userId, permissions } = req.user;
   const { id } = req.params;
   const updateData = req.body;
@@ -619,7 +619,7 @@ router.put('/:id', requireAnyPermission(['EDIT_EXPENSE_ALL', 'EDIT_EXPENSE_OWN']
 });
 
 // DELETE /api/expenses/:id - Delete expense
-router.delete('/:id', requireAnyPermission(['DELETE_EXPENSE_ALL', 'DELETE_EXPENSE_OWN']), validateParams(['id']), async (req, res) => {
+router.delete('/:id', requirePermission('DELETE_FINANCE'), validateParams(['id']), async (req, res) => {
   const { companyId, userId, permissions } = req.user;
   const { id } = req.params;
   const db = getDbConnection(companyId);
@@ -748,7 +748,7 @@ router.get('/meta/categories', async (req, res) => {
 });
 
 // GET /api/expenses/analytics - Get expense analytics
-router.get('/analytics/summary', requireAnyPermission(['VIEW_EXPENSE_ALL', 'VIEW_EXPENSE_OWN']), async (req, res) => {
+router.get('/analytics/summary', requirePermission('VIEW_FINANCE'), async (req, res) => {
   try {
     const { companyId, userId, permissions } = req.user;
     const { period = '30', expenseType = '' } = req.query;

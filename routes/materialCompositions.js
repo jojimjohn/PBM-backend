@@ -23,7 +23,7 @@ const updateCompositionSchema = compositionSchema.fork(
 
 // GET /api/material-compositions - List all compositions
 // Using VIEW_INVENTORY permission since this is needed for inventory page filtering
-router.get('/', requirePermission('VIEW_MATERIAL_COMPOSITIONS'), async (req, res) => {
+router.get('/', requirePermission('VIEW_MATERIALS'), async (req, res) => {
   try {
     const { companyId } = req.user;
     const db = getDbConnection(companyId);
@@ -93,7 +93,7 @@ router.get('/', requirePermission('VIEW_MATERIAL_COMPOSITIONS'), async (req, res
 // GET /api/material-compositions/:id - Get single composition
 router.get('/:id',
   validateParams(Joi.object({ id: Joi.number().integer().positive().required() })),
-  requirePermission('VIEW_MATERIAL_COMPOSITIONS'),
+  requirePermission('VIEW_MATERIALS'),
   async (req, res) => {
     try {
       const { companyId } = req.user;
@@ -143,7 +143,7 @@ router.get('/:id',
 // GET /api/material-compositions/by-composite/:materialId - Get all components for a composite material
 router.get('/by-composite/:materialId',
   validateParams(Joi.object({ materialId: Joi.number().integer().positive().required() })),
-  requirePermission('VIEW_MATERIAL_COMPOSITIONS'),
+  requirePermission('VIEW_MATERIALS'),
   async (req, res) => {
     try {
       const { companyId } = req.user;
@@ -185,7 +185,7 @@ router.get('/by-composite/:materialId',
 // POST /api/material-compositions - Create new composition
 router.post('/',
   validate(compositionSchema),
-  requirePermission('CREATE_MATERIAL_COMPOSITIONS'),
+  requirePermission('CREATE_MATERIALS'),
   async (req, res) => {
     try {
       const { userId } = req.user;
@@ -294,7 +294,7 @@ router.post('/',
 router.put('/:id',
   validateParams(Joi.object({ id: Joi.number().integer().positive().required() })),
   validate(updateCompositionSchema),
-  requirePermission('EDIT_MATERIAL_COMPOSITIONS'),
+  requirePermission('EDIT_MATERIALS'),
   async (req, res) => {
     try {
       const { userId } = req.user;
@@ -373,7 +373,7 @@ router.put('/:id',
 // DELETE /api/material-compositions/:id - Delete composition
 router.delete('/:id',
   validateParams(Joi.object({ id: Joi.number().integer().positive().required() })),
-  requirePermission('DELETE_MATERIAL_COMPOSITIONS'),
+  requirePermission('DELETE_MATERIALS'),
   async (req, res) => {
     try {
       const { userId } = req.user;

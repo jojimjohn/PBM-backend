@@ -53,14 +53,12 @@ const toggleActiveSchema = Joi.object({
  */
 router.get('/', async (req, res) => {
   // Check for either permission
-  const hasViewCategories = req.user.permissions?.includes('VIEW_EXPENSE_CATEGORIES');
-  const hasManageSettings = req.user.permissions?.includes('MANAGE_SETTINGS');
-  const hasManageCategories = req.user.permissions?.includes('MANAGE_EXPENSE_CATEGORIES');
-
-  if (!hasViewCategories && !hasManageSettings && !hasManageCategories) {
+  const { hasAnyPermission } = require('../config/permissionsHierarchy');
+  const userPerms = req.user.permissions || [];
+  if (!hasAnyPermission(userPerms, ['VIEW_FINANCE', 'MANAGE_FINANCE', 'MANAGE_SETTINGS'])) {
     return res.status(403).json({
       success: false,
-      error: 'Permission required: VIEW_EXPENSE_CATEGORIES, MANAGE_SETTINGS, or MANAGE_EXPENSE_CATEGORIES'
+      error: 'Permission required: VIEW_FINANCE, MANAGE_FINANCE, or MANAGE_SETTINGS'
     });
   }
   try {
@@ -115,7 +113,7 @@ router.get('/', async (req, res) => {
  * GET /expense-categories/types
  * Get all available category types
  */
-router.get('/types', requirePermission('VIEW_EXPENSE_CATEGORIES'), async (req, res) => {
+router.get('/types', requirePermission('VIEW_FINANCE'), async (req, res) => {
   try {
     const types = [
       {
@@ -207,7 +205,7 @@ router.get('/dropdown/:type', async (req, res) => {
  * GET /expense-categories/by-type/:type
  * Get all categories for a specific type
  */
-router.get('/by-type/:type', requirePermission('VIEW_EXPENSE_CATEGORIES'), async (req, res) => {
+router.get('/by-type/:type', requirePermission('VIEW_FINANCE'), async (req, res) => {
   try {
     const { type } = req.params;
     const includeInactive = req.query.includeInactive === 'true';
@@ -248,7 +246,7 @@ router.get('/by-type/:type', requirePermission('VIEW_EXPENSE_CATEGORIES'), async
  * GET /expense-categories/statistics
  * Get category statistics for analytics
  */
-router.get('/statistics', requirePermission('VIEW_EXPENSE_CATEGORIES'), async (req, res) => {
+router.get('/statistics', requirePermission('VIEW_FINANCE'), async (req, res) => {
   try {
     const repositoryFactory = getRepositoryFactory(req.user.companyId);
     const categoryRepository = repositoryFactory.getExpenseCategoriesRepository();
@@ -276,7 +274,7 @@ router.get('/statistics', requirePermission('VIEW_EXPENSE_CATEGORIES'), async (r
  * GET /expense-categories/:id
  * Get specific category by ID
  */
-router.get('/:id', requirePermission('VIEW_EXPENSE_CATEGORIES'), async (req, res) => {
+router.get('/:id', requirePermission('VIEW_FINANCE'), async (req, res) => {
   try {
     const repositoryFactory = getRepositoryFactory(req.user.companyId);
     const categoryRepository = repositoryFactory.getExpenseCategoriesRepository();
@@ -312,7 +310,7 @@ router.get('/:id', requirePermission('VIEW_EXPENSE_CATEGORIES'), async (req, res
  * POST /expense-categories
  * Create new expense category
  */
-router.post('/', requirePermission('MANAGE_EXPENSE_CATEGORIES'), validate(categorySchema), async (req, res) => {
+router.post('/', requirePermission('MANAGE_FINANCE'), validate(categorySchema), async (req, res) => {
   try {
     const repositoryFactory = getRepositoryFactory(req.user.companyId);
     const categoryRepository = repositoryFactory.getExpenseCategoriesRepository();
@@ -358,7 +356,7 @@ router.post('/', requirePermission('MANAGE_EXPENSE_CATEGORIES'), validate(catego
  * PUT /expense-categories/:id
  * Update expense category
  */
-router.put('/:id', requirePermission('MANAGE_EXPENSE_CATEGORIES'), validate(updateCategorySchema), async (req, res) => {
+router.put('/:id', requirePermission('MANAGE_FINANCE'), validate(updateCategorySchema), async (req, res) => {
   try {
     const repositoryFactory = getRepositoryFactory(req.user.companyId);
     const categoryRepository = repositoryFactory.getExpenseCategoriesRepository();
@@ -415,7 +413,7 @@ router.put('/:id', requirePermission('MANAGE_EXPENSE_CATEGORIES'), validate(upda
  * PATCH /expense-categories/:id/toggle-active
  * Toggle category active status (soft delete/reactivate)
  */
-router.patch('/:id/toggle-active', requirePermission('MANAGE_EXPENSE_CATEGORIES'), validate(toggleActiveSchema), async (req, res) => {
+router.patch('/:id/toggle-active', requirePermission('MANAGE_FINANCE'), validate(toggleActiveSchema), async (req, res) => {
   try {
     const repositoryFactory = getRepositoryFactory(req.user.companyId);
     const categoryRepository = repositoryFactory.getExpenseCategoriesRepository();
@@ -465,7 +463,7 @@ router.patch('/:id/toggle-active', requirePermission('MANAGE_EXPENSE_CATEGORIES'
  * DELETE /expense-categories/:id
  * Hard delete category (only if not referenced by expenses)
  */
-router.delete('/:id', requirePermission('MANAGE_EXPENSE_CATEGORIES'), async (req, res) => {
+router.delete('/:id', requirePermission('MANAGE_FINANCE'), async (req, res) => {
   try {
     const repositoryFactory = getRepositoryFactory(req.user.companyId);
     const categoryRepository = repositoryFactory.getExpenseCategoriesRepository();
@@ -528,7 +526,7 @@ router.delete('/:id', requirePermission('MANAGE_EXPENSE_CATEGORIES'), async (req
  * POST /expense-categories/:id/validate-amount
  * Validate if an amount exceeds the category's max_amount limit
  */
-router.post('/:id/validate-amount', requirePermission('VIEW_EXPENSE_CATEGORIES'), async (req, res) => {
+router.post('/:id/validate-amount', requirePermission('VIEW_FINANCE'), async (req, res) => {
   try {
     const { amount } = req.body;
 

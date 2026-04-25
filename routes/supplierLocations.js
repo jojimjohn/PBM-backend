@@ -43,7 +43,7 @@ async function generateLocationCode(db, supplierId, supplierName) {
 }
 
 // GET /api/supplier-locations - List all supplier locations
-router.get('/', requirePermission('VIEW_SUPPLIER_LOCATIONS'), async (req, res) => {
+router.get('/', requirePermission('VIEW_SUPPLIERS'), async (req, res) => {
   try {
     const { companyId } = req.user;
     const db = getDbConnection(companyId);
@@ -132,7 +132,7 @@ router.get('/', requirePermission('VIEW_SUPPLIER_LOCATIONS'), async (req, res) =
 // GET /api/supplier-locations/:id - Get specific supplier location
 router.get('/:id',
   validateParams(Joi.object({ id: Joi.number().integer().positive().required() })),
-  requirePermission('VIEW_SUPPLIER_LOCATIONS'),
+  requirePermission('VIEW_SUPPLIERS'),
   async (req, res) => {
     try {
       const { id } = req.params;
@@ -186,7 +186,7 @@ router.get('/:id',
 // POST /api/supplier-locations - Create new supplier location
 router.post('/',
   validate(supplierLocationSchema),
-  requirePermission('CREATE_SUPPLIER_LOCATIONS'),
+  requirePermission('CREATE_SUPPLIERS'),
   async (req, res) => {
     try {
       const { companyId } = req.user;
@@ -294,7 +294,7 @@ router.post('/',
 router.put('/:id',
   validateParams(Joi.object({ id: Joi.number().integer().positive().required() })),
   validate(supplierLocationSchema),
-  requirePermission('EDIT_SUPPLIER_LOCATIONS'),
+  requirePermission('EDIT_SUPPLIERS'),
   async (req, res) => {
     try {
       const { id } = req.params;
@@ -389,7 +389,7 @@ router.put('/:id',
 // DELETE /api/supplier-locations/:id - Delete supplier location
 router.delete('/:id',
   validateParams(Joi.object({ id: Joi.number().integer().positive().required() })),
-  requirePermission('DELETE_SUPPLIER_LOCATIONS'),
+  requirePermission('DELETE_SUPPLIERS'),
   async (req, res) => {
     try {
       const { id } = req.params;

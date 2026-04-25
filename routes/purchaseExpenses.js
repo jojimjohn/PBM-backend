@@ -76,7 +76,7 @@ const bulkExpenseSchema = Joi.object({
 
 // GET /api/purchase-expenses - List purchase expenses
 router.get('/',
-  requireAnyPermission(['VIEW_PURCHASE_EXPENSES_ALL', 'VIEW_PURCHASE_EXPENSES_OWN']),
+  requirePermission('VIEW_PURCHASE'),
   async (req, res) => {
   try {
     const { companyId, userId, permissions } = req.user;
@@ -198,7 +198,7 @@ router.get('/',
 
 // GET /api/purchase-expenses/:id - Get specific expense
 router.get('/:id',
-  requireAnyPermission(['VIEW_PURCHASE_EXPENSES_ALL', 'VIEW_PURCHASE_EXPENSES_OWN']),
+  requirePermission('VIEW_PURCHASE'),
   validateParams(['id']),
   async (req, res) => {
   try {
@@ -257,7 +257,7 @@ router.get('/:id',
 
 // POST /api/purchase-expenses - Create purchase expenses (bulk)
 router.post('/',
-  requirePermission('CREATE_PURCHASE_EXPENSES'),
+  requirePermission('CREATE_PURCHASE'),
   validate(bulkExpenseSchema),
   async (req, res) => {
   const { companyId, userId } = req.user;
@@ -356,7 +356,7 @@ router.post('/',
 
 // PUT /api/purchase-expenses/:id - Update expense
 router.put('/:id',
-  requireAnyPermission(['EDIT_PURCHASE_EXPENSES_ALL', 'EDIT_PURCHASE_EXPENSES_OWN']),
+  requirePermission('EDIT_PURCHASE'),
   validateParams(['id']),
   validate(purchaseExpenseSchema.omit(['purchaseOrderId'])),
   async (req, res) => {
@@ -462,7 +462,7 @@ router.put('/:id',
 
 // DELETE /api/purchase-expenses/:id - Delete expense
 router.delete('/:id',
-  requireAnyPermission(['DELETE_PURCHASE_EXPENSES_ALL', 'DELETE_PURCHASE_EXPENSES_OWN']),
+  requirePermission('DELETE_PURCHASE'),
   validateParams(['id']),
   async (req, res) => {
   const { companyId, userId, permissions } = req.user;

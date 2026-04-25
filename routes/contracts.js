@@ -181,7 +181,7 @@ const contractRateSchema = Joi.object({
 
 // GET /api/contracts/next-number - Get next available contract number
 // Used to pre-populate the form with auto-generated number
-router.get('/next-number', requireAnyPermission(['CREATE_CONTRACTS_ALL', 'CREATE_CONTRACTS_OWN']), async (req, res) => {
+router.get('/next-number', requirePermission('CREATE_CONTRACTS'), async (req, res) => {
   try {
     const { companyId } = req.user;
     const db = getDbConnection(companyId);
@@ -204,7 +204,7 @@ router.get('/next-number', requireAnyPermission(['CREATE_CONTRACTS_ALL', 'CREATE
 });
 
 // GET /api/contracts - List all contracts
-router.get('/', requireAnyPermission(['VIEW_CONTRACTS_ALL', 'VIEW_CONTRACTS_OWN']), async (req, res) => {
+router.get('/', requirePermission('VIEW_CONTRACTS'), async (req, res) => {
   try {
     const { companyId, userId, permissions } = req.user;
     const db = getDbConnection(companyId);
@@ -319,7 +319,7 @@ router.get('/', requireAnyPermission(['VIEW_CONTRACTS_ALL', 'VIEW_CONTRACTS_OWN'
 // GET /api/contracts/:id - Get specific contract with rates
 router.get('/:id',
   validateParams(Joi.object({ id: Joi.number().integer().positive().required() })),
-  requireAnyPermission(['VIEW_CONTRACTS_ALL', 'VIEW_CONTRACTS_OWN']),
+  requirePermission('VIEW_CONTRACTS'),
   async (req, res) => {
     try {
       const { id } = req.params;
@@ -425,7 +425,7 @@ router.get('/:contractId/locations/:locationId/materials',
     contractId: Joi.number().integer().positive().required(),
     locationId: Joi.number().integer().positive().required()
   })),
-  requireAnyPermission(['VIEW_CONTRACTS_ALL', 'VIEW_CONTRACTS_OWN']),
+  requirePermission('VIEW_CONTRACTS'),
   async (req, res) => {
     try {
       const { contractId, locationId } = req.params;
@@ -546,7 +546,7 @@ router.get('/:contractId/locations/:locationId/materials',
 // POST /api/contracts - Create new contract
 router.post('/',
   validate(contractSchema),
-  requireAnyPermission(['CREATE_CONTRACTS_ALL', 'CREATE_CONTRACTS_OWN']),
+  requirePermission('CREATE_CONTRACTS'),
   async (req, res) => {
     try {
       const { companyId, userId } = req.user;
@@ -678,7 +678,7 @@ router.post('/',
 router.post('/:id/rates',
   validateParams(Joi.object({ id: Joi.number().integer().positive().required() })),
   validate(contractRateSchema.fork('contractId', schema => schema.optional())),
-  requireAnyPermission(['EDIT_CONTRACTS_ALL', 'EDIT_CONTRACTS_OWN']),
+  requirePermission('EDIT_CONTRACTS'),
   async (req, res) => {
     try {
       const { id } = req.params;
@@ -794,7 +794,7 @@ router.get('/:id/pricing/:materialId',
     id: Joi.number().integer().positive().required(),
     materialId: Joi.number().integer().positive().required()
   })),
-  requireAnyPermission(['VIEW_CONTRACTS_ALL', 'VIEW_CONTRACTS_OWN']),
+  requirePermission('VIEW_CONTRACTS'),
   async (req, res) => {
     try {
       const { id, materialId } = req.params;
@@ -875,7 +875,7 @@ router.get('/:id/pricing/:materialId',
 router.put('/:id',
   validateParams(Joi.object({ id: Joi.number().integer().positive().required() })),
   validate(contractSchema.fork(['contractNumber'], schema => schema.optional())),
-  requireAnyPermission(['EDIT_CONTRACTS_ALL', 'EDIT_CONTRACTS_OWN']),
+  requirePermission('EDIT_CONTRACTS'),
   async (req, res) => {
     try {
       const { id } = req.params;
@@ -1010,7 +1010,7 @@ router.put('/:id/pricing/:materialId',
     materialId: Joi.number().integer().positive().required()
   })),
   validate(contractRateSchema.fork(['contractId'], schema => schema.optional())),
-  requireAnyPermission(['EDIT_CONTRACTS_ALL', 'EDIT_CONTRACTS_OWN']),
+  requirePermission('EDIT_CONTRACTS'),
   async (req, res) => {
     try {
       const { id, materialId } = req.params;
@@ -1142,7 +1142,7 @@ router.put('/:id/pricing/:materialId',
 // POST /api/contracts/:id/attachments - Upload attachments to contract
 router.post('/:id/attachments',
   validateParams(Joi.object({ id: Joi.number().integer().positive().required() })),
-  requireAnyPermission(['EDIT_CONTRACTS_ALL', 'EDIT_CONTRACTS_OWN']),
+  requirePermission('EDIT_CONTRACTS'),
   uploadMultipleToS3,
   requireFiles,
   async (req, res) => {
@@ -1237,7 +1237,7 @@ router.post('/:id/attachments',
 // GET /api/contracts/:id/attachments - Get attachments for contract
 router.get('/:id/attachments',
   validateParams(Joi.object({ id: Joi.number().integer().positive().required() })),
-  requireAnyPermission(['VIEW_CONTRACTS_ALL', 'VIEW_CONTRACTS_OWN']),
+  requirePermission('VIEW_CONTRACTS'),
   async (req, res) => {
     try {
       const { id } = req.params;
@@ -1314,7 +1314,7 @@ router.delete('/:id/attachments/:fileId',
     id: Joi.number().integer().positive().required(),
     fileId: Joi.number().integer().positive().required()
   })),
-  requireAnyPermission(['EDIT_CONTRACTS_ALL', 'EDIT_CONTRACTS_OWN']),
+  requirePermission('EDIT_CONTRACTS'),
   async (req, res) => {
     try {
       const { id, fileId } = req.params;

@@ -334,7 +334,7 @@ router.post('/:id/submit', requirePermission('MANAGE_EXPENSE_SHEETS'), async (re
 // ============================================================================
 // POST /:id/approve — manager approves
 // ============================================================================
-router.post('/:id/approve', requirePermission('APPROVE_EXPENSE_SHEETS'), async (req, res) => {
+router.post('/:id/approve', requirePermission('EDIT_EXPENSE_SHEETS'), async (req, res) => {
   try {
     const db = getDbConnection(req.user.companyId);
     const sheet = await db('vehicle_daily_expense_sheets').where('id', req.params.id).first();

@@ -13,7 +13,7 @@ router.use(sanitize);
 // GET /api/supplier-contracts/:supplierId/rates - Get active contract rates for supplier
 router.get('/:supplierId/rates',
   validateParams(Joi.object({ supplierId: Joi.number().integer().positive().required() })),
-  requirePermission('VIEW_SUPPLIER_CONTRACTS'),
+  requirePermission('VIEW_CONTRACTS'),
   async (req, res) => {
     try {
       const { supplierId } = req.params;
@@ -140,7 +140,7 @@ router.get('/:supplierId/materials/:materialId/rate',
     supplierId: Joi.number().integer().positive().required(),
     materialId: Joi.number().integer().positive().required()
   })),
-  requirePermission('VIEW_SUPPLIER_CONTRACTS'),
+  requirePermission('VIEW_CONTRACTS'),
   async (req, res) => {
     try {
       const { supplierId, materialId } = req.params;

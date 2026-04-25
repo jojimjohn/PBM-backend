@@ -438,7 +438,7 @@ router.get('/:id',
 // Requires CREATE_PURCHASE_ALL or CREATE_PURCHASE_OWN (hierarchy handles this automatically)
 router.post('/',
   validate(purchaseOrderSchema),
-  requireAnyPermission(['CREATE_PURCHASE_ALL', 'CREATE_PURCHASE_OWN']),
+  requirePermission('CREATE_PURCHASE'),
   async (req, res) => {
     try {
       const { companyId, userId } = req.user;
@@ -584,7 +584,7 @@ router.post('/',
 router.put('/:id',
   validateParams(Joi.object({ id: Joi.number().integer().positive().required() })),
   validate(purchaseOrderSchema),
-  requireAnyPermission(['EDIT_PURCHASE_ALL', 'EDIT_PURCHASE_OWN']),
+  requirePermission('EDIT_PURCHASE'),
   async (req, res) => {
     try {
       const { id } = req.params;
@@ -734,7 +734,7 @@ router.put('/:id',
 router.post('/:id/items',
   validateParams(Joi.object({ id: Joi.number().integer().positive().required() })),
   validate(purchaseOrderItemSchema.fork('purchaseOrderId', schema => schema.optional())),
-  requireAnyPermission(['EDIT_PURCHASE_ALL', 'EDIT_PURCHASE_OWN']),
+  requirePermission('EDIT_PURCHASE'),
   async (req, res) => {
     try {
       const { id } = req.params;
@@ -935,7 +935,7 @@ router.put('/:id/receive',
     ).required(),
     notes: Joi.string().allow('').optional()
   })),
-  requirePermission('RECEIVE_PURCHASE'),
+  requirePermission('EDIT_PURCHASE'),
   async (req, res) => {
     try {
       const { id } = req.params;
@@ -1237,7 +1237,7 @@ router.post('/:id/approve',
     approvalNotes: Joi.string().allow('').optional(),
     approvedAmount: Joi.number().min(0).precision(3).optional()
   })),
-  requirePermission('APPROVE_PURCHASE'),
+  requirePermission('EDIT_PURCHASE'),
   async (req, res) => {
     try {
       const { id } = req.params;
@@ -1303,7 +1303,7 @@ router.patch('/:id/status',
     status: Joi.string().valid('draft', 'pending', 'approved', 'sent', 'received', 'completed', 'cancelled').required(),
     notes: Joi.string().allow('').optional()
   })),
-  requireAnyPermission(['EDIT_PURCHASE_ALL', 'EDIT_PURCHASE_OWN']),
+  requirePermission('EDIT_PURCHASE'),
   async (req, res) => {
     try {
       const { id } = req.params;
@@ -1569,7 +1569,7 @@ router.get('/contract-rate/:supplierId/:materialId',
 // Requires EDIT_PURCHASE_ALL (any order) or EDIT_PURCHASE_OWN (own orders only)
 router.post('/:id/attachments',
   validateParams(Joi.object({ id: Joi.number().integer().positive().required() })),
-  requireAnyPermission(['EDIT_PURCHASE_ALL', 'EDIT_PURCHASE_OWN']),
+  requirePermission('EDIT_PURCHASE'),
   uploadMultipleToS3,
   requireFiles,
   async (req, res) => {
@@ -1731,7 +1731,7 @@ router.delete('/:id/attachments/:fileId',
     id: Joi.number().integer().positive().required(),
     fileId: Joi.number().integer().positive().required()
   })),
-  requireAnyPermission(['EDIT_PURCHASE_ALL', 'EDIT_PURCHASE_OWN']),
+  requirePermission('EDIT_PURCHASE'),
   async (req, res) => {
     try {
       const { id, fileId } = req.params;

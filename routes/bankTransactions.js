@@ -120,7 +120,7 @@ const isCreditTransaction = (type) => {
 
 // GET /api/bank-transactions - List all transactions
 router.get('/',
-  requireAnyPermission(['VIEW_BANK_TRANSACTIONS_ALL', 'VIEW_BANK_TRANSACTIONS_OWN']),
+  requirePermission('VIEW_BANKING'),
   async (req, res) => {
     try {
       const { companyId, userId, permissions } = req.user;
@@ -266,7 +266,7 @@ router.get('/',
 
 // GET /api/bank-transactions/categories - Get transaction categories
 router.get('/categories',
-  requireAnyPermission(['VIEW_BANK_TRANSACTIONS_ALL', 'VIEW_BANK_TRANSACTIONS_OWN']),
+  requirePermission('VIEW_BANKING'),
   async (req, res) => {
   try {
     // Predefined categories for bank transactions
@@ -303,7 +303,7 @@ router.get('/categories',
 // GET /api/bank-transactions/:id - Get specific transaction
 router.get('/:id',
   validateParams(Joi.object({ id: Joi.number().integer().positive().required() })),
-  requireAnyPermission(['VIEW_BANK_TRANSACTIONS_ALL', 'VIEW_BANK_TRANSACTIONS_OWN']),
+  requirePermission('VIEW_BANKING'),
   async (req, res) => {
     try {
       const { companyId, userId, permissions } = req.user;
@@ -396,7 +396,7 @@ router.get('/:id',
 // POST /api/bank-transactions - Create new transaction
 router.post('/',
   validate(bankTransactionSchema),
-  requirePermission('CREATE_BANK_TRANSACTIONS'),
+  requirePermission('CREATE_BANKING'),
   async (req, res) => {
     try {
       const { companyId, userId } = req.user;
@@ -483,7 +483,7 @@ router.post('/',
 // POST /api/bank-transactions/link-payment - Create transaction linked to PO/SO/PettyCash
 router.post('/link-payment',
   validate(linkPaymentSchema),
-  requirePermission('CREATE_BANK_TRANSACTIONS'),
+  requirePermission('CREATE_BANKING'),
   async (req, res) => {
     try {
       const { companyId, userId } = req.user;
@@ -655,7 +655,7 @@ router.post('/link-payment',
 router.put('/:id',
   validateParams(Joi.object({ id: Joi.number().integer().positive().required() })),
   validate(updateTransactionSchema),
-  requireAnyPermission(['EDIT_BANK_TRANSACTIONS_ALL', 'EDIT_BANK_TRANSACTIONS_OWN']),
+  requirePermission('EDIT_BANKING'),
   async (req, res) => {
     try {
       const { companyId, userId, permissions } = req.user;
@@ -777,7 +777,7 @@ router.put('/:id',
 // POST /api/bank-transactions/reconcile - Mark transactions as reconciled
 router.post('/reconcile',
   validate(reconcileSchema),
-  requirePermission('RECONCILE_BANK_TRANSACTIONS'),
+  requirePermission('EDIT_BANKING'),
   async (req, res) => {
     try {
       const { companyId, userId } = req.user;
@@ -845,7 +845,7 @@ router.post('/reconcile',
 // DELETE /api/bank-transactions/:id - Delete transaction (only unreconciled)
 router.delete('/:id',
   validateParams(Joi.object({ id: Joi.number().integer().positive().required() })),
-  requireAnyPermission(['DELETE_BANK_TRANSACTIONS_ALL', 'DELETE_BANK_TRANSACTIONS_OWN']),
+  requirePermission('DELETE_BANKING'),
   async (req, res) => {
     try {
       const { companyId, userId, permissions } = req.user;

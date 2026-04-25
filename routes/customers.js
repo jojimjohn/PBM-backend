@@ -57,7 +57,7 @@ const customerSchema = Joi.object({
 });
 
 // GET /api/customers - List all customers
-router.get('/', requireAnyPermission(['VIEW_CUSTOMERS_ALL', 'VIEW_CUSTOMERS_OWN']), async (req, res) => {
+router.get('/', requirePermission('VIEW_CUSTOMERS'), async (req, res) => {
   try {
     const { companyId, userId, permissions } = req.user;
     const db = getDbConnection(companyId);
@@ -143,7 +143,7 @@ router.get('/', requireAnyPermission(['VIEW_CUSTOMERS_ALL', 'VIEW_CUSTOMERS_OWN'
 // GET /api/customers/:id - Get specific customer
 router.get('/:id',
   validateParams(Joi.object({ id: Joi.number().integer().positive().required() })),
-  requireAnyPermission(['VIEW_CUSTOMERS_ALL', 'VIEW_CUSTOMERS_OWN']),
+  requirePermission('VIEW_CUSTOMERS'),
   async (req, res) => {
     try {
       const { id } = req.params;
@@ -272,7 +272,7 @@ router.post('/',
 router.put('/:id',
   validateParams(Joi.object({ id: Joi.number().integer().positive().required() })),
   validate(customerSchema),
-  requireAnyPermission(['EDIT_CUSTOMERS_ALL', 'EDIT_CUSTOMERS_OWN']),
+  requirePermission('EDIT_CUSTOMERS'),
   async (req, res) => {
     try {
       const { id } = req.params;
@@ -369,7 +369,7 @@ router.put('/:id',
 // DELETE /api/customers/:id - Delete customer
 router.delete('/:id',
   validateParams(Joi.object({ id: Joi.number().integer().positive().required() })),
-  requireAnyPermission(['DELETE_CUSTOMERS_ALL', 'DELETE_CUSTOMERS_OWN']),
+  requirePermission('DELETE_CUSTOMERS'),
   async (req, res) => {
     try {
       const { id } = req.params;
@@ -458,7 +458,7 @@ router.delete('/:id',
 
 // PATCH /api/customers/:id/status - Update customer active status
 router.patch('/:id/status',
-  requireAnyPermission(['EDIT_CUSTOMERS_ALL', 'EDIT_CUSTOMERS_OWN']),
+  requirePermission('EDIT_CUSTOMERS'),
   async (req, res) => {
     try {
       const { companyId, userId, permissions } = req.user;
@@ -551,7 +551,7 @@ router.patch('/:id/status',
 // POST /api/customers/:id/attachments - Upload attachments to customer
 router.post('/:id/attachments',
   validateParams(Joi.object({ id: Joi.number().integer().positive().required() })),
-  requireAnyPermission(['EDIT_CUSTOMERS_ALL', 'EDIT_CUSTOMERS_OWN']),
+  requirePermission('EDIT_CUSTOMERS'),
   uploadMultipleToS3,
   requireFiles,
   async (req, res) => {
@@ -646,7 +646,7 @@ router.post('/:id/attachments',
 // GET /api/customers/:id/attachments - Get attachments for customer
 router.get('/:id/attachments',
   validateParams(Joi.object({ id: Joi.number().integer().positive().required() })),
-  requireAnyPermission(['VIEW_CUSTOMERS_ALL', 'VIEW_CUSTOMERS_OWN']),
+  requirePermission('VIEW_CUSTOMERS'),
   async (req, res) => {
     try {
       const { id } = req.params;
@@ -723,7 +723,7 @@ router.delete('/:id/attachments/:fileId',
     id: Joi.number().integer().positive().required(),
     fileId: Joi.number().integer().positive().required()
   })),
-  requireAnyPermission(['EDIT_CUSTOMERS_ALL', 'EDIT_CUSTOMERS_OWN']),
+  requirePermission('EDIT_CUSTOMERS'),
   async (req, res) => {
     try {
       const { id, fileId } = req.params;

@@ -62,7 +62,7 @@ const calloutItemSchema = Joi.object({
 });
 
 // GET /api/callouts - List all collection callouts
-router.get('/', requireAnyPermission(['VIEW_CALLOUTS_ALL', 'VIEW_CALLOUTS_OWN']), async (req, res) => {
+router.get('/', requirePermission('VIEW_COLLECTIONS'), async (req, res) => {
   try {
     const { companyId, userId, permissions } = req.user;
     const db = getDbConnection(companyId);
@@ -194,7 +194,7 @@ router.get('/', requireAnyPermission(['VIEW_CALLOUTS_ALL', 'VIEW_CALLOUTS_OWN'])
 // GET /api/callouts/:id - Get specific callout with items
 router.get('/:id',
   validateParams(Joi.object({ id: Joi.number().integer().positive().required() })),
-  requireAnyPermission(['VIEW_CALLOUTS_ALL', 'VIEW_CALLOUTS_OWN']),
+  requirePermission('VIEW_COLLECTIONS'),
   async (req, res) => {
     try {
       const { id } = req.params;
@@ -327,7 +327,7 @@ router.get('/:id',
 // POST /api/callouts - Create new callout
 router.post('/',
   validate(calloutSchema),
-  requirePermission('CREATE_CALLOUTS'),
+  requirePermission('CREATE_COLLECTIONS'),
   async (req, res) => {
     try {
       const { companyId, userId } = req.user;
@@ -431,7 +431,7 @@ router.post('/',
 router.post('/:id/items',
   validateParams(Joi.object({ id: Joi.number().integer().positive().required() })),
   validate(calloutItemSchema),
-  requireAnyPermission(['EDIT_CALLOUTS_ALL', 'EDIT_CALLOUTS_OWN']),
+  requirePermission('EDIT_COLLECTIONS'),
   async (req, res) => {
     try {
       const { id } = req.params;
@@ -548,7 +548,7 @@ router.patch('/:id/status',
     notes: Joi.string().allow('').optional(),
     assignedTo: Joi.number().integer().positive().optional()
   })),
-  requireAnyPermission(['EDIT_CALLOUTS_ALL', 'EDIT_CALLOUTS_OWN']),
+  requirePermission('EDIT_COLLECTIONS'),
   async (req, res) => {
     try {
       const { id } = req.params;
@@ -629,7 +629,7 @@ router.patch('/:id/status',
 
 // GET /api/callouts/active - Get active callouts for dashboard
 router.get('/active/summary',
-  requireAnyPermission(['VIEW_CALLOUTS_ALL', 'VIEW_CALLOUTS_OWN']),
+  requirePermission('VIEW_COLLECTIONS'),
   async (req, res) => {
     try {
       const { companyId, userId, permissions } = req.user;

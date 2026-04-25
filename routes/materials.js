@@ -81,7 +81,7 @@ const materialSchema = Joi.object({
 });
 
 // GET /api/materials - List all materials
-router.get('/', requireAnyPermission(['VIEW_MATERIALS_ALL', 'VIEW_MATERIALS_OWN']), async (req, res) => {
+router.get('/', requirePermission('VIEW_MATERIALS'), async (req, res) => {
   try {
     const { companyId, userId, permissions } = req.user;
     const db = getDbConnection(companyId);
@@ -356,7 +356,7 @@ router.get('/categories', async (req, res) => {
 // GET /api/materials/:id - Get specific material
 router.get('/:id',
   validateParams(Joi.object({ id: Joi.number().integer().positive().required() })),
-  requireAnyPermission(['VIEW_MATERIALS_ALL', 'VIEW_MATERIALS_OWN']),
+  requirePermission('VIEW_MATERIALS'),
   async (req, res) => {
     try {
       const { id } = req.params;
@@ -546,7 +546,7 @@ router.post('/',
 router.put('/:id',
   validateParams(Joi.object({ id: Joi.number().integer().positive().required() })),
   validate(materialSchema),
-  requireAnyPermission(['EDIT_MATERIALS_ALL', 'EDIT_MATERIALS_OWN']),
+  requirePermission('EDIT_MATERIALS'),
   async (req, res) => {
     try {
       const { id } = req.params;
@@ -684,7 +684,7 @@ router.put('/:id',
 // DELETE /api/materials/:id - Delete material
 router.delete('/:id',
   validateParams(Joi.object({ id: Joi.number().integer().positive().required() })),
-  requireAnyPermission(['DELETE_MATERIALS_ALL', 'DELETE_MATERIALS_OWN']),
+  requirePermission('DELETE_MATERIALS'),
   async (req, res) => {
     try {
       const { id } = req.params;
@@ -777,7 +777,7 @@ router.delete('/:id',
 // POST /api/materials/:id/attachments - Upload attachments to material
 router.post('/:id/attachments',
   validateParams(Joi.object({ id: Joi.number().integer().positive().required() })),
-  requireAnyPermission(['EDIT_MATERIALS_ALL', 'EDIT_MATERIALS_OWN']),
+  requirePermission('EDIT_MATERIALS'),
   uploadMultipleToS3,
   requireFiles,
   async (req, res) => {
@@ -872,7 +872,7 @@ router.post('/:id/attachments',
 // GET /api/materials/:id/attachments - Get attachments for material
 router.get('/:id/attachments',
   validateParams(Joi.object({ id: Joi.number().integer().positive().required() })),
-  requireAnyPermission(['VIEW_MATERIALS_ALL', 'VIEW_MATERIALS_OWN']),
+  requirePermission('VIEW_MATERIALS'),
   async (req, res) => {
     try {
       const { id } = req.params;
@@ -949,7 +949,7 @@ router.delete('/:id/attachments/:fileId',
     id: Joi.number().integer().positive().required(),
     fileId: Joi.number().integer().positive().required()
   })),
-  requireAnyPermission(['EDIT_MATERIALS_ALL', 'EDIT_MATERIALS_OWN']),
+  requirePermission('EDIT_MATERIALS'),
   async (req, res) => {
     try {
       const { id, fileId } = req.params;

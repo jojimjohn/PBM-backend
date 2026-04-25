@@ -147,7 +147,7 @@ const paymentSchema = Joi.object({
 }).options({ stripUnknown: true });
 
 // GET /api/purchase-invoices - List all purchase invoices
-router.get('/', requireAnyPermission(['VIEW_INVOICES_ALL', 'VIEW_INVOICES_OWN']), projectFilter, async (req, res) => {
+router.get('/', requirePermission('VIEW_INVOICES'), projectFilter, async (req, res) => {
   try {
     const { companyId, userId, permissions } = req.user;
     const db = getDbConnection(companyId);
@@ -286,7 +286,7 @@ router.get('/', requireAnyPermission(['VIEW_INVOICES_ALL', 'VIEW_INVOICES_OWN'])
 // GET /api/purchase-invoices/:id - Get specific invoice
 router.get('/:id',
   validateParams(Joi.object({ id: Joi.number().integer().positive().required() })),
-  requireAnyPermission(['VIEW_INVOICES_ALL', 'VIEW_INVOICES_OWN']),
+  requirePermission('VIEW_INVOICES'),
   async (req, res) => {
     try {
       const { id } = req.params;
@@ -638,7 +638,7 @@ const vendorBillUpdateSchema = Joi.object({
 // PUT /api/purchase-invoices/:id - Update invoice (with vendor bill validation)
 router.put('/:id',
   validateParams(Joi.object({ id: Joi.number().integer().positive().required() })),
-  requireAnyPermission(['EDIT_INVOICES_ALL', 'EDIT_INVOICES_OWN']),
+  requirePermission('EDIT_INVOICES'),
   async (req, res) => {
     try {
       const { id } = req.params;
@@ -844,7 +844,7 @@ router.put('/:id',
 router.post('/:id/payment',
   validateParams(Joi.object({ id: Joi.number().integer().positive().required() })),
   validate(paymentSchema),
-  requireAnyPermission(['EDIT_INVOICES_ALL', 'EDIT_INVOICES_OWN']),
+  requirePermission('EDIT_INVOICES'),
   async (req, res) => {
     try {
       const { id } = req.params;
@@ -1038,7 +1038,7 @@ router.post('/:id/payment',
 // DELETE /api/purchase-invoices/:id - Delete invoice
 router.delete('/:id',
   validateParams(Joi.object({ id: Joi.number().integer().positive().required() })),
-  requireAnyPermission(['DELETE_INVOICES_ALL', 'DELETE_INVOICES_OWN']),
+  requirePermission('DELETE_INVOICES'),
   async (req, res) => {
     try {
       const { id } = req.params;
@@ -1118,7 +1118,7 @@ router.delete('/:id',
 router.put('/:id/status',
   validateParams(Joi.object({ id: Joi.number().integer().positive().required() })),
   validate(companyBillStatusSchema),
-  requireAnyPermission(['EDIT_INVOICES_ALL', 'EDIT_INVOICES_OWN']),
+  requirePermission('EDIT_INVOICES'),
   async (req, res) => {
     try {
       const { id } = req.params;
@@ -1207,7 +1207,7 @@ router.put('/:id/status',
 // GET /api/purchase-invoices/unlinked-company-bills - Get company bills available for linking
 // Returns company bills with status 'sent' that are not linked to any vendor bill
 router.get('/unlinked-company-bills',
-  requireAnyPermission(['VIEW_INVOICES_ALL', 'VIEW_INVOICES_OWN']),
+  requirePermission('VIEW_INVOICES'),
   async (req, res) => {
     try {
       const { companyId, userId, permissions } = req.user;
@@ -1291,7 +1291,7 @@ router.get('/unlinked-company-bills',
 // POST /api/purchase-invoices/reset-orphan-payments - Reset payments on orphan company bills
 // Company bills without vendor bills should not have been paid directly
 router.post('/reset-orphan-payments',
-  requirePermission('MANAGE_INVOICES_ALL'),
+  requirePermission('MANAGE_INVOICES'),
   async (req, res) => {
     try {
       const { companyId, userId } = req.user;
@@ -1384,7 +1384,7 @@ router.post('/reset-orphan-payments',
 // POST /api/purchase-invoices/sync-prefixes - Add bill type prefixes to existing invoices
 // This adds CB-/VB- prefix to invoices that don't have them
 router.post('/sync-prefixes',
-  requirePermission('MANAGE_INVOICES_ALL'),
+  requirePermission('MANAGE_INVOICES'),
   async (req, res) => {
     try {
       const { companyId, userId } = req.user;
@@ -1473,7 +1473,7 @@ router.post('/sync-prefixes',
 // POST /api/purchase-invoices/sync-status - Sync payment status for all invoices
 // This fixes any data inconsistencies where balance=0 but status!='paid'
 router.post('/sync-status',
-  requirePermission('MANAGE_INVOICES_ALL'),
+  requirePermission('MANAGE_INVOICES'),
   async (req, res) => {
     try {
       const { companyId, userId } = req.user;
@@ -1570,7 +1570,7 @@ router.post('/sync-status',
 // POST /api/purchase-invoices/:id/attachment - Upload invoice attachment
 router.post('/:id/attachment',
   validateParams(Joi.object({ id: Joi.number().integer().positive().required() })),
-  requireAnyPermission(['EDIT_INVOICES_ALL', 'EDIT_INVOICES_OWN']),
+  requirePermission('EDIT_INVOICES'),
   async (req, res, next) => {
     try {
       const { id } = req.params;

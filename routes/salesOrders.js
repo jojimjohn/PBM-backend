@@ -294,7 +294,7 @@ router.post('/preview-fifo',
 
 // GET /api/sales-orders - List all sales orders
 // Requires VIEW_SALES_ALL (any order) or VIEW_SALES_OWN (own orders only)
-router.get('/', requireAnyPermission(['VIEW_SALES_ALL', 'VIEW_SALES_OWN']), projectFilter, async (req, res) => {
+router.get('/', requirePermission('VIEW_SALES'), projectFilter, async (req, res) => {
   try {
     const { companyId, userId, permissions } = req.user;
     const db = getDbConnection(companyId);
@@ -401,7 +401,7 @@ router.get('/', requireAnyPermission(['VIEW_SALES_ALL', 'VIEW_SALES_OWN']), proj
 });
 
 // GET /api/sales-orders/today-summary - Get today's sales summary
-router.get('/today-summary', requireAnyPermission(['VIEW_SALES_ALL', 'VIEW_SALES_OWN']), async (req, res) => {
+router.get('/today-summary', requirePermission('VIEW_SALES'), async (req, res) => {
   try {
     const { companyId, userId, permissions } = req.user;
     const db = getDbConnection(companyId);
@@ -464,7 +464,7 @@ router.get('/today-summary', requireAnyPermission(['VIEW_SALES_ALL', 'VIEW_SALES
 // GET /api/sales-orders/:id - Get specific sales order with items
 router.get('/:id',
   validateParams(Joi.object({ id: Joi.number().integer().positive().required() })),
-  requireAnyPermission(['VIEW_SALES_ALL', 'VIEW_SALES_OWN']),
+  requirePermission('VIEW_SALES'),
   async (req, res) => {
     try {
       const { id } = req.params;
@@ -590,7 +590,7 @@ router.get('/:id',
 // Requires CREATE_SALES_ALL or CREATE_SALES_OWN (hierarchy handles this automatically)
 router.post('/',
   validate(salesOrderSchema),
-  requireAnyPermission(['CREATE_SALES_ALL', 'CREATE_SALES_OWN']),
+  requirePermission('CREATE_SALES'),
   async (req, res) => {
     try {
       const { companyId } = req.user;
@@ -739,7 +739,7 @@ router.post('/',
 router.put('/:id',
   validateParams(Joi.object({ id: Joi.number().integer().positive().required() })),
   validate(salesOrderSchema),
-  requireAnyPermission(['EDIT_SALES_ALL', 'EDIT_SALES_OWN']),
+  requirePermission('EDIT_SALES'),
   async (req, res) => {
     try {
       const { id } = req.params;
@@ -907,7 +907,7 @@ router.put('/:id',
 router.post('/:id/items',
   validateParams(Joi.object({ id: Joi.number().integer().positive().required() })),
   validate(salesOrderItemSchema.fork('salesOrderId', schema => schema.optional())),
-  requireAnyPermission(['EDIT_SALES_ALL', 'EDIT_SALES_OWN']),
+  requirePermission('EDIT_SALES'),
   async (req, res) => {
     try {
       const { id } = req.params;
@@ -1041,7 +1041,7 @@ router.put('/:id/status',
     orderStatus: Joi.string().valid('draft', 'confirmed', 'delivered', 'cancelled').required(),
     notes: Joi.string().allow('').optional()
   })),
-  requireAnyPermission(['EDIT_SALES_ALL', 'EDIT_SALES_OWN']),
+  requirePermission('EDIT_SALES'),
   async (req, res) => {
     try {
       const { id } = req.params;
@@ -1412,7 +1412,7 @@ router.post('/:id/invoice',
  * Requires EDIT_SALES_ALL (any order) or EDIT_SALES_OWN (own orders only)
  */
 router.post('/:id/attachments',
-  requireAnyPermission(['EDIT_SALES_ALL', 'EDIT_SALES_OWN']),
+  requirePermission('EDIT_SALES'),
   uploadMultipleToS3,
   async (req, res) => {
     const db = getDbConnection(req.user.companyId);
@@ -1543,7 +1543,7 @@ router.post('/:id/attachments',
  * List all attachments for a sales order with presigned download URLs
  */
 router.get('/:id/attachments',
-  requireAnyPermission(['VIEW_SALES_ALL', 'VIEW_SALES_OWN']),
+  requirePermission('VIEW_SALES'),
   async (req, res) => {
     const db = getDbConnection(req.user.companyId);
     const { id } = req.params;
@@ -1622,7 +1622,7 @@ router.get('/:id/attachments',
  * Requires EDIT_SALES_ALL (any order) or EDIT_SALES_OWN (own orders only)
  */
 router.delete('/:id/attachments/:fileId',
-  requireAnyPermission(['EDIT_SALES_ALL', 'EDIT_SALES_OWN']),
+  requirePermission('EDIT_SALES'),
   async (req, res) => {
     const db = getDbConnection(req.user.companyId);
     const { id, fileId } = req.params;

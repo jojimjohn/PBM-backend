@@ -82,7 +82,7 @@ const checkWastageOwnership = (wastage, userId, permissions, permissionType = 'E
 };
 
 // GET /wastages - List all wastages with filtering and pagination
-router.get('/', requireAnyPermission(['VIEW_WASTAGE_ALL', 'VIEW_WASTAGE_OWN']), projectFilter, async (req, res) => {
+router.get('/', requirePermission('VIEW_WASTAGE'), projectFilter, async (req, res) => {
   try {
     const { companyId, userId, permissions } = req.user;
     const { hasPermission } = require('../config/permissionsHierarchy');
@@ -177,7 +177,7 @@ router.get('/types', async (req, res) => {
 });
 
 // GET /wastages/:id - Get specific wastage
-router.get('/:id', requireAnyPermission(['VIEW_WASTAGE_ALL', 'VIEW_WASTAGE_OWN']), async (req, res) => {
+router.get('/:id', requirePermission('VIEW_WASTAGE'), async (req, res) => {
   try {
     const { companyId, userId, permissions } = req.user;
     const db = getDbConnection(companyId);
@@ -265,7 +265,7 @@ router.get('/:id', requireAnyPermission(['VIEW_WASTAGE_ALL', 'VIEW_WASTAGE_OWN']
 
 // POST /wastages - Create new wastage
 router.post('/',
-  requireAnyPermission(['CREATE_WASTAGE_ALL', 'CREATE_WASTAGE_OWN']),
+  requirePermission('CREATE_WASTAGE'),
   validate(wastageSchema),
   async (req, res) => {
     try {
@@ -389,7 +389,7 @@ router.post('/',
 
 // PUT /wastages/:id - Update wastage (only if pending)
 router.put('/:id',
-  requireAnyPermission(['EDIT_WASTAGE_ALL', 'EDIT_WASTAGE_OWN']),
+  requirePermission('EDIT_WASTAGE'),
   validate(updateWastageSchema),
   async (req, res) => {
     try {
@@ -477,7 +477,7 @@ router.put('/:id',
 
 // POST /wastages/:id/approve - Approve/Reject wastage
 router.post('/:id/approve',
-  requirePermission('APPROVE_WASTAGE'),
+  requirePermission('EDIT_WASTAGE'),
   validate(approvalSchema),
   async (req, res) => {
     try {
@@ -568,7 +568,7 @@ router.post('/:id/approve',
 
 // POST /wastages/:id/amend - Amend approved wastage with differential inventory adjustment
 router.post('/:id/amend',
-  requireAnyPermission(['EDIT_WASTAGE_ALL', 'EDIT_WASTAGE_OWN']),
+  requirePermission('EDIT_WASTAGE'),
   validate(amendmentSchema),
   async (req, res) => {
     try {
@@ -653,7 +653,7 @@ router.post('/:id/amend',
 );
 
 // DELETE /wastages/:id - Delete wastage (only if pending or rejected, NOT approved)
-router.delete('/:id', requireAnyPermission(['DELETE_WASTAGE_ALL', 'DELETE_WASTAGE_OWN']), async (req, res) => {
+router.delete('/:id', requirePermission('DELETE_WASTAGE'), async (req, res) => {
   try {
     const { companyId, userId, permissions } = req.user;
     const db = getDbConnection(companyId);
@@ -724,7 +724,7 @@ router.delete('/:id', requireAnyPermission(['DELETE_WASTAGE_ALL', 'DELETE_WASTAG
 });
 
 // GET /wastages/analytics/summary - Get wastage analytics
-router.get('/analytics/summary', requireAnyPermission(['VIEW_WASTAGE_ALL', 'VIEW_WASTAGE_OWN']), async (req, res) => {
+router.get('/analytics/summary', requirePermission('VIEW_WASTAGE'), async (req, res) => {
   try {
     const { companyId, userId, permissions } = req.user;
     const { hasPermission } = require('../config/permissionsHierarchy');
@@ -775,7 +775,7 @@ router.get('/analytics/summary', requireAnyPermission(['VIEW_WASTAGE_ALL', 'VIEW
 // POST /api/wastages/:id/attachments - Upload attachments to wastage
 router.post('/:id/attachments',
   validateParams(Joi.object({ id: Joi.number().integer().positive().required() })),
-  requireAnyPermission(['EDIT_WASTAGE_ALL', 'EDIT_WASTAGE_OWN']),
+  requirePermission('EDIT_WASTAGE'),
   uploadMultipleToS3,
   requireFiles,
   async (req, res) => {
@@ -870,7 +870,7 @@ router.post('/:id/attachments',
 // GET /api/wastages/:id/attachments - Get attachments for wastage
 router.get('/:id/attachments',
   validateParams(Joi.object({ id: Joi.number().integer().positive().required() })),
-  requireAnyPermission(['VIEW_WASTAGE_ALL', 'VIEW_WASTAGE_OWN']),
+  requirePermission('VIEW_WASTAGE'),
   async (req, res) => {
     try {
       const { id } = req.params;
@@ -948,7 +948,7 @@ router.delete('/:id/attachments/:fileId',
     id: Joi.number().integer().positive().required(),
     fileId: Joi.number().integer().positive().required()
   })),
-  requireAnyPermission(['EDIT_WASTAGE_ALL', 'EDIT_WASTAGE_OWN']),
+  requirePermission('EDIT_WASTAGE'),
   async (req, res) => {
     try {
       const { id, fileId } = req.params;

@@ -126,7 +126,7 @@ function generateCardNumber(companyId) {
 
 // GET /petty-cash-cards - List all petty cash cards
 router.get('/',
-  requireAnyPermission(['VIEW_CARDS_ALL', 'VIEW_CARDS_ASSIGNED']),
+  requirePermission('VIEW_PETTY_CASH'),
   async (req, res) => {
   try {
     const { companyId, userId, permissions } = req.user;
@@ -346,7 +346,7 @@ router.get('/user-cards/:userId', requirePermission('VIEW_PETTY_CASH'), async (r
 
 // GET /petty-cash-cards/:id - Get specific petty cash card
 router.get('/:id',
-  requireAnyPermission(['VIEW_CARDS_ALL', 'VIEW_CARDS_ASSIGNED']),
+  requirePermission('VIEW_PETTY_CASH'),
   async (req, res) => {
   try {
     const { companyId, userId, permissions } = req.user;
@@ -439,7 +439,7 @@ router.get('/:id',
 
 // POST /petty-cash-cards - Create new petty cash card
 router.post('/',
-  requirePermission('CREATE_CARDS'),
+  requirePermission('CREATE_PETTY_CASH'),
   validate(pettyCashCardSchema),
   async (req, res) => {
     try {

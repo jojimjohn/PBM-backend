@@ -7,7 +7,7 @@ const { logger } = require('../utils/logger');
 // GET /api/supplier-types - Get all active supplier types
 router.get('/',
   authenticateToken,
-  requirePermission('VIEW_SUPPLIER_TYPES'),
+  requirePermission('VIEW_SUPPLIERS'),
   async (req, res) => {
   try {
     const { companyId } = req.user;

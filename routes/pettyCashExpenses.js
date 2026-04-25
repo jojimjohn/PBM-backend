@@ -144,7 +144,7 @@ const checkExpenseOwnership = (expense, userId, permissions, permissionType = 'E
 };
 
 // GET /petty-cash-expenses - List all expenses with filtering
-router.get('/', requireAnyPermission(['VIEW_PETTY_CASH_EXPENSE_ALL', 'VIEW_PETTY_CASH_EXPENSE_OWN']), async (req, res) => {
+router.get('/', requirePermission('VIEW_PETTY_CASH'), async (req, res) => {
   try {
     const { companyId, userId, permissions } = req.user;
     const db = getDbConnection(companyId);
@@ -258,7 +258,7 @@ router.get('/', requireAnyPermission(['VIEW_PETTY_CASH_EXPENSE_ALL', 'VIEW_PETTY
 });
 
 // GET /petty-cash-expenses/categories - Get expense categories (from database)
-router.get('/categories', requireAnyPermission(['VIEW_PETTY_CASH_EXPENSE_ALL', 'VIEW_PETTY_CASH_EXPENSE_OWN']), async (req, res) => {
+router.get('/categories', requirePermission('VIEW_PETTY_CASH'), async (req, res) => {
   try {
     const repositoryFactory = getRepositoryFactory(req.user.companyId);
     const categoryRepository = repositoryFactory.getExpenseCategoriesRepository();
@@ -360,7 +360,7 @@ router.get('/pending-reimbursements', requirePermission('VIEW_PETTY_CASH'), asyn
 
 // POST /petty-cash-expenses - Create new expense
 router.post('/',
-  requireAnyPermission(['CREATE_PETTY_CASH_EXPENSE_ALL', 'CREATE_PETTY_CASH_EXPENSE_OWN']),
+  requirePermission('CREATE_PETTY_CASH'),
   validate(expenseSchema),
   async (req, res) => {
     try {
@@ -646,7 +646,7 @@ router.post('/',
 
 // PUT /petty-cash-expenses/:id - Update expense (only if pending)
 router.put('/:id',
-  requireAnyPermission(['EDIT_PETTY_CASH_EXPENSE_ALL', 'EDIT_PETTY_CASH_EXPENSE_OWN']),
+  requirePermission('EDIT_PETTY_CASH'),
   validate(updateExpenseSchema),
   async (req, res) => {
     try {
@@ -885,7 +885,7 @@ router.put('/:id',
 
 // POST /petty-cash-expenses/:id/approve - Approve/Reject expense
 router.post('/:id/approve',
-  requirePermission('APPROVE_EXPENSE'),
+  requirePermission('EDIT_PETTY_CASH'),
   validate(approvalSchema),
   async (req, res) => {
     try {
@@ -1130,7 +1130,7 @@ router.post('/:id/reimburse',
 );
 
 // DELETE /petty-cash-expenses/:id - Delete expense (only if pending)
-router.delete('/:id', requireAnyPermission(['DELETE_PETTY_CASH_EXPENSE_ALL', 'DELETE_PETTY_CASH_EXPENSE_OWN']), async (req, res) => {
+router.delete('/:id', requirePermission('DELETE_PETTY_CASH'), async (req, res) => {
   try {
     const { companyId, userId, permissions } = req.user;
     const db = getDbConnection(companyId);
@@ -1202,7 +1202,7 @@ const MAX_RECEIPTS_PER_EXPENSE = 2;
 
 // GET /petty-cash-expenses/:id/receipts - Get all receipts for expense
 router.get('/:id/receipts',
-  requireAnyPermission(['VIEW_PETTY_CASH_EXPENSE_ALL', 'VIEW_PETTY_CASH_EXPENSE_OWN']),
+  requirePermission('VIEW_PETTY_CASH'),
   async (req, res) => {
     try {
       const { companyId, userId, permissions } = req.user;
@@ -1315,7 +1315,7 @@ router.get('/:id/receipts',
 
 // POST /petty-cash-expenses/:id/receipt - Upload receipt for expense (max 2)
 router.post('/:id/receipt',
-  requireAnyPermission(['EDIT_PETTY_CASH_EXPENSE_ALL', 'EDIT_PETTY_CASH_EXPENSE_OWN']),
+  requirePermission('EDIT_PETTY_CASH'),
   uploadReceipt,
   async (req, res) => {
     try {
@@ -1492,7 +1492,7 @@ router.post('/:id/receipt',
 
 // DELETE /petty-cash-expenses/:id/receipts/:receiptId - Delete a receipt
 router.delete('/:id/receipts/:receiptId',
-  requireAnyPermission(['EDIT_PETTY_CASH_EXPENSE_ALL', 'EDIT_PETTY_CASH_EXPENSE_OWN']),
+  requirePermission('EDIT_PETTY_CASH'),
   async (req, res) => {
     try {
       const { companyId, userId, permissions } = req.user;
@@ -1585,7 +1585,7 @@ router.delete('/:id/receipts/:receiptId',
 );
 
 // GET /petty-cash-expenses/:id/receipt - Get receipt download URL
-router.get('/:id/receipt', requireAnyPermission(['VIEW_PETTY_CASH_EXPENSE_ALL', 'VIEW_PETTY_CASH_EXPENSE_OWN']), async (req, res) => {
+router.get('/:id/receipt', requirePermission('VIEW_PETTY_CASH'), async (req, res) => {
   try {
     const { companyId, userId, permissions } = req.user;
     const db = getDbConnection(companyId);
@@ -1762,7 +1762,7 @@ router.delete('/:id/receipt', requirePermission('MANAGE_PETTY_CASH'), async (req
 });
 
 // GET /petty-cash-expenses/analytics - Get expense analytics
-router.get('/analytics', requireAnyPermission(['VIEW_PETTY_CASH_EXPENSE_ALL', 'VIEW_PETTY_CASH_EXPENSE_OWN']), async (req, res) => {
+router.get('/analytics', requirePermission('VIEW_PETTY_CASH'), async (req, res) => {
   try {
     const { companyId, userId, permissions } = req.user;
     const db = getDbConnection(companyId);
@@ -1823,7 +1823,7 @@ router.get('/analytics', requireAnyPermission(['VIEW_PETTY_CASH_EXPENSE_ALL', 'V
 });
 
 // GET /petty-cash-expenses/analytics/summary - Get expense analytics
-router.get('/analytics/summary', requireAnyPermission(['VIEW_PETTY_CASH_EXPENSE_ALL', 'VIEW_PETTY_CASH_EXPENSE_OWN']), async (req, res) => {
+router.get('/analytics/summary', requirePermission('VIEW_PETTY_CASH'), async (req, res) => {
   try {
     const { companyId, userId, permissions } = req.user;
     const db = getDbConnection(companyId);
@@ -1925,7 +1925,7 @@ router.get('/analytics/summary', requireAnyPermission(['VIEW_PETTY_CASH_EXPENSE_
 
 // GET /petty-cash-expenses/:id - Get specific expense
 // NOTE: This route MUST be defined last, after all specific routes (like /analytics)
-router.get('/:id', requireAnyPermission(['VIEW_PETTY_CASH_EXPENSE_ALL', 'VIEW_PETTY_CASH_EXPENSE_OWN']), async (req, res) => {
+router.get('/:id', requirePermission('VIEW_PETTY_CASH'), async (req, res) => {
   try {
     const { companyId, userId, permissions } = req.user;
     const db = getDbConnection(companyId);

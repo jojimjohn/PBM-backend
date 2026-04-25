@@ -103,7 +103,7 @@ router.post('/purchase-orders/:id/attachments',
  */
 router.post('/sales-orders/:id/attachments',
   authenticateToken,
-  requirePermission('CREATE_SALE'),
+  requirePermission('CREATE_SALES'),
   (req, res, next) => {
     req.params.type = 'sales-orders';
     next();
@@ -178,7 +178,7 @@ router.post('/sales-orders/:id/attachments',
  */
 router.post('/contracts/:id/attachments',
   authenticateToken,
-  requirePermission('CREATE_CONTRACT'),
+  requirePermission('CREATE_CONTRACTS'),
   (req, res, next) => {
     req.params.type = 'contracts';
     next();
@@ -324,7 +324,7 @@ router.post('/invoices/:id/attachment',
  */
 router.post('/receipts/:id/attachment',
   authenticateToken,
-  requirePermission('CREATE_EXPENSE'),
+  requirePermission('CREATE_FINANCE'),
   (req, res, next) => {
     req.params.type = 'receipts';
     next();
