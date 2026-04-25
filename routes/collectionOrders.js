@@ -9,6 +9,7 @@ const { uploadMultipleToS3, requireFiles } = require('../middleware/upload');
 const storageService = require('../services/storageService');
 const { collectionExpenseAttachments } = require('../repositories/AttachmentRepository');
 const Joi = require('joi');
+const { getNextSequence } = require('../utils/sequenceGenerator');
 
 const router = express.Router();
 
@@ -2177,7 +2178,11 @@ router.post('/:id/finalize-wcn',
         }
 
         // 3. AUTO-GENERATE PURCHASE ORDER from WCN
-        poNumber = `PO-${year}-${String(Date.now()).slice(-6)}`;
+        // Uses the same sequence table as manual POs — monthly sequence is continuous
+        // regardless of whether the PO was manually created or WCN-generated.
+        // If this transaction rolls back after this point, the PO number is burned (gap). Intentional.
+        const now = new Date();
+        poNumber = await getNextSequence(trx, 'PO', now.getFullYear(), now.getMonth() + 1);
 
         // Calculate PO totals
         const subtotal = items.reduce((sum, item) => sum + (item.totalValue || 0), 0);
