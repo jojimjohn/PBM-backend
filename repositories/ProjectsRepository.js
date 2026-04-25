@@ -17,7 +17,7 @@ class ProjectsRepository extends BaseRepository {
    * @param {Object} filters - Filter criteria
    * @param {Object} pagination - Pagination options
    */
-  async findAllWithDetails(filters = {}, pagination = {}) {
+  async findAllWithDetails(filters = {}, pagination = {}, userId = null) {
     try {
       const { page = 1, limit = 50, orderBy = 'created_at', orderDirection = 'desc' } = pagination;
       const offset = (page - 1) * limit;
@@ -31,6 +31,13 @@ class ProjectsRepository extends BaseRepository {
         )
         .leftJoin('users', 'projects.created_by', 'users.id')
         .where('projects.company_id', this.companyId);
+
+      // Non-admin users only see projects they're assigned to
+      if (userId) {
+        query = query.whereIn('projects.id',
+          this.db('user_projects').select('project_id').where('user_id', userId)
+        );
+      }
 
       // Apply filters
       if (filters.status) {
@@ -368,13 +375,21 @@ class ProjectsRepository extends BaseRepository {
   /**
    * Get project statistics
    */
-  async getStatistics() {
+  async getStatistics(userId = null) {
     try {
-      const stats = await this.db(this.tableName)
+      let query = this.db(this.tableName)
         .select('status')
         .count('* as count')
         .where('company_id', this.companyId)
         .groupBy('status');
+
+      if (userId) {
+        query = query.whereIn('id',
+          this.db('user_projects').select('project_id').where('user_id', userId)
+        );
+      }
+
+      const stats = await query;
 
       const total = stats.reduce((sum, s) => sum + parseInt(s.count), 0);
 

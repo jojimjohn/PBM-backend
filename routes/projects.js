@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const { getDbConnection } = require('../config/database');
 const { requirePermission } = require('../middleware/auth');
+const { hasPermission } = require('../config/permissionsHierarchy');
 const { validate, validateParams } = require('../middleware/validation');
 const { getRepositoryFactory } = require('../repositories/RepositoryFactory');
 const { uploadMultipleToS3, requireFiles } = require('../middleware/upload');
@@ -64,7 +65,11 @@ router.get('/', requirePermission('VIEW_PROJECTS'), async (req, res) => {
       orderDirection: req.query.orderDirection || 'desc'
     };
 
-    const result = await projectsRepository.findAllWithDetails(filters, pagination);
+    // Admins (MANAGE_SETTINGS = company_admin+) see all projects; others see only their assignments
+    const isAdmin = hasPermission(req.user.permissions || [], 'MANAGE_SETTINGS');
+    const scopedUserId = isAdmin ? null : req.user.userId;
+
+    const result = await projectsRepository.findAllWithDetails(filters, pagination, scopedUserId);
 
     winston.info('Projects retrieved', {
       companyId: req.user.companyId,
@@ -98,7 +103,9 @@ router.get('/statistics', requirePermission('VIEW_PROJECTS'), async (req, res) =
     const repositoryFactory = getRepositoryFactory(req.user.companyId);
     const projectsRepository = repositoryFactory.getProjectsRepository();
 
-    const stats = await projectsRepository.getStatistics();
+    const isAdmin = hasPermission(req.user.permissions || [], 'MANAGE_SETTINGS');
+    const scopedUserId = isAdmin ? null : req.user.userId;
+    const stats = await projectsRepository.getStatistics(scopedUserId);
 
     res.json({
       success: true,
@@ -160,6 +167,18 @@ router.get('/:id', requirePermission('VIEW_PROJECTS'), async (req, res) => {
         success: false,
         error: 'Project not found'
       });
+    }
+
+    // Non-admins can only view projects they're assigned to
+    const isAdmin = hasPermission(req.user.permissions || [], 'MANAGE_SETTINGS');
+    if (!isAdmin) {
+      const hasAccess = await projectsRepository.hasUserAccess(parseInt(req.params.id), req.user.userId);
+      if (!hasAccess) {
+        return res.status(403).json({
+          success: false,
+          error: 'You do not have access to this project'
+        });
+      }
     }
 
     res.json({
