@@ -432,9 +432,12 @@ router.put('/:id', requirePermission('MANAGE_ROLES'), async (req, res) => {
       is_active
     } = req.body;
 
-    // Get existing role
+    // Get existing role (match company roles or system roles)
     const existingRole = await db('roles')
-      .where({ id, company_id: companyId })
+      .where('id', id)
+      .where(function() {
+        this.where('company_id', companyId).orWhereNull('company_id');
+      })
       .first();
 
     if (!existingRole) {
@@ -444,15 +447,25 @@ router.put('/:id', requirePermission('MANAGE_ROLES'), async (req, res) => {
       });
     }
 
-    // Block editing system roles (super_admin, company_admin)
-    if (existingRole.is_system) {
+    // Only block editing the super_admin role entirely
+    if (existingRole.is_system && existingRole.slug === 'super_admin') {
       return res.status(403).json({
         success: false,
-        error: 'System roles cannot be modified'
+        error: 'The super admin role cannot be modified'
       });
     }
 
-    // Check hierarchy: can only edit roles below user's level
+    // For other system roles: allow permission updates but block name changes
+    if (existingRole.is_system) {
+      if (name !== undefined && name !== existingRole.name) {
+        return res.status(403).json({
+          success: false,
+          error: 'Cannot change the name of a system role'
+        });
+      }
+    }
+
+    // Check hierarchy: can only edit roles below user's level (skip for system roles)
     // Include system roles (company_id IS NULL) for proper hierarchy lookup
     const userRole = await db('roles')
       .where({ id: req.user.roleId })
@@ -461,7 +474,7 @@ router.put('/:id', requirePermission('MANAGE_ROLES'), async (req, res) => {
       })
       .first();
 
-    if (userRole && existingRole.hierarchy_level >= userRole.hierarchy_level) {
+    if (!existingRole.is_system && userRole && existingRole.hierarchy_level >= userRole.hierarchy_level) {
       return res.status(403).json({
         success: false,
         error: 'Cannot modify a role at or above your hierarchy level'
@@ -511,7 +524,7 @@ router.put('/:id', requirePermission('MANAGE_ROLES'), async (req, res) => {
       updates.permissions = JSON.stringify(permissions);
     }
 
-    if (hierarchy_level !== undefined) {
+    if (hierarchy_level !== undefined && !existingRole.is_system) {
       if (hierarchy_level < 1 || hierarchy_level > 8) {
         return res.status(400).json({
           success: false,
