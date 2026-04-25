@@ -86,8 +86,6 @@ const bulkExpenseSchema = Joi.object({
   totalAmount: Joi.number().min(0).precision(3).required()
 });
 
-/**
-
 // GET /api/expenses - List all expenses with filtering
 router.get('/', requirePermission('VIEW_FINANCE'), projectFilter, async (req, res) => {
   try {
