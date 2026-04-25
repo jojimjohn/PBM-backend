@@ -13,31 +13,6 @@ const router = express.Router();
 // Apply sanitization to all routes
 router.use(sanitize);
 
-/**
- * Check if user has permission to access a contract resource
- * @param {object} contract - The contract object (must have 'createdBy' field)
- * @param {number} userId - The requesting user's ID
- * @param {array} permissions - The user's permissions array
- * @param {string} permissionType - Type of permission ('EDIT', 'DELETE', 'VIEW')
- * @returns {boolean} - True if user has access, false otherwise
- */
-const checkContractOwnership = (contract, userId, permissions, permissionType = 'EDIT') => {
-  const { hasPermission } = require('../config/permissionsHierarchy');
-
-  // If user has the _ALL variant, they can access any contract
-  const allPermission = `${permissionType}_CONTRACTS_ALL`;
-  if (hasPermission(permissions, allPermission)) {
-    return true;
-  }
-
-  // If user has the _OWN variant, check ownership
-  const ownPermission = `${permissionType}_CONTRACTS_OWN`;
-  if (hasPermission(permissions, ownPermission)) {
-    return contract.createdBy === userId;
-  }
-
-  return false;
-};
 
 /**
  * Compute effective contract status based on dates
@@ -208,7 +183,6 @@ router.get('/', requirePermission('VIEW_CONTRACTS'), async (req, res) => {
   try {
     const { companyId, userId, permissions } = req.user;
     const db = getDbConnection(companyId);
-    const { hasPermission } = require('../config/permissionsHierarchy');
 
     const {
       page = 1,
@@ -228,11 +202,6 @@ router.get('/', requirePermission('VIEW_CONTRACTS'), async (req, res) => {
         'suppliers.specialization as supplierBusinessType',
         'contracts.status'
       );
-
-    // Apply ownership filtering if user only has VIEW_CONTRACTS_OWN permission
-    if (!hasPermission(permissions, 'VIEW_CONTRACTS_ALL')) {
-      query = query.where('contracts.createdBy', userId);
-    }
 
     // Search filter
     if (search) {
@@ -345,21 +314,6 @@ router.get('/:id',
         });
       }
 
-      // Check ownership
-      if (!checkContractOwnership(contract, userId, permissions, 'VIEW')) {
-        auditLog('PERMISSION_DENIED', userId, {
-          reason: 'Attempted to view another user\'s contract',
-          contractId: id,
-          contractCreatedBy: contract.createdBy,
-          requestedBy: userId
-        });
-
-        return res.status(403).json({
-          success: false,
-          error: 'You can only view your own contracts'
-        });
-      }
-
       // Get contract location rates (include isActive status for frontend filtering)
       const rates = await db('contract_location_rates')
         .leftJoin('materials', 'contract_location_rates.materialId', 'materials.id')
@@ -444,21 +398,6 @@ router.get('/:contractId/locations/:locationId/materials',
         return res.status(404).json({
           success: false,
           error: 'Contract not found'
-        });
-      }
-
-      // Check ownership
-      if (!checkContractOwnership(contract, userId, permissions, 'VIEW')) {
-        auditLog('PERMISSION_DENIED', userId, {
-          reason: 'Attempted to view materials from another user\'s contract',
-          contractId: contractId,
-          contractCreatedBy: contract.createdBy,
-          requestedBy: userId
-        });
-
-        return res.status(403).json({
-          success: false,
-          error: 'You can only view materials from your own contracts'
         });
       }
 
@@ -697,21 +636,6 @@ router.post('/:id/rates',
         });
       }
 
-      // Check ownership
-      if (!checkContractOwnership(contract, userId, permissions, 'EDIT')) {
-        auditLog('PERMISSION_DENIED', userId, {
-          reason: 'Attempted to add rates to another user\'s contract',
-          contractId: id,
-          contractCreatedBy: contract.createdBy,
-          requestedBy: userId
-        });
-
-        return res.status(403).json({
-          success: false,
-          error: 'You can only add rates to your own contracts'
-        });
-      }
-
       // Verify material exists
       const material = await db('materials')
         .where({ id: req.body.materialId, isActive: true })
@@ -813,21 +737,6 @@ router.get('/:id/pricing/:materialId',
         });
       }
 
-      // Check ownership
-      if (!checkContractOwnership(contract, userId, permissions, 'VIEW')) {
-        auditLog('PERMISSION_DENIED', userId, {
-          reason: 'Attempted to view pricing from another user\'s contract',
-          contractId: id,
-          contractCreatedBy: contract.createdBy,
-          requestedBy: userId
-        });
-
-        return res.status(403).json({
-          success: false,
-          error: 'You can only view pricing from your own contracts'
-        });
-      }
-
       const rate = await db('contract_rates')
         .leftJoin('materials', 'contract_rates.materialId', 'materials.id')
         .select(
@@ -891,21 +800,6 @@ router.put('/:id',
         return res.status(404).json({
           success: false,
           error: 'Contract not found'
-        });
-      }
-
-      // Check ownership
-      if (!checkContractOwnership(existingContract, userId, permissions, 'EDIT')) {
-        auditLog('PERMISSION_DENIED', userId, {
-          reason: 'Attempted to edit another user\'s contract',
-          contractId: id,
-          contractCreatedBy: existingContract.createdBy,
-          requestedBy: userId
-        });
-
-        return res.status(403).json({
-          success: false,
-          error: 'You can only edit your own contracts'
         });
       }
 
@@ -1023,21 +917,6 @@ router.put('/:id/pricing/:materialId',
         return res.status(404).json({
           success: false,
           error: 'Contract not found'
-        });
-      }
-
-      // Check ownership
-      if (!checkContractOwnership(contract, userId, permissions, 'EDIT')) {
-        auditLog('PERMISSION_DENIED', userId, {
-          reason: 'Attempted to update pricing for another user\'s contract',
-          contractId: id,
-          contractCreatedBy: contract.createdBy,
-          requestedBy: userId
-        });
-
-        return res.status(403).json({
-          success: false,
-          error: 'You can only update pricing for your own contracts'
         });
       }
 
@@ -1169,30 +1048,6 @@ router.post('/:id/attachments',
         });
       }
 
-      // Check ownership
-      if (!checkContractOwnership(contract, userId, permissions, 'EDIT')) {
-        // Delete uploaded S3 files if permission check fails
-        if (req.files && req.files.length > 0) {
-          await Promise.all(req.files.map(file =>
-            storageService.deleteFile(file.key).catch(err =>
-              logger.warn('Failed to delete unauthorized contract attachment', { key: file.key })
-            )
-          ));
-        }
-
-        auditLog('PERMISSION_DENIED', userId, {
-          reason: 'Attempted to upload attachments to another user\'s contract',
-          contractId: id,
-          contractCreatedBy: contract.createdBy,
-          requestedBy: userId
-        });
-
-        return res.status(403).json({
-          success: false,
-          error: 'You can only upload attachments to your own contracts'
-        });
-      }
-
       // Save attachment metadata to database
       const savedAttachments = [];
       for (const file of req.files) {
@@ -1251,21 +1106,6 @@ router.get('/:id/attachments',
         return res.status(404).json({
           success: false,
           error: 'Contract not found'
-        });
-      }
-
-      // Check ownership
-      if (!checkContractOwnership(contract, userId, permissions, 'VIEW')) {
-        auditLog('PERMISSION_DENIED', userId, {
-          reason: 'Attempted to view attachments of another user\'s contract',
-          contractId: id,
-          contractCreatedBy: contract.createdBy,
-          requestedBy: userId
-        });
-
-        return res.status(403).json({
-          success: false,
-          error: 'You can only view attachments of your own contracts'
         });
       }
 
@@ -1328,21 +1168,6 @@ router.delete('/:id/attachments/:fileId',
         return res.status(404).json({
           success: false,
           error: 'Contract not found'
-        });
-      }
-
-      // Check ownership
-      if (!checkContractOwnership(contract, userId, permissions, 'EDIT')) {
-        auditLog('PERMISSION_DENIED', userId, {
-          reason: 'Attempted to delete attachment from another user\'s contract',
-          contractId: id,
-          contractCreatedBy: contract.createdBy,
-          requestedBy: userId
-        });
-
-        return res.status(403).json({
-          success: false,
-          error: 'You can only delete attachments from your own contracts'
         });
       }
 

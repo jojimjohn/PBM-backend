@@ -55,37 +55,10 @@ function generateWastageNumber(companyId) {
   return `${prefix}-${timestamp}`;
 }
 
-/**
- * Check if user has permission to access a wastage resource
- * @param {object} wastage - The wastage object (must have 'reportedBy' field)
- * @param {number} userId - The requesting user's ID
- * @param {array} permissions - The user's permissions array
- * @param {string} permissionType - Type of permission ('EDIT', 'DELETE', 'VIEW')
- * @returns {boolean} - True if user has access, false otherwise
- */
-const checkWastageOwnership = (wastage, userId, permissions, permissionType = 'EDIT') => {
-  const { hasPermission } = require('../config/permissionsHierarchy');
-
-  // If user has the _ALL variant, they can access any wastage
-  const allPermission = `${permissionType}_WASTAGE_ALL`;
-  if (hasPermission(permissions, allPermission)) {
-    return true;
-  }
-
-  // If user has the _OWN variant, check ownership
-  const ownPermission = `${permissionType}_WASTAGE_OWN`;
-  if (hasPermission(permissions, ownPermission)) {
-    return wastage.reportedBy === userId;
-  }
-
-  return false;
-};
-
 // GET /wastages - List all wastages with filtering and pagination
 router.get('/', requirePermission('VIEW_WASTAGE'), projectFilter, async (req, res) => {
   try {
     const { companyId, userId, permissions } = req.user;
-    const { hasPermission } = require('../config/permissionsHierarchy');
     const repositoryFactory = getRepositoryFactory(companyId);
     const wastageRepository = repositoryFactory.getWastagesRepository();
 
@@ -99,11 +72,6 @@ router.get('/', requirePermission('VIEW_WASTAGE'), projectFilter, async (req, re
       // Project filtering
       projectFilter: req.projectFilter
     };
-
-    // Apply ownership filtering if user only has VIEW_WASTAGE_OWN permission
-    if (!hasPermission(permissions, 'VIEW_WASTAGE_ALL')) {
-      filters.reportedBy = userId;
-    }
 
     const pagination = {
       page: req.query.page || 1,
@@ -211,21 +179,6 @@ router.get('/:id', requirePermission('VIEW_WASTAGE'), async (req, res) => {
       return res.status(404).json({
         success: false,
         error: 'Wastage not found'
-      });
-    }
-
-    // Check ownership permission
-    if (!checkWastageOwnership(wastage, userId, permissions, 'VIEW')) {
-      auditLog('PERMISSION_DENIED', userId, {
-        reason: 'Attempted to view another user\'s wastage',
-        wastageId: id,
-        wastageReportedBy: wastage.reportedBy,
-        requestedBy: userId
-      });
-
-      return res.status(403).json({
-        success: false,
-        error: 'You can only view your own wastage records'
       });
     }
 
@@ -409,21 +362,6 @@ router.put('/:id',
         });
       }
 
-      // Check ownership permission
-      if (!checkWastageOwnership(existingWastage, userId, permissions, 'EDIT')) {
-        auditLog('PERMISSION_DENIED', userId, {
-          reason: 'Attempted to edit another user\'s wastage',
-          wastageId: id,
-          wastageReportedBy: existingWastage.reportedBy,
-          requestedBy: userId
-        });
-
-        return res.status(403).json({
-          success: false,
-          error: 'You can only edit your own wastage records'
-        });
-      }
-
       if (existingWastage.status !== 'pending') {
         return res.status(400).json({
           success: false,
@@ -591,21 +529,6 @@ router.post('/:id/amend',
         });
       }
 
-      // Check ownership permission
-      if (!checkWastageOwnership(existingWastage, userId, permissions, 'EDIT')) {
-        auditLog('PERMISSION_DENIED', userId, {
-          reason: 'Attempted to amend another user\'s wastage',
-          wastageId: id,
-          wastageReportedBy: existingWastage.reportedBy,
-          requestedBy: userId
-        });
-
-        return res.status(403).json({
-          success: false,
-          error: 'You can only amend your own wastage records'
-        });
-      }
-
       // Process amendment with differential inventory adjustment
       const result = await txnManager.processWastageAmendment(
         parseInt(id),
@@ -670,21 +593,6 @@ router.delete('/:id', requirePermission('DELETE_WASTAGE'), async (req, res) => {
       });
     }
 
-    // Check ownership permission
-    if (!checkWastageOwnership(existingWastage, userId, permissions, 'DELETE')) {
-      auditLog('PERMISSION_DENIED', userId, {
-        reason: 'Attempted to delete another user\'s wastage',
-        wastageId: id,
-        wastageReportedBy: existingWastage.reportedBy,
-        requestedBy: userId
-      });
-
-      return res.status(403).json({
-        success: false,
-        error: 'You can only delete your own wastage records'
-      });
-    }
-
     // Only approved wastages cannot be deleted (they should be amended instead)
     // Pending and rejected wastages can be deleted
     if (existingWastage.status === 'approved') {
@@ -727,7 +635,6 @@ router.delete('/:id', requirePermission('DELETE_WASTAGE'), async (req, res) => {
 router.get('/analytics/summary', requirePermission('VIEW_WASTAGE'), async (req, res) => {
   try {
     const { companyId, userId, permissions } = req.user;
-    const { hasPermission } = require('../config/permissionsHierarchy');
     const repositoryFactory = getRepositoryFactory(companyId);
     const wastageRepository = repositoryFactory.getWastagesRepository();
 
@@ -736,11 +643,6 @@ router.get('/analytics/summary', requirePermission('VIEW_WASTAGE'), async (req, 
       dateTo: req.query.dateTo,
       materialId: req.query.materialId
     };
-
-    // Apply ownership filtering if user only has VIEW_WASTAGE_OWN permission
-    if (!hasPermission(permissions, 'VIEW_WASTAGE_ALL')) {
-      filters.reportedBy = userId;
-    }
 
     const analytics = await wastageRepository.getAnalytics(filters);
     
@@ -800,30 +702,6 @@ router.post('/:id/attachments',
         return res.status(404).json({
           success: false,
           error: 'Wastage record not found'
-        });
-      }
-
-      // Check ownership permission - delete uploaded files if user lacks permission
-      if (!checkWastageOwnership(wastage, userId, permissions, 'EDIT')) {
-        // Clean up uploaded files if user lacks permission
-        if (req.files && req.files.length > 0) {
-          await Promise.all(req.files.map(file =>
-            storageService.deleteFile(file.key).catch(err =>
-              winston.warn('Failed to delete unauthorized wastage attachment', { key: file.key })
-            )
-          ));
-        }
-
-        auditLog('PERMISSION_DENIED', userId, {
-          reason: 'Attempted to upload attachments to another user\'s wastage',
-          wastageId: id,
-          wastageReportedBy: wastage.reportedBy,
-          requestedBy: userId
-        });
-
-        return res.status(403).json({
-          success: false,
-          error: 'You can only add attachments to your own wastage records'
         });
       }
 
@@ -888,21 +766,6 @@ router.get('/:id/attachments',
         });
       }
 
-      // Check ownership permission
-      if (!checkWastageOwnership(wastage, userId, permissions, 'VIEW')) {
-        auditLog('PERMISSION_DENIED', userId, {
-          reason: 'Attempted to view attachments of another user\'s wastage',
-          wastageId: id,
-          wastageReportedBy: wastage.reportedBy,
-          requestedBy: userId
-        });
-
-        return res.status(403).json({
-          success: false,
-          error: 'You can only view attachments of your own wastage records'
-        });
-      }
-
       // Get attachments from repository
       const attachments = await wastageAttachments.findByEntity(db, id);
 
@@ -963,21 +826,6 @@ router.delete('/:id/attachments/:fileId',
         return res.status(404).json({
           success: false,
           error: 'Wastage record not found'
-        });
-      }
-
-      // Check ownership permission
-      if (!checkWastageOwnership(wastage, userId, permissions, 'EDIT')) {
-        auditLog('PERMISSION_DENIED', userId, {
-          reason: 'Attempted to delete attachment from another user\'s wastage',
-          wastageId: id,
-          wastageReportedBy: wastage.reportedBy,
-          requestedBy: userId
-        });
-
-        return res.status(403).json({
-          success: false,
-          error: 'You can only delete attachments from your own wastage records'
         });
       }
 

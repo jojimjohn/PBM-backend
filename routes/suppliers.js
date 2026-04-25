@@ -13,32 +13,6 @@ const router = express.Router();
 // Apply sanitization to all routes
 router.use(sanitize);
 
-/**
- * Check if user has permission to access a supplier
- * @param {object} supplier - The supplier object (must have 'createdBy' field)
- * @param {number} userId - The requesting user's ID
- * @param {array} permissions - The user's permissions array
- * @param {string} permissionType - Type of permission ('EDIT', 'DELETE', 'VIEW')
- * @returns {boolean} - True if user has access, false otherwise
- */
-const checkSupplierOwnership = (supplier, userId, permissions, permissionType = 'EDIT') => {
-  const { hasPermission } = require('../config/permissionsHierarchy');
-
-  // If user has the _ALL variant, they can access any supplier
-  const allPermission = `${permissionType}_SUPPLIERS_ALL`;
-  if (hasPermission(permissions, allPermission)) {
-    return true;
-  }
-
-  // If user has the _OWN variant, check ownership
-  const ownPermission = `${permissionType}_SUPPLIERS_OWN`;
-  if (hasPermission(permissions, ownPermission)) {
-    return supplier.createdBy === userId;
-  }
-
-  return false;
-};
-
 // Supplier validation schema - Based on UPDATED database schema
 const supplierSchema = Joi.object({
   // Core fields that exist in database
@@ -107,7 +81,6 @@ router.get('/', requirePermission('VIEW_SUPPLIERS'), async (req, res) => {
   try {
     const { companyId, userId, permissions } = req.user;
     const db = getDbConnection(companyId);
-    const { hasPermission } = require('../config/permissionsHierarchy');
 
     const {
       page = 1,
@@ -120,11 +93,6 @@ router.get('/', requirePermission('VIEW_SUPPLIERS'), async (req, res) => {
     const offset = (page - 1) * limit;
 
     let query = db('suppliers').select('*');
-
-    // Apply ownership filtering if user only has VIEW_SUPPLIERS_OWN permission
-    if (!hasPermission(permissions, 'VIEW_SUPPLIERS_ALL')) {
-      query = query.where('createdBy', userId);
-    }
 
     // Search filter
     if (search) {
@@ -204,21 +172,6 @@ router.get('/:id',
         return res.status(404).json({
           success: false,
           error: 'Supplier not found'
-        });
-      }
-
-      // Check ownership
-      if (!checkSupplierOwnership(supplier, userId, permissions, 'VIEW')) {
-        auditLog('PERMISSION_DENIED', userId, {
-          reason: 'Attempted to view another user\'s supplier',
-          supplierId: id,
-          supplierCreatedBy: supplier.createdBy,
-          requestedBy: userId
-        });
-
-        return res.status(403).json({
-          success: false,
-          error: 'You can only view your own suppliers'
         });
       }
 
@@ -422,21 +375,6 @@ router.put('/:id',
         });
       }
 
-      // Check ownership
-      if (!checkSupplierOwnership(existingSupplier, userId, permissions, 'EDIT')) {
-        auditLog('PERMISSION_DENIED', userId, {
-          reason: 'Attempted to edit another user\'s supplier',
-          supplierId: id,
-          supplierCreatedBy: existingSupplier.createdBy,
-          requestedBy: userId
-        });
-
-        return res.status(403).json({
-          success: false,
-          error: 'You can only edit your own suppliers'
-        });
-      }
-
       // Check if email is being changed to an existing one
       if (req.body.email && req.body.email !== existingSupplier.email) {
         const duplicateSupplier = await db('suppliers')
@@ -540,21 +478,6 @@ router.delete('/:id',
         return res.status(404).json({
           success: false,
           error: 'Supplier not found'
-        });
-      }
-
-      // Check ownership
-      if (!checkSupplierOwnership(supplier, userId, permissions, 'DELETE')) {
-        auditLog('PERMISSION_DENIED', userId, {
-          reason: 'Attempted to delete another user\'s supplier',
-          supplierId: id,
-          supplierCreatedBy: supplier.createdBy,
-          requestedBy: userId
-        });
-
-        return res.status(403).json({
-          success: false,
-          error: 'You can only delete your own suppliers'
         });
       }
 
@@ -678,30 +601,6 @@ router.post('/:id/attachments',
         });
       }
 
-      // Check ownership
-      if (!checkSupplierOwnership(supplier, userId, permissions, 'EDIT')) {
-        // Delete uploaded S3 files if permission check fails
-        if (req.files && req.files.length > 0) {
-          await Promise.all(req.files.map(file =>
-            storageService.deleteFile(file.key).catch(err =>
-              logger.warn('Failed to delete unauthorized supplier attachment', { key: file.key })
-            )
-          ));
-        }
-
-        auditLog('PERMISSION_DENIED', userId, {
-          reason: 'Attempted to upload attachments to another user\'s supplier',
-          supplierId: id,
-          supplierCreatedBy: supplier.createdBy,
-          requestedBy: userId
-        });
-
-        return res.status(403).json({
-          success: false,
-          error: 'You can only upload attachments to your own suppliers'
-        });
-      }
-
       // Save attachment metadata to database
       const savedAttachments = [];
       for (const file of req.files) {
@@ -760,21 +659,6 @@ router.get('/:id/attachments',
         return res.status(404).json({
           success: false,
           error: 'Supplier not found'
-        });
-      }
-
-      // Check ownership
-      if (!checkSupplierOwnership(supplier, userId, permissions, 'VIEW')) {
-        auditLog('PERMISSION_DENIED', userId, {
-          reason: 'Attempted to view attachments from another user\'s supplier',
-          supplierId: id,
-          supplierCreatedBy: supplier.createdBy,
-          requestedBy: userId
-        });
-
-        return res.status(403).json({
-          success: false,
-          error: 'You can only view attachments from your own suppliers'
         });
       }
 
@@ -837,21 +721,6 @@ router.delete('/:id/attachments/:fileId',
         return res.status(404).json({
           success: false,
           error: 'Supplier not found'
-        });
-      }
-
-      // Check ownership
-      if (!checkSupplierOwnership(supplier, userId, permissions, 'EDIT')) {
-        auditLog('PERMISSION_DENIED', userId, {
-          reason: 'Attempted to delete attachment from another user\'s supplier',
-          supplierId: id,
-          supplierCreatedBy: supplier.createdBy,
-          requestedBy: userId
-        });
-
-        return res.status(403).json({
-          success: false,
-          error: 'You can only delete attachments from your own suppliers'
         });
       }
 

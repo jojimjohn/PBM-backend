@@ -17,32 +17,6 @@ const router = express.Router();
 // Apply sanitization to all routes
 router.use(sanitize);
 
-/**
- * Check if user has permission to access a sales order
- * @param {object} order - The sales order object
- * @param {number} userId - The requesting user's ID
- * @param {array} permissions - The user's permissions array
- * @param {string} permissionType - Type of permission ('EDIT', 'DELETE', 'VIEW')
- * @returns {boolean} - True if user has access, false otherwise
- */
-const checkOrderOwnership = (order, userId, permissions, permissionType = 'EDIT') => {
-  const { hasPermission } = require('../config/permissionsHierarchy');
-
-  // If user has the _ALL variant, they can access any order
-  const allPermission = `${permissionType}_SALES_ALL`;
-  if (hasPermission(permissions, allPermission)) {
-    return true;
-  }
-
-  // If user has the _OWN variant, check ownership
-  const ownPermission = `${permissionType}_SALES_OWN`;
-  if (hasPermission(permissions, ownPermission)) {
-    return order.createdBy === userId;
-  }
-
-  return false;
-};
-
 // Sales order validation schema
 const salesOrderSchema = Joi.object({
   customerId: Joi.number().integer().positive().optional(), // Optional if customer object provided
@@ -298,7 +272,6 @@ router.get('/', requirePermission('VIEW_SALES'), projectFilter, async (req, res)
   try {
     const { companyId, userId, permissions } = req.user;
     const db = getDbConnection(companyId);
-    const { hasPermission } = require('../config/permissionsHierarchy');
 
     const {
       page = 1,
@@ -320,11 +293,6 @@ router.get('/', requirePermission('VIEW_SALES'), projectFilter, async (req, res)
         'customers.customerType',
         db.raw('(SELECT COUNT(*) FROM sales_order_items WHERE sales_order_items.salesOrderId = sales_orders.id) as itemCount')
       );
-
-    // Apply ownership filtering if user only has VIEW_SALES_OWN permission
-    if (!hasPermission(permissions, 'VIEW_SALES_ALL')) {
-      query = query.where('sales_orders.createdBy', userId);
-    }
 
     // Apply project-based filtering
     query = applyProjectFilter(query, req.projectFilter, 'sales_orders.project_id');
@@ -403,9 +371,8 @@ router.get('/', requirePermission('VIEW_SALES'), projectFilter, async (req, res)
 // GET /api/sales-orders/today-summary - Get today's sales summary
 router.get('/today-summary', requirePermission('VIEW_SALES'), async (req, res) => {
   try {
-    const { companyId, userId, permissions } = req.user;
+    const { companyId, userId } = req.user;
     const db = getDbConnection(companyId);
-    const { hasPermission } = require('../config/permissionsHierarchy');
 
     // Get today's date range
     const today = new Date();
@@ -413,7 +380,7 @@ router.get('/today-summary', requirePermission('VIEW_SALES'), async (req, res) =
     const todayEnd = new Date(todayStart);
     todayEnd.setDate(todayEnd.getDate() + 1);
 
-    // Build query with ownership filtering
+    // Build query
     let query = db('sales_orders')
       .select(
         db.raw('COUNT(*) as totalOrders'),
@@ -422,11 +389,6 @@ router.get('/today-summary', requirePermission('VIEW_SALES'), async (req, res) =
       )
       .where('orderDate', '>=', todayStart)
       .where('orderDate', '<', todayEnd);
-
-    // Apply ownership filtering if user only has VIEW_SALES_OWN permission
-    if (!hasPermission(permissions, 'VIEW_SALES_ALL')) {
-      query = query.where('createdBy', userId);
-    }
 
     const summary = await query.first();
 
@@ -488,21 +450,6 @@ router.get('/:id',
         return res.status(404).json({
           success: false,
           error: 'Sales order not found'
-        });
-      }
-
-      // Check ownership permission
-      if (!checkOrderOwnership(order, userId, permissions, 'VIEW')) {
-        auditLog('PERMISSION_DENIED', userId, {
-          reason: 'Attempted to view another user\'s sales order',
-          salesOrderId: id,
-          orderCreatedBy: order.createdBy,
-          requestedBy: userId
-        });
-
-        return res.status(403).json({
-          success: false,
-          error: 'You can only view your own sales orders'
         });
       }
 
@@ -758,21 +705,6 @@ router.put('/:id',
         });
       }
 
-      // Ownership check: verify user has permission to edit this order
-      if (!checkOrderOwnership(existingOrder, userId, permissions, 'EDIT')) {
-        auditLog('PERMISSION_DENIED', userId, {
-          reason: 'Attempted to edit another user\'s sales order',
-          salesOrderId: id,
-          orderCreatedBy: existingOrder.createdBy,
-          requestedBy: userId
-        });
-
-        return res.status(403).json({
-          success: false,
-          error: 'You can only edit your own sales orders'
-        });
-      }
-
       // Extract items and other frontend-only fields
       const {
         items,
@@ -927,21 +859,6 @@ router.post('/:id/items',
         });
       }
 
-      // Ownership check: verify user has permission to edit this order
-      if (!checkOrderOwnership(order, userId, permissions, 'EDIT')) {
-        auditLog('PERMISSION_DENIED', userId, {
-          reason: 'Attempted to add items to another user\'s sales order',
-          salesOrderId: id,
-          orderCreatedBy: order.createdBy,
-          requestedBy: userId
-        });
-
-        return res.status(403).json({
-          success: false,
-          error: 'You can only modify your own sales orders'
-        });
-      }
-
       // Verify material exists
       const material = await db('materials')
         .where({ id: req.body.materialId })
@@ -1057,21 +974,6 @@ router.put('/:id/status',
         return res.status(404).json({
           success: false,
           error: 'Sales order not found'
-        });
-      }
-
-      // Ownership check: verify user has permission to edit this order
-      if (!checkOrderOwnership(order, userId, permissions, 'EDIT')) {
-        auditLog('PERMISSION_DENIED', userId, {
-          reason: 'Attempted to change status of another user\'s sales order',
-          salesOrderId: id,
-          orderCreatedBy: order.createdBy,
-          requestedBy: userId
-        });
-
-        return res.status(403).json({
-          success: false,
-          error: 'You can only modify your own sales orders'
         });
       }
 
@@ -1440,30 +1342,6 @@ router.post('/:id/attachments',
         });
       }
 
-      // Ownership check: verify user has permission to edit this order
-      if (!checkOrderOwnership(salesOrder, userId, permissions, 'EDIT')) {
-        // Delete uploaded S3 files if user lacks permission
-        if (req.files && req.files.length > 0) {
-          await Promise.all(req.files.map(file =>
-            storageService.deleteFile(file.key).catch(err =>
-              logger.warn('Failed to delete unauthorized S3 file', { key: file.key })
-            )
-          ));
-        }
-
-        auditLog('PERMISSION_DENIED', userId, {
-          reason: 'Attempted to upload attachments to another user\'s sales order',
-          salesOrderId: id,
-          orderCreatedBy: salesOrder.createdBy,
-          requestedBy: userId
-        });
-
-        return res.status(403).json({
-          success: false,
-          error: 'You can only modify your own sales orders'
-        });
-      }
-
       // Check if files were uploaded
       if (!req.files || req.files.length === 0) {
         return res.status(400).json({
@@ -1562,21 +1440,6 @@ router.get('/:id/attachments',
         });
       }
 
-      // Check ownership permission
-      if (!checkOrderOwnership(salesOrder, userId, permissions, 'VIEW')) {
-        auditLog('PERMISSION_DENIED', userId, {
-          reason: 'Attempted to view attachments of another user\'s sales order',
-          salesOrderId: id,
-          orderCreatedBy: salesOrder.createdBy,
-          requestedBy: userId
-        });
-
-        return res.status(403).json({
-          success: false,
-          error: 'You can only view attachments of your own sales orders'
-        });
-      }
-
       // Get all attachments for this sales order
       const attachments = await salesOrderAttachments.findByReferenceId(db, id);
 
@@ -1638,21 +1501,6 @@ router.delete('/:id/attachments/:fileId',
         return res.status(404).json({
           success: false,
           error: 'Sales order not found'
-        });
-      }
-
-      // Ownership check: verify user has permission to edit this order
-      if (!checkOrderOwnership(salesOrder, userId, permissions, 'EDIT')) {
-        auditLog('PERMISSION_DENIED', userId, {
-          reason: 'Attempted to delete attachment from another user\'s sales order',
-          salesOrderId: id,
-          orderCreatedBy: salesOrder.createdBy,
-          requestedBy: userId
-        });
-
-        return res.status(403).json({
-          success: false,
-          error: 'You can only modify your own sales orders'
         });
       }
 

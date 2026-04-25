@@ -14,23 +14,6 @@ const { logger } = require('../utils/logger');
  * @param {string} permissionType - Type of permission ('VIEW', 'EDIT', 'DELETE')
  * @returns {boolean} - Whether the user has permission
  */
-const checkPOExpenseOwnership = (expense, userId, permissions, permissionType = 'EDIT') => {
-  const { hasPermission } = require('../config/permissionsHierarchy');
-
-  // Check if user has ALL permission
-  const allPermission = `${permissionType}_PO_EXPENSES_ALL`;
-  if (hasPermission(permissions, allPermission)) {
-    return true;
-  }
-
-  // Check if user has OWN permission and owns the expense
-  const ownPermission = `${permissionType}_PO_EXPENSES_OWN`;
-  if (hasPermission(permissions, ownPermission)) {
-    return expense.createdBy === userId;
-  }
-
-  return false;
-};
 
 /**
  * Audit permission denial for security monitoring
@@ -266,21 +249,6 @@ router.put('/expenses/:expenseId',
         });
       }
 
-      // Check ownership
-      if (!checkPOExpenseOwnership(expense, userId, permissions, 'EDIT')) {
-        auditPermissionDenial('PERMISSION_DENIED', userId, {
-          action: 'EDIT_PO_EXPENSE',
-          reason: 'Attempted to edit another user\'s PO expense',
-          expenseId,
-          expenseCreatedBy: expense.createdBy,
-          requestedBy: userId
-        });
-        return res.status(403).json({
-          success: false,
-          error: 'You can only edit your own PO expenses'
-        });
-      }
-
       // Validate category against expense_categories table
       const categoryValidation = await validateCategoryCode(db, req.body.category, companyId);
       if (!categoryValidation.valid) {
@@ -363,21 +331,6 @@ router.delete('/expenses/:expenseId',
         return res.status(404).json({
           success: false,
           error: 'Expense not found'
-        });
-      }
-
-      // Check ownership
-      if (!checkPOExpenseOwnership(expense, userId, permissions, 'DELETE')) {
-        auditPermissionDenial('PERMISSION_DENIED', userId, {
-          action: 'DELETE_PO_EXPENSE',
-          reason: 'Attempted to delete another user\'s PO expense',
-          expenseId,
-          expenseCreatedBy: expense.createdBy,
-          requestedBy: userId
-        });
-        return res.status(403).json({
-          success: false,
-          error: 'You can only delete your own PO expenses'
         });
       }
 

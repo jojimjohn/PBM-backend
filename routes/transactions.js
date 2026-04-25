@@ -6,25 +6,6 @@ const { validate } = require('../middleware/validation');
 const Joi = require('joi');
 const winston = require('winston');
 
-// Helper function to check transaction ownership
-const checkTransactionOwnership = (transaction, userId, permissions, permissionType = 'EDIT') => {
-  const { hasPermission } = require('../config/permissionsHierarchy');
-
-  // Check if user has permission for ALL transactions
-  const allPermission = `${permissionType}_TRANSACTIONS_ALL`;
-  if (hasPermission(permissions, allPermission)) {
-    return true;
-  }
-
-  // Check if user has permission for OWN transactions and owns this transaction
-  const ownPermission = `${permissionType}_TRANSACTIONS_OWN`;
-  if (hasPermission(permissions, ownPermission)) {
-    return transaction.createdBy === userId;
-  }
-
-  return false;
-};
-
 // Audit logging helper
 const auditLog = (action, userId, details) => {
   winston.warn('RBAC Audit Log', {
@@ -80,7 +61,6 @@ router.get('/', requireAnyPermission(['VIEW_FINANCE', 'VIEW_INVENTORY']), async 
   try {
     const db = getDbConnection(req.user.companyId);
     const { userId, permissions } = req.user;
-    const { hasPermission } = require('../config/permissionsHierarchy');
 
     const {
       page = 1,
@@ -109,17 +89,6 @@ router.get('/', requireAnyPermission(['VIEW_FINANCE', 'VIEW_INVENTORY']), async 
       .leftJoin('materials', 'transactions.materialId', 'materials.id')
       .leftJoin('users', 'transactions.createdBy', 'users.id')
       .orderBy('transactions.created_at', 'desc');
-
-    // Apply ownership filtering if user only has VIEW_TRANSACTIONS_OWN permission
-    // Allow VIEW_INVENTORY users to see all transactions (for inventory page stock movements)
-    if (!hasPermission(permissions, 'VIEW_TRANSACTIONS_ALL') &&
-        !hasPermission(permissions, 'VIEW_INVENTORY')) {
-      query = query.where('transactions.createdBy', userId);
-      winston.info('Filtering transactions to user\'s own records', {
-        userId,
-        companyId: req.user.companyId
-      });
-    }
 
     // Apply filters
     if (transactionType) {
@@ -231,22 +200,6 @@ router.get('/:id',
         });
       }
 
-      // Check ownership
-      if (!checkTransactionOwnership(transaction, userId, permissions, 'VIEW')) {
-        auditLog('PERMISSION_DENIED', userId, {
-          action: 'VIEW_TRANSACTION',
-          reason: 'Attempted to view another user\'s transaction',
-          transactionId: id,
-          transactionCreatedBy: transaction.createdBy,
-          requestedBy: userId
-        });
-
-        return res.status(403).json({
-          success: false,
-          error: 'You can only view your own transactions'
-        });
-      }
-    
     // Get reference record details if available
     let referenceDetails = null;
     if (transaction.referenceId && transaction.referenceType) {
@@ -486,19 +439,9 @@ router.get('/analytics/summary',
     try {
       const db = getDbConnection(req.user.companyId);
       const { userId, permissions } = req.user;
-      const { hasPermission } = require('../config/permissionsHierarchy');
       const { dateFrom, dateTo, transactionType } = req.query;
 
       let query = db('transactions');
-
-      // Apply ownership filtering if user only has VIEW_TRANSACTIONS_OWN permission
-      if (!hasPermission(permissions, 'VIEW_TRANSACTIONS_ALL')) {
-        query = query.where('createdBy', userId);
-        winston.info('Filtering analytics to user\'s own transactions', {
-          userId,
-          companyId: req.user.companyId
-        });
-      }
 
       // Apply date filters
       if (dateFrom) {
@@ -605,19 +548,9 @@ router.get('/balance-sheet',
     try {
       const db = getDbConnection(req.user.companyId);
       const { userId, permissions } = req.user;
-      const { hasPermission } = require('../config/permissionsHierarchy');
       const { dateFrom, dateTo } = req.query;
 
       let query = db('transactions');
-
-      // Apply ownership filtering if user only has VIEW_TRANSACTIONS_OWN permission
-      if (!hasPermission(permissions, 'VIEW_TRANSACTIONS_ALL')) {
-        query = query.where('createdBy', userId);
-        winston.info('Filtering balance sheet to user\'s own transactions', {
-          userId,
-          companyId: req.user.companyId
-        });
-      }
 
       // Apply date filters
       if (dateFrom) {

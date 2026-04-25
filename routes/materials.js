@@ -14,31 +14,6 @@ const router = express.Router();
 // Apply sanitization to all routes
 router.use(sanitize);
 
-/**
- * Check if user has permission to access a material
- * @param {object} material - The material object (must have 'createdBy' field)
- * @param {number} userId - The requesting user's ID
- * @param {array} permissions - The user's permissions array
- * @param {string} permissionType - Type of permission ('EDIT', 'DELETE', 'VIEW')
- * @returns {boolean} - True if user has access, false otherwise
- */
-const checkMaterialOwnership = (material, userId, permissions, permissionType = 'EDIT') => {
-  const { hasPermission } = require('../config/permissionsHierarchy');
-
-  // If user has the _ALL variant, they can access any material
-  const allPermission = `${permissionType}_MATERIALS_ALL`;
-  if (hasPermission(permissions, allPermission)) {
-    return true;
-  }
-
-  // If user has the _OWN variant, check ownership
-  const ownPermission = `${permissionType}_MATERIALS_OWN`;
-  if (hasPermission(permissions, ownPermission)) {
-    return material.createdBy === userId;
-  }
-
-  return false;
-};
 
 // Valid waste types for disposable materials
 const WASTE_TYPES = [
@@ -85,12 +60,11 @@ router.get('/', requirePermission('VIEW_MATERIALS'), async (req, res) => {
   try {
     const { companyId, userId, permissions } = req.user;
     const db = getDbConnection(companyId);
-    const { hasPermission } = require('../config/permissionsHierarchy');
-    
-    const { 
-      page = 1, 
-      limit = 50, 
-      search = '', 
+
+    const {
+      page = 1,
+      limit = 50,
+      search = '',
       category = '',
       isActive = '',
       trackBatches = ''
@@ -135,11 +109,6 @@ router.get('/', requirePermission('VIEW_MATERIALS'), async (req, res) => {
     // Batch tracking filter
     if (trackBatches !== '') {
       query = query.where('trackBatches', trackBatches === 'true');
-    }
-
-    // Apply ownership filtering if user only has VIEW_MATERIALS_OWN permission
-    if (!hasPermission(permissions, 'VIEW_MATERIALS_ALL')) {
-      query = query.where('materials.createdBy', userId);
     }
 
     // Get total count for pagination
@@ -374,21 +343,6 @@ router.get('/:id',
         });
       }
 
-      // Check ownership
-      if (!checkMaterialOwnership(material, userId, permissions, 'VIEW')) {
-        auditLog('PERMISSION_DENIED', userId, {
-          reason: 'Attempted to view another user\'s material',
-          materialId: id,
-          materialCreatedBy: material.createdBy,
-          requestedBy: userId
-        });
-
-        return res.status(403).json({
-          success: false,
-          error: 'You can only view your own materials'
-        });
-      }
-
       // Get current inventory levels for this material
       const inventory = await db('inventory')
         .select(
@@ -565,21 +519,6 @@ router.put('/:id',
         });
       }
 
-      // Check ownership
-      if (!checkMaterialOwnership(existingMaterial, userId, permissions, 'EDIT')) {
-        auditLog('PERMISSION_DENIED', userId, {
-          reason: 'Attempted to edit another user\'s material',
-          materialId: id,
-          materialCreatedBy: existingMaterial.createdBy,
-          requestedBy: userId
-        });
-
-        return res.status(403).json({
-          success: false,
-          error: 'You can only edit your own materials'
-        });
-      }
-
       // Check if code is being changed to an existing one
       if (req.body.code !== existingMaterial.code) {
         const duplicateMaterial = await db('materials')
@@ -703,21 +642,6 @@ router.delete('/:id',
         });
       }
 
-      // Check ownership
-      if (!checkMaterialOwnership(material, userId, permissions, 'DELETE')) {
-        auditLog('PERMISSION_DENIED', userId, {
-          reason: 'Attempted to delete another user\'s material',
-          materialId: id,
-          materialCreatedBy: material.createdBy,
-          requestedBy: userId
-        });
-
-        return res.status(403).json({
-          success: false,
-          error: 'You can only delete your own materials'
-        });
-      }
-
       // Check if material has inventory or orders
       const [inventoryCount, orderCount] = await Promise.all([
         db('inventory').where({ materialId: id }).count('* as count').first(),
@@ -804,30 +728,6 @@ router.post('/:id/attachments',
         });
       }
 
-      // Check ownership
-      if (!checkMaterialOwnership(material, userId, permissions, 'EDIT')) {
-        // Delete uploaded S3 files if permission check fails
-        if (req.files && req.files.length > 0) {
-          await Promise.all(req.files.map(file =>
-            storageService.deleteFile(file.key).catch(err =>
-              logger.warn('Failed to delete unauthorized material attachment', { key: file.key })
-            )
-          ));
-        }
-
-        auditLog('PERMISSION_DENIED', userId, {
-          reason: 'Attempted to upload attachments to another user\'s material',
-          materialId: id,
-          materialCreatedBy: material.createdBy,
-          requestedBy: userId
-        });
-
-        return res.status(403).json({
-          success: false,
-          error: 'You can only upload attachments to your own materials'
-        });
-      }
-
       // Save attachment metadata to database
       const savedAttachments = [];
       for (const file of req.files) {
@@ -886,21 +786,6 @@ router.get('/:id/attachments',
         return res.status(404).json({
           success: false,
           error: 'Material not found'
-        });
-      }
-
-      // Check ownership
-      if (!checkMaterialOwnership(material, userId, permissions, 'VIEW')) {
-        auditLog('PERMISSION_DENIED', userId, {
-          reason: 'Attempted to view attachments of another user\'s material',
-          materialId: id,
-          materialCreatedBy: material.createdBy,
-          requestedBy: userId
-        });
-
-        return res.status(403).json({
-          success: false,
-          error: 'You can only view attachments of your own materials'
         });
       }
 
@@ -963,21 +848,6 @@ router.delete('/:id/attachments/:fileId',
         return res.status(404).json({
           success: false,
           error: 'Material not found'
-        });
-      }
-
-      // Check ownership
-      if (!checkMaterialOwnership(material, userId, permissions, 'EDIT')) {
-        auditLog('PERMISSION_DENIED', userId, {
-          reason: 'Attempted to delete attachment from another user\'s material',
-          materialId: id,
-          materialCreatedBy: material.createdBy,
-          requestedBy: userId
-        });
-
-        return res.status(403).json({
-          success: false,
-          error: 'You can only delete attachments from your own materials'
         });
       }
 

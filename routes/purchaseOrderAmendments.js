@@ -19,24 +19,6 @@ router.use(sanitize);
  * @param {string} permissionType - Type of permission to check (VIEW, EDIT, DELETE)
  * @returns {boolean} - Whether user has permission
  */
-const checkAmendmentOwnership = (amendment, userId, permissions, permissionType = 'EDIT') => {
-  const { hasPermission } = require('../config/permissionsHierarchy');
-
-  // Check if user has permission for ALL amendments
-  const allPermission = `${permissionType}_AMENDMENTS_ALL`;
-  if (hasPermission(permissions, allPermission)) {
-    return true;
-  }
-
-  // Check if user has permission for OWN amendments and owns this amendment
-  const ownPermission = `${permissionType}_AMENDMENTS_OWN`;
-  if (hasPermission(permissions, ownPermission)) {
-    // Amendments use 'amended_by' field for ownership
-    return amendment.amended_by === userId;
-  }
-
-  return false;
-};
 
 /**
  * Helper function to audit permission denials
@@ -102,7 +84,6 @@ router.get('/',
   try {
     const { companyId, userId, permissions } = req.user;
     const db = getDbConnection(companyId);
-    const { hasPermission } = require('../config/permissionsHierarchy');
 
     const {
       page = 1,
@@ -124,14 +105,6 @@ router.get('/',
         db.raw('CONCAT(approver.firstName, " ", approver.lastName) as approvedByName')
       );
 
-    // Apply ownership filtering if user only has VIEW_AMENDMENTS_OWN permission
-    if (!hasPermission(permissions, 'VIEW_AMENDMENTS_ALL')) {
-      query = query.where('purchase_order_amendments.amended_by', userId);
-      logger.info('Filtering amendments to user\'s own records', {
-        userId,
-        companyId
-      });
-    }
 
     // Filter by original order
     if (originalOrderId) {
@@ -199,17 +172,11 @@ router.get('/counts',
   try {
     const { companyId, userId, permissions } = req.user;
     const db = getDbConnection(companyId);
-    const { hasPermission } = require('../config/permissionsHierarchy');
 
-    // Build query with ownership filtering if needed
+    // Build query
     let query = db('purchase_order_amendments')
       .select('original_order_id')
       .count('* as count');
-
-    // Apply ownership filtering if user only has VIEW_AMENDMENTS_OWN permission
-    if (!hasPermission(permissions, 'VIEW_AMENDMENTS_ALL')) {
-      query = query.where('amended_by', userId);
-    }
 
     // Get counts grouped by original_order_id
     const counts = await query.groupBy('original_order_id');
@@ -266,22 +233,6 @@ router.get('/:id',
         return res.status(404).json({
           success: false,
           error: 'Amendment not found'
-        });
-      }
-
-      // Check ownership
-      if (!checkAmendmentOwnership(amendment, userId, permissions, 'VIEW')) {
-        auditPermissionDenial('PERMISSION_DENIED', userId, {
-          action: 'VIEW_AMENDMENT',
-          reason: 'Attempted to view another user\'s amendment',
-          amendmentId: id,
-          amendmentCreatedBy: amendment.amended_by,
-          requestedBy: userId
-        });
-
-        return res.status(403).json({
-          success: false,
-          error: 'You can only view your own amendments'
         });
       }
 

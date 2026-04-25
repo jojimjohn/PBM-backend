@@ -9,25 +9,6 @@ const { bankTransactionAttachments } = require('../repositories/AttachmentReposi
 const Joi = require('joi');
 const { logger, auditLog } = require('../utils/logger');
 
-// Helper function to check bank transaction ownership
-const checkBankTransactionOwnership = (transaction, userId, permissions, permissionType = 'EDIT') => {
-  const { hasPermission } = require('../config/permissionsHierarchy');
-
-  // Check if user has permission for ALL bank transactions
-  const allPermission = `${permissionType}_BANK_TRANSACTIONS_ALL`;
-  if (hasPermission(permissions, allPermission)) {
-    return true;
-  }
-
-  // Check if user has permission for OWN bank transactions and owns this transaction
-  const ownPermission = `${permissionType}_BANK_TRANSACTIONS_OWN`;
-  if (hasPermission(permissions, ownPermission)) {
-    return transaction.created_by === userId;
-  }
-
-  return false;
-};
-
 // Enhanced audit logging helper
 const auditPermissionDenial = (action, userId, details) => {
   logger.warn('RBAC Audit Log', {
@@ -125,7 +106,6 @@ router.get('/',
     try {
       const { companyId, userId, permissions } = req.user;
       const db = getDbConnection(companyId);
-      const { hasPermission } = require('../config/permissionsHierarchy');
 
       const {
         page = 1,
@@ -155,15 +135,6 @@ router.get('/',
         .where('bank_accounts.company_id', companyId)
         .orderBy('bank_transactions.transaction_date', 'desc')
         .orderBy('bank_transactions.created_at', 'desc');
-
-      // Apply ownership filtering if user only has VIEW_BANK_TRANSACTIONS_OWN permission
-      if (!hasPermission(permissions, 'VIEW_BANK_TRANSACTIONS_ALL')) {
-        query = query.where('bank_transactions.created_by', userId);
-        logger.info('Filtering bank transactions to user\'s own records', {
-          userId,
-          companyId
-        });
-      }
 
     // Apply filters
     if (account_id) {
@@ -330,22 +301,6 @@ router.get('/:id',
         return res.status(404).json({
           success: false,
           error: 'Transaction not found'
-        });
-      }
-
-      // Check ownership
-      if (!checkBankTransactionOwnership(transaction, userId, permissions, 'VIEW')) {
-        auditPermissionDenial('PERMISSION_DENIED', userId, {
-          action: 'VIEW_BANK_TRANSACTION',
-          reason: 'Attempted to view another user\'s bank transaction',
-          transactionId: id,
-          transactionCreatedBy: transaction.created_by,
-          requestedBy: userId
-        });
-
-        return res.status(403).json({
-          success: false,
-          error: 'You can only view your own bank transactions'
         });
       }
 
@@ -684,22 +639,6 @@ router.put('/:id',
         });
       }
 
-      // Check ownership
-      if (!checkBankTransactionOwnership(existingTransaction, userId, permissions, 'EDIT')) {
-        auditPermissionDenial('PERMISSION_DENIED', userId, {
-          action: 'EDIT_BANK_TRANSACTION',
-          reason: 'Attempted to edit another user\'s bank transaction',
-          transactionId: id,
-          transactionCreatedBy: existingTransaction.created_by,
-          requestedBy: userId
-        });
-
-        return res.status(403).json({
-          success: false,
-          error: 'You can only edit your own bank transactions'
-        });
-      }
-
       // If amount or type changed, recalculate balance
       const newAmount = req.body.amount !== undefined ? parseFloat(req.body.amount) : parseFloat(existingTransaction.amount);
       const newType = req.body.transaction_type || existingTransaction.transaction_type;
@@ -871,22 +810,6 @@ router.delete('/:id',
         return res.status(400).json({
           success: false,
           error: 'Cannot delete a reconciled transaction'
-        });
-      }
-
-      // Check ownership
-      if (!checkBankTransactionOwnership(transaction, userId, permissions, 'DELETE')) {
-        auditPermissionDenial('PERMISSION_DENIED', userId, {
-          action: 'DELETE_BANK_TRANSACTION',
-          reason: 'Attempted to delete another user\'s bank transaction',
-          transactionId: id,
-          transactionCreatedBy: transaction.created_by,
-          requestedBy: userId
-        });
-
-        return res.status(403).json({
-          success: false,
-          error: 'You can only delete your own bank transactions'
         });
       }
 

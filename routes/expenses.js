@@ -87,37 +87,12 @@ const bulkExpenseSchema = Joi.object({
 });
 
 /**
- * Check if user has permission to access an expense
- * @param {object} expense - The expense object (must have 'created_by' field)
- * @param {number} userId - The requesting user's ID
- * @param {array} permissions - The user's permissions array
- * @param {string} permissionType - Type of permission ('EDIT', 'DELETE', 'VIEW')
- * @returns {boolean} - True if user has access, false otherwise
- */
-const checkExpenseOwnership = (expense, userId, permissions, permissionType = 'EDIT') => {
-  const { hasPermission } = require('../config/permissionsHierarchy');
-
-  // If user has the _ALL variant, they can access any expense
-  const allPermission = `${permissionType}_EXPENSE_ALL`;
-  if (hasPermission(permissions, allPermission)) {
-    return true;
-  }
-
-  // If user has the _OWN variant, check ownership
-  const ownPermission = `${permissionType}_EXPENSE_OWN`;
-  if (hasPermission(permissions, ownPermission)) {
-    return expense.created_by === userId;
-  }
-
-  return false;
-};
 
 // GET /api/expenses - List all expenses with filtering
 router.get('/', requirePermission('VIEW_FINANCE'), projectFilter, async (req, res) => {
   try {
     const { companyId, userId, permissions } = req.user;
     const db = getDbConnection(companyId);
-    const { hasPermission } = require('../config/permissionsHierarchy');
 
     const {
       page = 1,
@@ -153,11 +128,6 @@ router.get('/', requirePermission('VIEW_FINANCE'), projectFilter, async (req, re
 
     // Apply project filter (filters by unified_expenses.project_id)
     query = applyProjectFilter(query, req.projectFilter, 'unified_expenses.project_id');
-
-    // Apply ownership filtering if user only has VIEW_EXPENSE_OWN permission
-    if (!hasPermission(permissions, 'VIEW_EXPENSE_ALL')) {
-      query = query.where('unified_expenses.created_by', userId);
-    }
 
     // Search filter
     if (search) {
@@ -288,21 +258,6 @@ router.get('/:id', requirePermission('VIEW_FINANCE'), validateParams(['id']), as
       return res.status(404).json({
         success: false,
         error: 'Expense not found'
-      });
-    }
-
-    // Check ownership permission
-    if (!checkExpenseOwnership(expense, userId, permissions, 'VIEW')) {
-      auditLog('PERMISSION_DENIED', userId, {
-        reason: 'Attempted to view another user\'s expense',
-        expenseId: id,
-        expenseCreatedBy: expense.created_by,
-        requestedBy: userId
-      });
-
-      return res.status(403).json({
-        success: false,
-        error: 'You can only view your own expenses'
       });
     }
 
@@ -502,21 +457,6 @@ router.put('/:id', requirePermission('EDIT_FINANCE'), validateParams(['id']), va
       });
     }
 
-    // Check ownership permission
-    if (!checkExpenseOwnership(existingExpense, userId, permissions, 'EDIT')) {
-      auditLog('PERMISSION_DENIED', userId, {
-        reason: 'Attempted to edit another user\'s expense',
-        expenseId: id,
-        expenseCreatedBy: existingExpense.created_by,
-        requestedBy: userId
-      });
-
-      return res.status(403).json({
-        success: false,
-        error: 'You can only edit your own expenses'
-      });
-    }
-
     // Validate category against expense_categories table
     const categoryValidation = await validateCategoryCode(db, updateData.category, companyId, existingExpense.expenseType);
     if (!categoryValidation.valid) {
@@ -637,21 +577,6 @@ router.delete('/:id', requirePermission('DELETE_FINANCE'), validateParams(['id']
       });
     }
 
-    // Check ownership permission
-    if (!checkExpenseOwnership(existingExpense, userId, permissions, 'DELETE')) {
-      auditLog('PERMISSION_DENIED', userId, {
-        reason: 'Attempted to delete another user\'s expense',
-        expenseId: id,
-        expenseCreatedBy: existingExpense.created_by,
-        requestedBy: userId
-      });
-
-      return res.status(403).json({
-        success: false,
-        error: 'You can only delete your own expenses'
-      });
-    }
-
     // Delete expense
     await db('unified_expenses').where({ id }).del();
 
@@ -753,7 +678,6 @@ router.get('/analytics/summary', requirePermission('VIEW_FINANCE'), async (req, 
     const { companyId, userId, permissions } = req.user;
     const { period = '30', expenseType = '' } = req.query;
     const db = getDbConnection(companyId);
-    const { hasPermission } = require('../config/permissionsHierarchy');
 
     const dateFrom = new Date();
     dateFrom.setDate(dateFrom.getDate() - parseInt(period));
@@ -761,25 +685,16 @@ router.get('/analytics/summary', requirePermission('VIEW_FINANCE'), async (req, 
     let query = db('unified_expenses')
       .where('expenseDate', '>=', dateFrom);
 
-    // Apply ownership filtering if user only has VIEW_EXPENSE_OWN permission
-    if (!hasPermission(permissions, 'VIEW_EXPENSE_ALL')) {
-      query = query.where('created_by', userId);
-    }
-
     if (expenseType) {
       query = query.where('expenseType', expenseType);
     }
 
-    // Total expenses by type (with ownership filtering)
+    // Total expenses by type
     let totalsByTypeQuery = db('unified_expenses')
       .select('expenseType')
       .sum('amount as total')
       .count('* as count')
       .where('expenseDate', '>=', dateFrom);
-
-    if (!hasPermission(permissions, 'VIEW_EXPENSE_ALL')) {
-      totalsByTypeQuery = totalsByTypeQuery.where('created_by', userId);
-    }
 
     const totalsByType = await totalsByTypeQuery.groupBy('expenseType');
 

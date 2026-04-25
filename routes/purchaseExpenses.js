@@ -18,23 +18,6 @@ router.use(sanitize);
  * @param {string} permissionType - Type of permission to check (VIEW, EDIT, DELETE)
  * @returns {boolean} - Whether user has permission
  */
-const checkPurchaseExpenseOwnership = (expense, userId, permissions, permissionType = 'EDIT') => {
-  const { hasPermission } = require('../config/permissionsHierarchy');
-
-  // Check if user has permission for ALL purchase expenses
-  const allPermission = `${permissionType}_PURCHASE_EXPENSES_ALL`;
-  if (hasPermission(permissions, allPermission)) {
-    return true;
-  }
-
-  // Check if user has permission for OWN purchase expenses and owns this expense
-  const ownPermission = `${permissionType}_PURCHASE_EXPENSES_OWN`;
-  if (hasPermission(permissions, ownPermission)) {
-    return expense.createdBy === userId;
-  }
-
-  return false;
-};
 
 /**
  * Helper function to audit permission denials
@@ -81,7 +64,6 @@ router.get('/',
   try {
     const { companyId, userId, permissions } = req.user;
     const db = getDbConnection(companyId);
-    const { hasPermission } = require('../config/permissionsHierarchy');
 
     const {
       page = 1,
@@ -105,14 +87,6 @@ router.get('/',
       );
 
     // Apply ownership filtering if user only has VIEW_PURCHASE_EXPENSES_OWN permission
-    if (!hasPermission(permissions, 'VIEW_PURCHASE_EXPENSES_ALL')) {
-      query = query.where('purchase_expenses.createdBy', userId);
-      logger.info('Filtering purchase expenses to user\'s own records', {
-        userId,
-        companyId
-      });
-    }
-
     // Search filter
     if (search) {
       query = query.where(function() {
@@ -159,11 +133,6 @@ router.get('/',
         db.raw('COUNT(*) as totalCount'),
         db.raw('AVG(amount) as averageAmount')
       );
-
-    // Apply same ownership filtering to summary
-    if (!hasPermission(permissions, 'VIEW_PURCHASE_EXPENSES_ALL')) {
-      summaryQuery.where('createdBy', userId);
-    }
 
     if (purchaseOrderId) {
       summaryQuery.where('purchaseOrderId', purchaseOrderId);
@@ -222,22 +191,6 @@ router.get('/:id',
       return res.status(404).json({
         success: false,
         error: 'Purchase expense not found'
-      });
-    }
-
-    // Check ownership
-    if (!checkPurchaseExpenseOwnership(expense, userId, permissions, 'VIEW')) {
-      auditPermissionDenial('PERMISSION_DENIED', userId, {
-        action: 'VIEW_PURCHASE_EXPENSE',
-        reason: 'Attempted to view another user\'s purchase expense',
-        expenseId: id,
-        expenseCreatedBy: expense.createdBy,
-        requestedBy: userId
-      });
-
-      return res.status(403).json({
-        success: false,
-        error: 'You can only view your own purchase expenses'
       });
     }
 
@@ -378,22 +331,6 @@ router.put('/:id',
       });
     }
 
-    // Check ownership
-    if (!checkPurchaseExpenseOwnership(existingExpense, userId, permissions, 'EDIT')) {
-      auditPermissionDenial('PERMISSION_DENIED', userId, {
-        action: 'EDIT_PURCHASE_EXPENSE',
-        reason: 'Attempted to edit another user\'s purchase expense',
-        expenseId: id,
-        expenseCreatedBy: existingExpense.createdBy,
-        requestedBy: userId
-      });
-
-      return res.status(403).json({
-        success: false,
-        error: 'You can only edit your own purchase expenses'
-      });
-    }
-
     // Update expense
     await db('purchase_expenses')
       .where({ id })
@@ -479,22 +416,6 @@ router.delete('/:id',
       return res.status(404).json({
         success: false,
         error: 'Purchase expense not found'
-      });
-    }
-
-    // Check ownership
-    if (!checkPurchaseExpenseOwnership(existingExpense, userId, permissions, 'DELETE')) {
-      auditPermissionDenial('PERMISSION_DENIED', userId, {
-        action: 'DELETE_PURCHASE_EXPENSE',
-        reason: 'Attempted to delete another user\'s purchase expense',
-        expenseId: id,
-        expenseCreatedBy: existingExpense.createdBy,
-        requestedBy: userId
-      });
-
-      return res.status(403).json({
-        success: false,
-        error: 'You can only delete your own purchase expenses'
       });
     }
 

@@ -29,24 +29,6 @@ const pettyCashUserService = require('../services/pettyCashUserService');
  * @param {string} permissionType - Type of permission to check (VIEW, EDIT, DELETE)
  * @returns {boolean} - Whether user has permission
  */
-const checkCardOwnership = (card, userId, permissions, permissionType = 'EDIT') => {
-  const { hasPermission } = require('../config/permissionsHierarchy');
-
-  // Check if user has permission for ALL cards
-  const allPermission = `${permissionType}_CARDS_ALL`;
-  if (hasPermission(permissions, allPermission)) {
-    return true;
-  }
-
-  // Check if user has permission for ASSIGNED cards and is the cardholder
-  // For petty cash cards, the relevant ownership is who it's assigned to
-  const assignedPermission = `${permissionType}_CARDS_ASSIGNED`;
-  if (hasPermission(permissions, assignedPermission)) {
-    return card.assignedTo === userId;
-  }
-
-  return false;
-};
 
 /**
  * Helper function to audit permission denials
@@ -131,7 +113,6 @@ router.get('/',
   try {
     const { companyId, userId, permissions } = req.user;
     const db = getDbConnection(companyId);
-    const { hasPermission } = require('../config/permissionsHierarchy');
 
     const {
       page = 1,
@@ -166,15 +147,6 @@ router.get('/',
       .leftJoin('petty_cash_users', 'petty_cash_cards.id', 'petty_cash_users.card_id')
       .orderBy('petty_cash_cards.created_at', 'desc');
 
-    // Apply ownership filtering if user only has VIEW_CARDS_ASSIGNED permission
-    if (!hasPermission(permissions, 'VIEW_CARDS_ALL')) {
-      query = query.where('petty_cash_cards.assignedTo', userId);
-      winston.info('Filtering petty cash cards to user\'s assigned cards', {
-        userId,
-        companyId
-      });
-    }
-    
     // Apply filters
     if (status) {
       query = query.where('petty_cash_cards.status', status);
@@ -383,22 +355,6 @@ router.get('/:id',
       });
     }
 
-    // Check ownership
-    if (!checkCardOwnership(card, userId, permissions, 'VIEW')) {
-      auditPermissionDenial('PERMISSION_DENIED', userId, {
-        action: 'VIEW_CARD',
-        reason: 'Attempted to view another user\'s assigned card',
-        cardId: id,
-        cardAssignedTo: card.assignedTo,
-        requestedBy: userId
-      });
-
-      return res.status(403).json({
-        success: false,
-        error: 'You can only view cards assigned to you'
-      });
-    }
-    
     // Get recent expenses for this card
     const recentExpenses = await db('petty_cash_expenses')
       .select(

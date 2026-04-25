@@ -12,31 +12,6 @@ const router = express.Router();
 // Apply sanitization to all routes
 router.use(sanitize);
 
-/**
- * Check if user has permission to access a specific invoice based on ownership
- * @param {Object} invoice - The invoice object
- * @param {number} userId - The user's ID
- * @param {Array} permissions - User's permissions array
- * @param {string} permissionType - Base permission type ('VIEW', 'EDIT', 'DELETE')
- * @returns {boolean} - True if user has permission, false otherwise
- */
-const checkInvoiceOwnership = (invoice, userId, permissions, permissionType = 'EDIT') => {
-  const { hasPermission } = require('../config/permissionsHierarchy');
-
-  // If user has the _ALL variant, they can access any invoice
-  const allPermission = `${permissionType}_INVOICES_ALL`;
-  if (hasPermission(permissions, allPermission)) {
-    return true;
-  }
-
-  // If user has the _OWN variant, check ownership
-  const ownPermission = `${permissionType}_INVOICES_OWN`;
-  if (hasPermission(permissions, ownPermission)) {
-    return invoice.created_by === userId;
-  }
-
-  return false;
-};
 
 // Bill type prefixes for clear differentiation
 const BILL_PREFIXES = {
@@ -151,7 +126,6 @@ router.get('/', requirePermission('VIEW_INVOICES'), projectFilter, async (req, r
   try {
     const { companyId, userId, permissions } = req.user;
     const db = getDbConnection(companyId);
-    const { hasPermission } = require('../config/permissionsHierarchy');
 
     const {
       page = 1,
@@ -222,11 +196,6 @@ router.get('/', requirePermission('VIEW_INVOICES'), projectFilter, async (req, r
     }
     if (toDate) {
       query = query.where('purchase_invoices.invoice_date', '<=', toDate);
-    }
-
-    // Apply ownership filtering if user only has VIEW_INVOICES_OWN permission
-    if (!hasPermission(permissions, 'VIEW_INVOICES_ALL')) {
-      query = query.where('purchase_invoices.created_by', userId);
     }
 
     // Get total count for pagination
@@ -316,21 +285,6 @@ router.get('/:id',
         return res.status(404).json({
           success: false,
           error: 'Invoice not found'
-        });
-      }
-
-      // Check ownership
-      if (!checkInvoiceOwnership(invoice, userId, permissions, 'VIEW')) {
-        auditLog('PERMISSION_DENIED', userId, {
-          reason: 'Attempted to view another user\'s invoice',
-          invoiceId: id,
-          invoiceCreatedBy: invoice.created_by,
-          requestedBy: userId
-        });
-
-        return res.status(403).json({
-          success: false,
-          error: 'You can only view your own invoices'
         });
       }
 
@@ -658,21 +612,6 @@ router.put('/:id',
         });
       }
 
-      // Check ownership
-      if (!checkInvoiceOwnership(invoice, userId, permissions, 'EDIT')) {
-        auditLog('PERMISSION_DENIED', userId, {
-          reason: 'Attempted to update another user\'s invoice',
-          invoiceId: id,
-          invoiceCreatedBy: invoice.created_by,
-          requestedBy: userId
-        });
-
-        return res.status(403).json({
-          success: false,
-          error: 'You can only update your own invoices'
-        });
-      }
-
       // Don't allow updating fully paid invoices
       if (invoice.payment_status === 'paid') {
         return res.status(400).json({
@@ -864,21 +803,6 @@ router.post('/:id/payment',
         });
       }
 
-      // Check ownership
-      if (!checkInvoiceOwnership(invoice, userId, permissions, 'EDIT')) {
-        auditLog('PERMISSION_DENIED', userId, {
-          reason: 'Attempted to record payment on another user\'s invoice',
-          invoiceId: id,
-          invoiceCreatedBy: invoice.created_by,
-          requestedBy: userId
-        });
-
-        return res.status(403).json({
-          success: false,
-          error: 'You can only record payments on your own invoices'
-        });
-      }
-
       await db.transaction(async (trx) => {
         // Re-fetch invoice within transaction for consistency
         const invoiceInTrx = await trx('purchase_invoices')
@@ -1057,21 +981,6 @@ router.delete('/:id',
         });
       }
 
-      // Check ownership
-      if (!checkInvoiceOwnership(invoice, userId, permissions, 'DELETE')) {
-        auditLog('PERMISSION_DENIED', userId, {
-          reason: 'Attempted to delete another user\'s invoice',
-          invoiceId: id,
-          invoiceCreatedBy: invoice.created_by,
-          requestedBy: userId
-        });
-
-        return res.status(403).json({
-          success: false,
-          error: 'You can only delete your own invoices'
-        });
-      }
-
       // Don't allow deleting invoices with payments
       if (parseFloat(invoice.paid_amount) > 0) {
         return res.status(400).json({
@@ -1138,21 +1047,6 @@ router.put('/:id/status',
         });
       }
 
-      // Check ownership
-      if (!checkInvoiceOwnership(invoice, userId, permissions, 'EDIT')) {
-        auditLog('PERMISSION_DENIED', userId, {
-          reason: 'Attempted to update status of another user\'s invoice',
-          invoiceId: id,
-          invoiceCreatedBy: invoice.created_by,
-          requestedBy: userId
-        });
-
-        return res.status(403).json({
-          success: false,
-          error: 'You can only update the status of your own invoices'
-        });
-      }
-
       // Only company bills have bill_status
       if (invoice.bill_type !== 'company') {
         return res.status(400).json({
@@ -1212,7 +1106,6 @@ router.get('/unlinked-company-bills',
     try {
       const { companyId, userId, permissions } = req.user;
       const db = getDbConnection(companyId);
-      const { hasPermission } = require('../config/permissionsHierarchy');
       const { supplierId } = req.query;
 
       // Get all vendor bills with covers_company_bills
@@ -1253,11 +1146,6 @@ router.get('/unlinked-company-bills',
       // Filter by supplier if provided
       if (supplierId) {
         query = query.where('purchase_invoices.supplier_id', supplierId);
-      }
-
-      // Apply ownership filtering if user only has VIEW_INVOICES_OWN permission
-      if (!hasPermission(permissions, 'VIEW_INVOICES_ALL')) {
-        query = query.where('purchase_invoices.created_by', userId);
       }
 
       const companyBills = await query.orderBy('purchase_invoices.invoice_date', 'desc');
@@ -1586,21 +1474,6 @@ router.post('/:id/attachment',
         return res.status(404).json({
           success: false,
           error: 'Invoice not found'
-        });
-      }
-
-      // Check ownership
-      if (!checkInvoiceOwnership(invoice, userId, permissions, 'EDIT')) {
-        auditLog('PERMISSION_DENIED', userId, {
-          reason: 'Attempted to upload attachment to another user\'s invoice',
-          invoiceId: id,
-          invoiceCreatedBy: invoice.created_by,
-          requestedBy: userId
-        });
-
-        return res.status(403).json({
-          success: false,
-          error: 'You can only upload attachments to your own invoices'
         });
       }
 

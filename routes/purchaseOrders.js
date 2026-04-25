@@ -26,23 +26,6 @@ router.use(sanitize);
  * @param {string} permissionType - Type of permission ('EDIT', 'DELETE', 'VIEW')
  * @returns {boolean} - True if user has access, false otherwise
  */
-const checkOrderOwnership = (order, userId, permissions, permissionType = 'EDIT') => {
-  const { hasPermission } = require('../config/permissionsHierarchy');
-
-  // If user has the _ALL variant, they can access any order
-  const allPermission = `${permissionType}_PURCHASE_ALL`;
-  if (hasPermission(permissions, allPermission)) {
-    return true;
-  }
-
-  // If user has the _OWN variant, check ownership
-  const ownPermission = `${permissionType}_PURCHASE_OWN`;
-  if (hasPermission(permissions, ownPermission)) {
-    return order.createdBy === userId;
-  }
-
-  return false;
-};
 
 // Helper function to format payment terms for display
 const formatPaymentTermsForDisplay = (paymentTerms) => {
@@ -609,21 +592,6 @@ router.put('/:id',
         });
       }
 
-      // Ownership check: verify user has permission to edit this order
-      if (!checkOrderOwnership(existingOrder, userId, permissions, 'EDIT')) {
-        auditLog('PERMISSION_DENIED', userId, {
-          reason: 'Attempted to edit another user\'s purchase order',
-          purchaseOrderId: id,
-          orderCreatedBy: existingOrder.createdBy,
-          requestedBy: userId
-        });
-
-        return res.status(403).json({
-          success: false,
-          error: 'You can only edit your own purchase orders'
-        });
-      }
-
       // Extract only the fields that should be updated in the database
       const {
         orderNumber,
@@ -763,21 +731,6 @@ router.post('/:id/items',
         return res.status(404).json({
           success: false,
           error: 'Purchase order not found or not editable'
-        });
-      }
-
-      // Ownership check: verify user has permission to edit this order
-      if (!checkOrderOwnership(order, userId, permissions, 'EDIT')) {
-        auditLog('PERMISSION_DENIED', userId, {
-          reason: 'Attempted to add items to another user\'s purchase order',
-          purchaseOrderId: id,
-          orderCreatedBy: order.createdBy,
-          requestedBy: userId
-        });
-
-        return res.status(403).json({
-          success: false,
-          error: 'You can only modify your own purchase orders'
         });
       }
 
@@ -1329,21 +1282,6 @@ router.patch('/:id/status',
         });
       }
 
-      // Ownership check: verify user has permission to edit this order
-      if (!checkOrderOwnership(order, userId, permissions, 'EDIT')) {
-        auditLog('PERMISSION_DENIED', userId, {
-          reason: 'Attempted to change status of another user\'s purchase order',
-          purchaseOrderId: id,
-          orderCreatedBy: order.createdBy,
-          requestedBy: userId
-        });
-
-        return res.status(403).json({
-          success: false,
-          error: 'You can only modify your own purchase orders'
-        });
-      }
-
       // Validate status transitions
       const validTransitions = {
         'draft': ['pending', 'approved', 'cancelled'],
@@ -1605,30 +1543,6 @@ router.post('/:id/attachments',
         });
       }
 
-      // Ownership check: verify user has permission to edit this order
-      if (!checkOrderOwnership(order, userId, permissions, 'EDIT')) {
-        // Delete uploaded S3 files if user lacks permission
-        if (req.files && req.files.length > 0) {
-          await Promise.all(req.files.map(file =>
-            storageService.deleteFile(file.key).catch(err =>
-              logger.warn('Failed to delete unauthorized S3 file', { key: file.key, error: err.message })
-            )
-          ));
-        }
-
-        auditLog('PERMISSION_DENIED', userId, {
-          reason: 'Attempted to upload attachments to another user\'s purchase order',
-          purchaseOrderId: id,
-          orderCreatedBy: order.createdBy,
-          requestedBy: userId
-        });
-
-        return res.status(403).json({
-          success: false,
-          error: 'You can only modify your own purchase orders'
-        });
-      }
-
       // Save attachment metadata to database
       const savedAttachments = [];
       for (const file of req.files) {
@@ -1754,21 +1668,6 @@ router.delete('/:id/attachments/:fileId',
         return res.status(404).json({
           success: false,
           error: 'Purchase order not found'
-        });
-      }
-
-      // Ownership check: verify user has permission to edit this order
-      if (!checkOrderOwnership(order, userId, permissions, 'EDIT')) {
-        auditLog('PERMISSION_DENIED', userId, {
-          reason: 'Attempted to delete attachment from another user\'s purchase order',
-          purchaseOrderId: id,
-          orderCreatedBy: order.createdBy,
-          requestedBy: userId
-        });
-
-        return res.status(403).json({
-          success: false,
-          error: 'You can only modify your own purchase orders'
         });
       }
 

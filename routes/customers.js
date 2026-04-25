@@ -13,31 +13,6 @@ const router = express.Router();
 // Apply sanitization to all routes
 router.use(sanitize);
 
-/**
- * Check if user has permission to access a customer
- * @param {object} customer - The customer object (must have 'createdBy' field)
- * @param {number} userId - The requesting user's ID
- * @param {array} permissions - The user's permissions array
- * @param {string} permissionType - Type of permission ('EDIT', 'DELETE', 'VIEW')
- * @returns {boolean} - True if user has access, false otherwise
- */
-const checkCustomerOwnership = (customer, userId, permissions, permissionType = 'EDIT') => {
-  const { hasPermission } = require('../config/permissionsHierarchy');
-
-  // If user has the _ALL variant, they can access any customer
-  const allPermission = `${permissionType}_CUSTOMERS_ALL`;
-  if (hasPermission(permissions, allPermission)) {
-    return true;
-  }
-
-  // If user has the _OWN variant, check ownership
-  const ownPermission = `${permissionType}_CUSTOMERS_OWN`;
-  if (hasPermission(permissions, ownPermission)) {
-    return customer.createdBy === userId;
-  }
-
-  return false;
-};
 
 // Customer validation schema
 // Customer types: individual, business, project, contract
@@ -61,7 +36,6 @@ router.get('/', requirePermission('VIEW_CUSTOMERS'), async (req, res) => {
   try {
     const { companyId, userId, permissions } = req.user;
     const db = getDbConnection(companyId);
-    const { hasPermission } = require('../config/permissionsHierarchy');
 
     const {
       page = 1,
@@ -74,11 +48,6 @@ router.get('/', requirePermission('VIEW_CUSTOMERS'), async (req, res) => {
     const offset = (page - 1) * limit;
 
     let query = db('customers').select('*');
-
-    // Apply ownership filtering if user only has VIEW_CUSTOMERS_OWN permission
-    if (!hasPermission(permissions, 'VIEW_CUSTOMERS_ALL')) {
-      query = query.where('createdBy', userId);
-    }
 
     // Search filter
     if (search) {
@@ -158,21 +127,6 @@ router.get('/:id',
         return res.status(404).json({
           success: false,
           error: 'Customer not found'
-        });
-      }
-
-      // Check ownership
-      if (!checkCustomerOwnership(customer, userId, permissions, 'VIEW')) {
-        auditLog('PERMISSION_DENIED', userId, {
-          reason: 'Attempted to view another user\'s customer',
-          customerId: id,
-          customerCreatedBy: customer.createdBy,
-          requestedBy: userId
-        });
-
-        return res.status(403).json({
-          success: false,
-          error: 'You can only view your own customers'
         });
       }
 
@@ -291,21 +245,6 @@ router.put('/:id',
         });
       }
 
-      // Check ownership
-      if (!checkCustomerOwnership(existingCustomer, userId, permissions, 'EDIT')) {
-        auditLog('PERMISSION_DENIED', userId, {
-          reason: 'Attempted to edit another user\'s customer',
-          customerId: id,
-          customerCreatedBy: existingCustomer.createdBy,
-          requestedBy: userId
-        });
-
-        return res.status(403).json({
-          success: false,
-          error: 'You can only edit your own customers'
-        });
-      }
-
       // Check if email is being changed to an existing one
       if (req.body.email && req.body.email !== existingCustomer.email) {
         const duplicateCustomer = await db('customers')
@@ -385,21 +324,6 @@ router.delete('/:id',
         return res.status(404).json({
           success: false,
           error: 'Customer not found'
-        });
-      }
-
-      // Check ownership
-      if (!checkCustomerOwnership(customer, userId, permissions, 'DELETE')) {
-        auditLog('PERMISSION_DENIED', userId, {
-          reason: 'Attempted to delete another user\'s customer',
-          customerId: id,
-          customerCreatedBy: customer.createdBy,
-          requestedBy: userId
-        });
-
-        return res.status(403).json({
-          success: false,
-          error: 'You can only delete your own customers'
         });
       }
 
@@ -484,21 +408,6 @@ router.patch('/:id/status',
         });
       }
 
-      // Check ownership
-      if (!checkCustomerOwnership(customer, userId, permissions, 'EDIT')) {
-        auditLog('PERMISSION_DENIED', userId, {
-          reason: 'Attempted to change status of another user\'s customer',
-          customerId: id,
-          customerCreatedBy: customer.createdBy,
-          requestedBy: userId
-        });
-
-        return res.status(403).json({
-          success: false,
-          error: 'You can only change status of your own customers'
-        });
-      }
-
       // Update customer status
       await db('customers')
         .where({ id })
@@ -578,30 +487,6 @@ router.post('/:id/attachments',
         });
       }
 
-      // Check ownership
-      if (!checkCustomerOwnership(customer, userId, permissions, 'EDIT')) {
-        // Delete uploaded S3 files if permission check fails
-        if (req.files && req.files.length > 0) {
-          await Promise.all(req.files.map(file =>
-            storageService.deleteFile(file.key).catch(err =>
-              logger.warn('Failed to delete unauthorized customer attachment', { key: file.key })
-            )
-          ));
-        }
-
-        auditLog('PERMISSION_DENIED', userId, {
-          reason: 'Attempted to upload attachments to another user\'s customer',
-          customerId: id,
-          customerCreatedBy: customer.createdBy,
-          requestedBy: userId
-        });
-
-        return res.status(403).json({
-          success: false,
-          error: 'You can only upload attachments to your own customers'
-        });
-      }
-
       // Save attachment metadata to database
       const savedAttachments = [];
       for (const file of req.files) {
@@ -660,21 +545,6 @@ router.get('/:id/attachments',
         return res.status(404).json({
           success: false,
           error: 'Customer not found'
-        });
-      }
-
-      // Check ownership
-      if (!checkCustomerOwnership(customer, userId, permissions, 'VIEW')) {
-        auditLog('PERMISSION_DENIED', userId, {
-          reason: 'Attempted to view attachments from another user\'s customer',
-          customerId: id,
-          customerCreatedBy: customer.createdBy,
-          requestedBy: userId
-        });
-
-        return res.status(403).json({
-          success: false,
-          error: 'You can only view attachments from your own customers'
         });
       }
 
@@ -737,21 +607,6 @@ router.delete('/:id/attachments/:fileId',
         return res.status(404).json({
           success: false,
           error: 'Customer not found'
-        });
-      }
-
-      // Check ownership
-      if (!checkCustomerOwnership(customer, userId, permissions, 'EDIT')) {
-        auditLog('PERMISSION_DENIED', userId, {
-          reason: 'Attempted to delete attachment from another user\'s customer',
-          customerId: id,
-          customerCreatedBy: customer.createdBy,
-          requestedBy: userId
-        });
-
-        return res.status(403).json({
-          success: false,
-          error: 'You can only delete attachments from your own customers'
         });
       }
 
