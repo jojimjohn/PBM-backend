@@ -329,15 +329,11 @@ router.post('/', requirePermission('MANAGE_ROLES'), async (req, res) => {
       });
     }
 
-    // Validate permissions
+    // Validate permissions — strip unknown keys rather than hard-failing
     const permissionValidation = validatePermissions(permissions);
-    if (!permissionValidation.valid) {
-      return res.status(400).json({
-        success: false,
-        error: 'Invalid permissions',
-        invalidKeys: permissionValidation.invalidKeys
-      });
-    }
+    const cleanedPermissions = permissionValidation.valid
+      ? permissions
+      : permissions.filter(p => !permissionValidation.invalidKeys.includes(p));
 
     // Check user has all permissions they're trying to assign
     const userPermissions = req.user.permissions || [];
@@ -369,7 +365,7 @@ router.post('/', requirePermission('MANAGE_ROLES'), async (req, res) => {
       name: name.trim(),
       slug,
       description: description?.trim() || null,
-      permissions: JSON.stringify(permissions),
+      permissions: JSON.stringify(cleanedPermissions),
       hierarchy_level,
       is_system: false,
       is_active: true,
@@ -513,15 +509,14 @@ router.put('/:id', requirePermission('MANAGE_ROLES'), async (req, res) => {
     }
 
     if (permissions !== undefined) {
+      // Strip any stale permission keys (e.g. old _ALL/_OWN variants) rather
+      // than hard-failing — roles saved before the RBAC simplification may
+      // contain keys that no longer exist in config.
       const permissionValidation = validatePermissions(permissions);
-      if (!permissionValidation.valid) {
-        return res.status(400).json({
-          success: false,
-          error: 'Invalid permissions',
-          invalidKeys: permissionValidation.invalidKeys
-        });
-      }
-      updates.permissions = JSON.stringify(permissions);
+      const cleanedPermissions = permissionValidation.valid
+        ? permissions
+        : permissions.filter(p => !permissionValidation.invalidKeys.includes(p));
+      updates.permissions = JSON.stringify(cleanedPermissions);
     }
 
     if (hierarchy_level !== undefined && !existingRole.is_system) {
