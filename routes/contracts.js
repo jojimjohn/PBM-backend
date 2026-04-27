@@ -46,12 +46,12 @@ function getEffectiveStatus(contract) {
   }
 
   // Contract is currently within valid date range
-  // Return 'active' if it was set to active or draft and dates are valid
-  if (contract.status === 'active' || contract.status === 'draft') {
+  // 'expired' status is overridden by dates — if end date was extended, treat as active
+  if (contract.status === 'active' || contract.status === 'draft' || contract.status === 'expired') {
     return 'active';
   }
 
-  // For any other status, return as-is
+  // For any other status (terminated, renewed), return as-is
   return contract.status;
 }
 
@@ -818,6 +818,17 @@ router.put('/:id',
       }
 
       const { locations = [], ...contractData } = req.body;
+
+      // Auto-reset expired status when end date is extended to the future
+      if (contractData.status === 'expired' && contractData.endDate) {
+        const today = new Date();
+        today.setHours(0, 0, 0, 0);
+        const newEndDate = new Date(contractData.endDate);
+        newEndDate.setHours(23, 59, 59, 999);
+        if (newEndDate >= today) {
+          contractData.status = 'active';
+        }
+      }
 
       // Update contract basic info
       await db('contracts')
