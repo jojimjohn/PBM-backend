@@ -16,10 +16,10 @@ const generateToken = (payload) => {
 };
 
 // Generate refresh token
-const generateRefreshToken = (payload) => {
+const generateRefreshToken = (payload, expiresIn = process.env.JWT_REFRESH_EXPIRES_IN || '7d') => {
   try {
     return jwt.sign(payload, process.env.JWT_REFRESH_SECRET, {
-      expiresIn: process.env.JWT_REFRESH_EXPIRES_IN || '7d',
+      expiresIn,
       issuer: 'petroleum-business-api',
       audience: 'petroleum-business-client'
     });

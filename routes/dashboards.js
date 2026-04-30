@@ -27,7 +27,7 @@ function getDateRanges() {
 // ============================================================================
 // EXECUTIVE DASHBOARD
 // ============================================================================
-router.get('/executive', requirePermission('VIEW_SETTINGS'), async (req, res) => {
+router.get('/executive', requirePermission('VIEW_REPORTS'), async (req, res) => {
   try {
     const db = getDbConnection(req.user.companyId);
     const { today, monthStart, yearStart } = getDateRanges();
@@ -145,7 +145,7 @@ router.get('/executive', requirePermission('VIEW_SETTINGS'), async (req, res) =>
 // ============================================================================
 // OPERATIONS DASHBOARD
 // ============================================================================
-router.get('/operations', requirePermission('VIEW_SETTINGS'), async (req, res) => {
+router.get('/operations', requirePermission('VIEW_REPORTS'), async (req, res) => {
   try {
     const db = getDbConnection(req.user.companyId);
     const { today } = getDateRanges();
@@ -282,7 +282,7 @@ router.get('/operations', requirePermission('VIEW_SETTINGS'), async (req, res) =
 // ============================================================================
 // ACCOUNTANT DASHBOARD
 // ============================================================================
-router.get('/accountant', requirePermission('VIEW_SETTINGS'), async (req, res) => {
+router.get('/accountant', requirePermission('VIEW_REPORTS'), async (req, res) => {
   try {
     const db = getDbConnection(req.user.companyId);
     const { today, monthStart } = getDateRanges();
@@ -387,7 +387,7 @@ router.get('/accountant', requirePermission('VIEW_SETTINGS'), async (req, res) =
 // ============================================================================
 // SALES DASHBOARD
 // ============================================================================
-router.get('/sales', requirePermission('VIEW_SETTINGS'), async (req, res) => {
+router.get('/sales', requirePermission('VIEW_REPORTS'), async (req, res) => {
   try {
     const db = getDbConnection(req.user.companyId);
     const { today, monthStart, yearStart } = getDateRanges();

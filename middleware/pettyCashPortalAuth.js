@@ -18,7 +18,8 @@ const { getDbConnection, getDbConnectionByCompanyId } = require('../config/datab
 const winston = require('winston');
 
 // JWT configuration for petty cash portal (shorter expiry for security)
-const PC_JWT_SECRET = process.env.PC_JWT_SECRET || process.env.JWT_SECRET || 'petty-cash-portal-secret';
+const PC_JWT_SECRET = process.env.PC_JWT_SECRET;
+if (!PC_JWT_SECRET) throw new Error('PC_JWT_SECRET environment variable is required');
 const PC_JWT_EXPIRES_IN = '4h';
 
 // Security constants

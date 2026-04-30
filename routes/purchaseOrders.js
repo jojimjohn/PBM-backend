@@ -319,7 +319,6 @@ router.get('/:id',
       }
 
       // Get order items
-      logger.info(`🔍 Fetching items for PO ID: ${id}`);
       const items = await db('purchase_order_items')
         .leftJoin('materials', 'purchase_order_items.materialId', 'materials.id')
         .select(
@@ -332,9 +331,6 @@ router.get('/:id',
         )
         .where('purchase_order_items.purchaseOrderId', id)
         .orderBy('purchase_order_items.id');
-
-      logger.info(`📦 Found ${items.length} items for PO #${id}`);
-      logger.info(`📋 Items data:`, JSON.stringify(items, null, 2));
 
       auditLog('PURCHASE_ORDER_VIEWED', req.user.userId, {
         purchaseOrderId: id,
@@ -390,15 +386,6 @@ router.get('/:id',
           contractSavings: parseFloat(item.contractSavings) || 0
         }))
       };
-
-      logger.info(`✅ Sending response with ${items.length} items`);
-      logger.info('💰 PO financial values being sent:', {
-        orderNumber: formattedOrder.orderNumber,
-        subtotal: formattedOrder.subtotal,
-        taxAmount: formattedOrder.taxAmount,
-        totalAmount: formattedOrder.totalAmount,
-        shippingCost: formattedOrder.shippingCost
-      });
 
       res.json({
         success: true,

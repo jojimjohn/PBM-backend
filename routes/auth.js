@@ -910,7 +910,7 @@ router.post('/impersonate/:userId', authenticateToken, async (req, res) => {
       email: targetUser.email,
       tokenType: 'refresh',
       impersonated_by: actorId
-    });
+    }, '1h'); // cap impersonation refresh to match access token window
 
     setAuthCookies(res, accessToken, refreshToken);
 
@@ -1999,20 +1999,6 @@ router.post('/mfa/verify', async (req, res) => {
 
 // Get user permissions based on role_id (database) or role string (legacy fallback)
 const getUserPermissions = async (roleOrRoleId, companyId, db = null) => {
-  // In development mode with GRANT_ALL_PERMISSIONS=true, grant all permissions
-  if (process.env.NODE_ENV === 'development' && process.env.GRANT_ALL_PERMISSIONS === 'true') {
-    console.log('🔓 DEVELOPMENT MODE: Granting all permissions');
-    return [
-      // All permissions for development testing — simplified MANAGE_* set
-      'MANAGE_USERS', 'MANAGE_ROLES', 'MANAGE_COMPANIES', 'SWITCH_COMPANIES',
-      'MANAGE_SUPPLIERS', 'MANAGE_CUSTOMERS', 'MANAGE_MATERIALS', 'MANAGE_INVENTORY',
-      'MANAGE_CONTRACTS', 'MANAGE_COLLECTIONS', 'MANAGE_SALES', 'MANAGE_PURCHASE',
-      'MANAGE_WASTAGE', 'MANAGE_PETTY_CASH', 'MANAGE_FINANCE', 'MANAGE_INVOICES',
-      'MANAGE_BANKING', 'MANAGE_REPORTS', 'MANAGE_SETTINGS', 'MANAGE_BACKUPS',
-      'MANAGE_PROJECTS', 'MANAGE_EMPLOYEES', 'MANAGE_VEHICLES', 'MANAGE_TANK_LOGS', 'MANAGE_EXPENSE_SHEETS'
-    ];
-  }
-
   // Try to fetch permissions from database roles table
   if (typeof roleOrRoleId === 'number' && roleOrRoleId > 0) {
     try {

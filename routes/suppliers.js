@@ -205,7 +205,6 @@ router.post('/',
   requirePermission('CREATE_SUPPLIERS'),
   async (req, res) => {
     try {
-      console.log('Creating supplier - raw request body:', JSON.stringify(req.body, null, 2));
       const { companyId, userId } = req.user;
       const db = getDbConnection(companyId);
 
@@ -268,7 +267,6 @@ router.post('/',
         updated_at: new Date()
       };
 
-      console.log('Transformed supplier data for DB insertion:', JSON.stringify(supplierData, null, 2));
       const [supplierId] = await db('suppliers').insert(supplierData);
 
       const newSupplier = await db('suppliers')
