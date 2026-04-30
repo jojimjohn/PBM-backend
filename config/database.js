@@ -25,11 +25,10 @@ const dbConfig = {
     multipleStatements: false, // Keep false for security
   },
   pool: {
-    // PERFORMANCE: Pool sizing for 100 users
-    // Formula: (concurrent_users × avg_queries_per_request) / 2
-    // 100 users × 3 queries × 0.5 = 150, rounded up with headroom
-    min: parseInt(process.env.DB_POOL_MIN) || 5,
-    max: parseInt(process.env.DB_POOL_MAX) || 100,
+    // Pool sizing: two company databases share MySQL's connection limit.
+    // At max 40 per DB, worst case = 80 connections — well within MySQL's default 151.
+    min: parseInt(process.env.DB_POOL_MIN) || 2,
+    max: parseInt(process.env.DB_POOL_MAX) || 40,
     // PERFORMANCE: Faster timeout to fail fast and free resources
     createTimeoutMillis: parseInt(process.env.DB_CREATE_TIMEOUT) || 5000,
     acquireTimeoutMillis: parseInt(process.env.DB_ACQUIRE_TIMEOUT) || 10000,

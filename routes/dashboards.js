@@ -24,6 +24,14 @@ function getDateRanges() {
   return { today, monthStart, yearStart };
 }
 
+// Guard: all dashboard routes require a company context in the JWT
+router.use((req, res, next) => {
+  if (!req.user?.companyId) {
+    return res.status(400).json({ success: false, error: 'Company context required' });
+  }
+  next();
+});
+
 // ============================================================================
 // EXECUTIVE DASHBOARD
 // ============================================================================

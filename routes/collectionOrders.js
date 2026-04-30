@@ -1494,7 +1494,7 @@ router.post('/:id/finalize-wcn',
         .where({ 'collection_items.collectionOrderId': id });
 
       // DEBUG: Log initial items from database
-      logger.info('WCN Finalization - Initial DB items', {
+      logger.debug('WCN Finalization - Initial DB items', {
         collectionOrderId: id,
         itemCount: items.length,
         items: items.map(i => ({
@@ -1511,7 +1511,7 @@ router.post('/:id/finalize-wcn',
       // If verified items were provided, update the quantities
       if (verifiedItems && verifiedItems.length > 0) {
         // DEBUG: Log verified items from frontend
-        logger.info('WCN Finalization - Verified items from frontend', {
+        logger.debug('WCN Finalization - Verified items from frontend', {
           collectionOrderId: id,
           verifiedItemsCount: verifiedItems.length,
           verifiedItems: verifiedItems.map(vi => ({
@@ -1523,7 +1523,7 @@ router.post('/:id/finalize-wcn',
           }))
         });
 
-        logger.info('Processing verified quantities for WCN finalization', {
+        logger.debug('Processing verified quantities for WCN finalization', {
           collectionOrderId: id,
           verifiedItemsCount: verifiedItems.length,
           newItemsCount: verifiedItems.filter(vi => vi.isNewItem).length
@@ -1548,7 +1548,7 @@ router.post('/:id/finalize-wcn',
         });
 
         // DEBUG: Log verifiedMap contents
-        logger.info('WCN Finalization - VerifiedMap contents', {
+        logger.debug('WCN Finalization - VerifiedMap contents', {
           collectionOrderId: id,
           mapSize: verifiedMap.size,
           entries: Array.from(verifiedMap.entries()).map(([key, val]) => ({
@@ -1564,7 +1564,7 @@ router.post('/:id/finalize-wcn',
           const verified = verifiedMap.get(itemMaterialId);
 
           // DEBUG: Log each item lookup
-          logger.info('WCN Finalization - Item lookup', {
+          logger.debug('WCN Finalization - Item lookup', {
             itemId: item.id,
             materialId: itemMaterialId,
             originalCollectedQuantity: item.collectedQuantity,
@@ -1576,7 +1576,7 @@ router.post('/:id/finalize-wcn',
           });
 
           if (verified && !verified.isNewItem) {
-            logger.info('Applying verified quantity to collection item', {
+            logger.debug('Applying verified quantity to collection item', {
               materialId: itemMaterialId,
               originalCollectedQuantity: item.collectedQuantity,
               newVerifiedQuantity: verified.verifiedQuantity
@@ -1645,7 +1645,7 @@ router.post('/:id/finalize-wcn',
       items = items.filter(item => (parseFloat(item.collectedQuantity) || 0) > 0);
 
       // DEBUG: Log items after verification mapping and filtering
-      logger.info('WCN Finalization - Items after verification mapping', {
+      logger.debug('WCN Finalization - Items after verification mapping', {
         collectionOrderId: id,
         itemCount: items.length,
         items: items.map(i => ({
@@ -2046,7 +2046,7 @@ router.post('/:id/finalize-wcn',
 
         // 4. Create PO items from collection items
         // DEBUG: Log items before creating PO items
-        logger.info('WCN Finalization - Creating PO items', {
+        logger.debug('WCN Finalization - Creating PO items', {
           purchaseOrderId,
           itemCount: items.length,
           items: items.map(item => ({
@@ -2082,7 +2082,7 @@ router.post('/:id/finalize-wcn',
         });
 
         // DEBUG: Log PO items being inserted with source quantity info
-        logger.info('WCN Finalization - PO items to insert', {
+        logger.debug('WCN Finalization - PO items to insert', {
           purchaseOrderId,
           poItems: poItems.map((pi, idx) => ({
             materialId: pi.materialId,

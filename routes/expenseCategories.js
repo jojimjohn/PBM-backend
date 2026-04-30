@@ -12,6 +12,7 @@ const router = express.Router();
 const { requirePermission } = require('../middleware/auth');
 const { validate } = require('../middleware/validation');
 const { getRepositoryFactory } = require('../repositories/RepositoryFactory');
+const { parsePagination } = require('../utils/pagination');
 const Joi = require('joi');
 const winston = require('winston');
 
@@ -77,9 +78,9 @@ router.get('/', async (req, res) => {
       filters.is_active = req.query.is_active === 'true';
     }
 
+    const { page, limit } = parsePagination(req.query, 100);
     const pagination = {
-      page: parseInt(req.query.page) || 1,
-      limit: parseInt(req.query.limit) || 100,
+      page, limit,
       orderBy: req.query.orderBy || 'sort_order',
       orderDirection: req.query.orderDirection || 'asc',
     };

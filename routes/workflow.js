@@ -804,7 +804,7 @@ router.get('/activity',
   async (req, res) => {
     const user = req.user;
     const companyId = user.companyId;
-    const limit = parseInt(req.query.limit) || 50;
+    const limit = Math.min(200, parseInt(req.query.limit, 10) || 50);
 
     try {
       const db = getDbConnection(companyId);
@@ -1390,7 +1390,7 @@ router.get('/notifications',
   async (req, res) => {
     const user = req.user;
     const companyId = user.companyId;
-    const limit = parseInt(req.query.limit) || 10;
+    const limit = Math.min(200, parseInt(req.query.limit, 10) || 10);
 
     try {
       const db = getDbConnection(companyId);

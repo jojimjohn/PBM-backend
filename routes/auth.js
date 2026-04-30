@@ -865,7 +865,7 @@ router.post('/impersonate/:userId', authenticateToken, async (req, res) => {
     }
 
     const db = getDbConnection(companyId);
-    const targetUser = await db('users').where({ id: targetId }).first();
+    const targetUser = await db('users').where({ id: targetId, companyId }).first();
     if (!targetUser) {
       return res.status(404).json({ success: false, error: 'Target user not found' });
     }

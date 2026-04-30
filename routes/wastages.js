@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const { getDbConnection } = require('../config/database');
 const { requirePermission, requireAnyPermission } = require('../middleware/auth');
+const { parsePagination } = require('../utils/pagination');
 const { validate, validateParams } = require('../middleware/validation');
 const { getRepositoryFactory } = require('../repositories/RepositoryFactory');
 const { projectFilter } = require('../middleware/projectFilter');
@@ -73,10 +74,8 @@ router.get('/', requirePermission('VIEW_WASTAGE'), projectFilter, async (req, re
       projectFilter: req.projectFilter
     };
 
-    const pagination = {
-      page: req.query.page || 1,
-      limit: req.query.limit || 50
-    };
+    const { page, limit } = parsePagination(req.query, 50);
+    const pagination = { page, limit };
 
     const result = await wastageRepository.findAllWithDetails(filters, pagination);
     

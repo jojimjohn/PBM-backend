@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const { getDbConnection } = require('../config/database');
 const { requirePermission } = require('../middleware/auth');
+const { parsePagination } = require('../utils/pagination');
 const { hasPermission } = require('../config/permissionsHierarchy');
 const { validate, validateParams } = require('../middleware/validation');
 const { getRepositoryFactory } = require('../repositories/RepositoryFactory');
@@ -58,9 +59,9 @@ router.get('/', requirePermission('VIEW_PROJECTS'), async (req, res) => {
       search: req.query.search
     };
 
+    const { page, limit } = parsePagination(req.query, 50);
     const pagination = {
-      page: req.query.page || 1,
-      limit: req.query.limit || 50,
+      page, limit,
       orderBy: req.query.orderBy || 'created_at',
       orderDirection: req.query.orderDirection || 'desc'
     };

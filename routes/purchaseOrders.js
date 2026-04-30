@@ -8,6 +8,7 @@ const { uploadMultiple, deleteFile, fileExists, uploadMultipleToS3, requireFiles
 const storageService = require('../services/storageService');
 const { purchaseOrderAttachments } = require('../repositories/AttachmentRepository');
 const { createBatch } = require('../utils/fifoAllocator');
+const { parsePagination } = require('../utils/pagination');
 const { cacheService } = require('../utils/cache');
 const { getNextSequence } = require('../utils/sequenceGenerator');
 const path = require('path');
@@ -97,17 +98,14 @@ router.get('/', requirePermission('VIEW_PURCHASE'), projectFilter, async (req, r
     const { companyId } = req.user;
     const db = getDbConnection(companyId);
 
+    const { page, limit, offset } = parsePagination(req.query, 50);
     const {
-      page = 1,
-      limit = 50,
       search = '',
       supplierId = '',
       status = '',
       fromDate = '',
       toDate = ''
     } = req.query;
-
-    const offset = (page - 1) * limit;
 
     // PERFORMANCE: Removed N+1 correlated subquery for itemCount
     // Item counts will be batch loaded after fetching main results
